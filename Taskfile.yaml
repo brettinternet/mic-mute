@@ -1,0 +1,45 @@
+---
+version: "3"
+
+vars:
+  PROJECT_DIR:
+    sh: git rev-parse --show-toplevel
+
+env:
+  ROOT_DIR: "{{.PROJECT_DIR}}"
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task -l
+
+  init:
+    desc: Install dependencies and setup environment
+    cmds:
+      - task: dependencies
+
+  dependencies:
+    desc: Setup project dependencies
+    cmds:
+        - cargo install cargo-watch
+
+  start:
+    cmds:
+      - cargo watch -x build
+    env:
+      RUST_BACKTRACE: 1
+      RUST_LOG: trace
+
+  setup:
+    cmds:
+      - cargo clippy
+      - cargo test
+
+  build:
+    cmds:
+      - cargo build
+
+  release:
+    cmds:
+      - cargo build --release

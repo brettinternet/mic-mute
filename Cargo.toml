@@ -1,0 +1,15 @@
+[package]
+name = "mvcm"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+env_logger = "0.10"
+tray-item = "0.7" # system tray
+dark-light = "1.0" # detect appearance mode
+coreaudio-rs = "0.11"
+core-foundation-sys = "0.8"
+# notify-rust = "4" # system notifications
