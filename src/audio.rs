@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringGetCString, CFStringRef};
 use coreaudio::audio_unit::macos_helpers::{
     get_audio_device_ids, get_device_name, get_supported_physical_stream_formats,
@@ -6,7 +7,8 @@ use coreaudio::sys::{
     kAudioDevicePropertyDeviceNameCFString, kAudioDevicePropertyMute,
     kAudioDevicePropertyScopeInput, kAudioDevicePropertyScopeOutput,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMaster, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
     kAudioQueueDeviceProperty_NumberChannels, kAudioStreamPropertyAvailablePhysicalFormats,
     kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat, AudioBufferList,
     AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
@@ -14,102 +16,136 @@ use coreaudio::sys::{
     AudioStreamBasicDescription, AudioStreamRangedDescription,
 };
 use log::{debug, error, trace};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::ptr::null;
 
+#[derive(Debug)]
+pub struct AudioError {
+    pub msg: String,
+}
+
+// /// Trait that describes an audio input device.
+// pub trait AudioInputDeviceTrait {
+//     /// Collect names of audio devices
+//     fn names(&self) -> Result<Vec<String>>;
+
+//     /// Sets the mute state of the audio device.
+//     fn set_mute(&self, audio_device_id: u32, state: bool) -> Result<bool>;
+
+//     /// Set the mute state for all audio devices.
+//     fn set_mute_all(&self, state: bool) -> Result<bool>;
+// }
+
+// impl Debug for dyn AudioInputDeviceTrait {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+//         f.debug_struct("AudioInputDevice")
+//             .field("names", &self.names().unwrap())
+//             .finish()
+//     }
+// }
+
 macro_rules! try_status_or_return {
     ($status:expr) => {
-        if $status != kAudioHardwareNoError as i32 {
-            return Err(format!(
-                "Error: {}",
-                coreaudio::Error::from_os_status($status).err().unwrap()
-            ));
+        match $status {
+            status if status == kAudioHardwareUnknownPropertyError as i32 => {}
+            status if status == kAudioHardwareNoError as i32 => {}
+            status => {
+                return Err(anyhow!(
+                    "Error: {}",
+                    coreaudio::Error::from_os_status(status).err().unwrap()
+                ));
+            }
         }
     };
 }
 
-pub struct AudioController<F>
-where
-    F: Fn(String),
-{
-    handle_error: F,
+pub struct AudioController {
+    pub muted: bool,
 }
 
-impl<F> AudioController<F>
-where
-    F: Fn(String),
-{
-    pub fn new(handle_error: F) -> Self {
+impl Default for AudioController {
+    fn default() -> Self {
+        Self { muted: false }
+    }
+}
+
+impl Debug for AudioController {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        f.debug_struct("AudioController")
+            .field("names", &self.names().unwrap())
+            .field("muted", &self.muted)
+            .finish()
+    }
+}
+
+impl AudioController {
+    pub fn new() -> Result<Self> {
+        let mut controller = Self {
+            ..Default::default()
+        };
+        trace!("Creating audio controller");
+        let names = controller.names()?;
+        trace!("Found {} devices: {}", names.len(), names.join(", "));
+        controller.muted = controller.is_muted_all()?;
+        Ok(controller)
+    }
+
+    fn names(&self) -> Result<Vec<String>> {
         let mut names = vec![];
         // match AudioController::<F>::get_input_device_ids() {
-        match get_audio_device_ids() {
-            Ok(ids) => {
-                for id in ids {
-                    match get_device_name(id) {
-                        Ok(name) => {
-                            names.push(format!("{}: {}", id, name));
-                            // match get_supported_physical_stream_formats(id) {
-                            match AudioController::<F>::get_asbd(id) {
-                                Ok(formats) => {
-                                    for fmt in formats {
-                                        trace!("{}: {} - {:?}", id, name, fmt);
-                                    }
-                                }
-                                _ => log::warn!(
-                                    "didn't find get_supported_physical_stream_formats for {}",
-                                    id
-                                ),
-                            }
-                        }
-                        Err(_) => error!("Unable to collect name for device {}", id),
-                    }
-                }
-            }
-            Err(_) => error!("Failed to get device IDs"),
+        let ids = get_audio_device_ids().map_err(anyhow::Error::msg)?;
+        for id in ids {
+            let name = get_device_name(id).map_err(anyhow::Error::msg)?;
+            names.push(format!("{}: {}", id, name));
+            // let formats = AudioController::get_asbd(id)?;
+            // for fmt in formats {
+            //     trace!("{}: {} - {:?}", id, name, fmt);
+            // }
         }
-        trace!("Found {} devices: {}", names.len(), names.join(", "));
-        Self { handle_error }
+        Ok(names)
     }
 
-    fn get_asbd(id: AudioDeviceID) -> Result<Vec<AudioStreamRangedDescription>, String> {
-        // Get available formats.
-        let property_address = AudioObjectPropertyAddress {
-            mSelector: kAudioStreamPropertyAvailablePhysicalFormats,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMaster,
-        };
-        let allformats = unsafe {
-            // property_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
-            let mut data_size = 0u32;
-            let status = AudioObjectGetPropertyDataSize(
-                id,
-                &property_address as *const _,
-                0,
-                null(),
-                &mut data_size as *mut _,
-            );
-            try_status_or_return!(status);
-            let n_formats = data_size as usize / mem::size_of::<AudioStreamRangedDescription>();
-            let mut formats: Vec<AudioStreamRangedDescription> = vec![];
-            formats.reserve_exact(n_formats as usize);
-            formats.set_len(n_formats);
+    // fn get_asbd(&self, id: AudioDeviceID) -> Result<Vec<AudioStreamRangedDescription>> {
+    //     // Get available formats.
+    //     let property_address = AudioObjectPropertyAddress {
+    //         mSelector: kAudioStreamPropertyAvailablePhysicalFormats,
+    //         mScope: kAudioDevicePropertyScopeInput,
+    //         mElement: kAudioObjectPropertyElementMaster,
+    //     };
+    //     let allformats = unsafe {
+    //         // property_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
+    //         let mut data_size = 0u32;
+    //         let status = AudioObjectGetPropertyDataSize(
+    //             id,
+    //             &property_address as *const _,
+    //             0,
+    //             null(),
+    //             &mut data_size as *mut _,
+    //         );
+    //         try_status_or_return!(status);
+    //         let n_formats = data_size as usize / mem::size_of::<AudioStreamRangedDescription>();
+    //         let mut formats: Vec<AudioStreamRangedDescription> = vec![];
+    //         formats.reserve_exact(n_formats as usize);
+    //         formats.set_len(n_formats);
 
-            let status = AudioObjectGetPropertyData(
-                id,
-                &property_address as *const _,
-                0,
-                null(),
-                &data_size as *const _ as *mut _,
-                formats.as_mut_ptr() as *mut _,
-            );
-            try_status_or_return!(status);
-            formats
-        };
-        Ok(allformats)
-    }
+    //         let status = AudioObjectGetPropertyData(
+    //             id,
+    //             &property_address as *const _,
+    //             0,
+    //             null(),
+    //             &data_size as *const _ as *mut _,
+    //             formats.as_mut_ptr() as *mut _,
+    //         );
+    //         try_status_or_return!(status);
+    //         formats
+    //     };
+    //     Ok(allformats)
+    // }
 
-    fn get_input_device_ids() -> Result<Vec<AudioDeviceID>, String> {
-        let audio_device_ids = get_audio_device_ids().unwrap();
+    fn get_input_device_ids(&self) -> Result<Vec<AudioDeviceID>> {
+        let audio_device_ids = get_audio_device_ids().map_err(anyhow::Error::msg)?;
         trace!(
             "All {} audio device IDs {:?}",
             audio_device_ids.len(),
@@ -174,7 +210,10 @@ where
         Ok(input_device_ids)
     }
 
-    fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<bool, String> {
+    fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
+        let name = get_device_name(audio_device_id).map_err(anyhow::Error::msg)?;
+        trace!("BEFORE Device {} - {}", audio_device_id, name);
+
         let property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
@@ -205,7 +244,24 @@ where
         Ok(muted == 1)
     }
 
-    fn mute(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID, String> {
+    fn is_muted_all(&self) -> Result<bool> {
+        for id in &self.get_input_device_ids()? {
+            let state = self.is_muted(*id)?;
+            trace!(
+                "Input device {} is {}",
+                id,
+                if state { "muted" } else { "unmuted" },
+            );
+            if state {
+                continue;
+            } else {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn mute(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID> {
         let property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
@@ -223,12 +279,22 @@ where
                 &data as *const _ as _,
             )
         };
-        try_status_or_return!(status);
+
+        trace!("RESULT FROM STATUS: {}", status);
+
+        // try_status_or_return!(status);
+        match status {
+            status if status == kAudioHardwareNoError as i32 => {}
+            status if status == kAudioHardwareUnknownPropertyError as i32 => {}
+            result => {
+                error!("RESULT: {}", result);
+            }
+        }
 
         trace!(
             "Device {} now registers as {}",
             audio_device_id,
-            match AudioController::is_muted(self, audio_device_id) {
+            match self.is_muted(audio_device_id) {
                 Ok(is_muted) if is_muted => "muted",
                 _ => "unmuted",
             }
@@ -236,25 +302,24 @@ where
         Ok(audio_device_id)
     }
 
-    pub fn mute_all(&self, state: bool) -> &Self {
-        for id in &mut AudioController::<F>::get_input_device_ids().unwrap() {
-            let name = get_device_name(*id).unwrap_or("unknown".to_string());
-            match AudioController::mute(self, *id, state) {
-                Ok(_) => {
-                    trace!(
-                        "Successfully {} audio device {}: {}",
-                        if state { "muted" } else { "unmuted" },
-                        id,
-                        name
-                    )
-                }
-                Err(_) => (self.handle_error)(format!(
-                    "Failed to toggle mute to {} for audio {}: {}",
-                    state, id, name
-                )),
-            };
+    pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
+        for id in &self.get_input_device_ids()? {
+            let name = get_device_name(*id).map_err(anyhow::Error::msg)?;
+            trace!("Muting {}", name);
+            self.mute(*id, state)?;
+            trace!(
+                "Successfully {} audio device {}: {}",
+                if state { "muted" } else { "unmuted" },
+                id,
+                name
+            )
         }
-        self
+        self.muted = state;
+        Ok(self)
+    }
+
+    pub fn toggle(&mut self) -> Result<&Self> {
+        self.mute_all(!self.muted)
     }
 
     // fn add_input_property_listener()

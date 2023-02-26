@@ -8,8 +8,15 @@ edition = "2021"
 [dependencies]
 log = "0.4"
 env_logger = "0.10"
-tray-item = "0.7" # system tray
-dark-light = "1.0" # detect appearance mode
-coreaudio-rs = "0.11"
-core-foundation-sys = "0.8"
+anyhow = "1.0.69" # error handling
+tao = "0.18" # window manager and event loop
+tray-icon = "0.4" # system tray
+image = "0.24" # icon image manipulation
 # notify-rust = "4" # system notifications
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.24"
+objc = "0.2"
+dark-light = "1.0" # detect appearance mode
+coreaudio-rs = "0.11" # macos audio
+core-foundation-sys = "0.8"

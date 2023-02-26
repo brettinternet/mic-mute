@@ -25,8 +25,17 @@ tasks:
         - cargo install cargo-watch
 
   start:
+    aliases:
+      - watch
     cmds:
       - cargo watch -x build
+    env:
+      RUST_BACKTRACE: 1
+      RUST_LOG: trace
+
+  run:
+    cmds:
+      - ./target/debug/mvcm
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace

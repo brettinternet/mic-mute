@@ -6,7 +6,7 @@
   - Some virtual devices are unable to mute for now
 - [ ] Mute newly connected input devices
 - [ ] While active, keep input devices muted
-- [ ] Show mute status in tray
+- [x] Show mute status in tray
 - [ ] Show mute status in small popup window
 - [ ] Provide global hotkey muting
 
