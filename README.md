@@ -8,7 +8,8 @@
 - [ ] While active, keep input devices muted
 - [x] Show mute status in tray
 - [ ] Show mute status in small popup window
-- [ ] Provide global hotkey muting
+- [x] Provide global hotkey muting
+- [ ] Add configurable settings (hotkey, window position)
 
 ## Background
 

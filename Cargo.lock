@@ -1030,6 +1030,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
+name = "global-hotkey"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da26790f92f0be4f7a894ca1d079140827a75a9fd25eb9912913c4853696ce2"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types",
+ "once_cell",
+ "thiserror",
+ "windows-sys 0.45.0",
+ "x11-dl",
+]
+
+[[package]]
 name = "gobject-sys"
 version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1419,6 +1433,7 @@ dependencies = [
  "coreaudio-rs",
  "dark-light",
  "env_logger",
+ "global-hotkey",
  "image",
  "log",
  "objc",

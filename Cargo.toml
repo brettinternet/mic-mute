@@ -12,6 +12,7 @@ anyhow = "1.0.69" # error handling
 tao = "0.18" # window manager and event loop
 tray-icon = "0.4" # system tray
 image = "0.24" # icon image manipulation
+global-hotkey = "0.1"
 # notify-rust = "4" # system notifications
 
 [target.'cfg(target_os = "macos")'.dependencies]

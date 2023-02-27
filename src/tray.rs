@@ -3,7 +3,10 @@ use anyhow::{Context, Result};
 use log::trace;
 use tray_icon::{
     icon::Icon,
-    menu::{Menu, MenuItem},
+    menu::{
+        accelerator::{Accelerator, Code, Modifiers},
+        Menu, MenuItem,
+    },
     TrayIcon, TrayIconBuilder,
 };
 
@@ -62,7 +65,8 @@ impl Tray {
         let app_name = config::get_app_name();
         let icon = get_icon(muted)?;
         let tray_menu = Menu::new();
-        let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, None);
+        let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
+        let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
         let quit = MenuItem::new("Exit".to_owned(), true, None);
         tray_menu.append_items(&[&toggle_mute, &quit]);
 

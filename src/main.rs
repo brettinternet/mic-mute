@@ -48,13 +48,9 @@ fn main() {
                 Ok(Message::ToggleMic) => {
                     trace!("ToggleMic message received");
                     let mut controller = message_controller.write().unwrap();
-                    trace!("TOGGLE MIC RECEIVED -before {}", controller.muted);
                     controller.toggle().unwrap();
-                    trace!("TRAY POISONED? {}", tray.is_poisoned());
                     let mut tray = tray.write().unwrap();
-                    trace!("TRAY LOCK---------");
                     tray.update(controller.muted).unwrap();
-                    trace!("TOGGLE MIC RECEIVED -after");
                 }
                 Ok(Message::Exit) => {
                     quit();
