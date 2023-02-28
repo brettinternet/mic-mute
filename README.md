@@ -1,4 +1,6 @@
-# Mac Video Conference Mute
+# Mic Mute for macOS
+
+Mute your mic with a global shortcut and visual confirmation of mute status.
 
 ## Features
 
@@ -13,4 +15,4 @@
 
 ## Background
 
-[VCM](https://github.com/microsoft/PowerToys/issues/21473) for Windows is an excellent utility. However, something similar is missing for MacOS.
+[VCM](https://github.com/microsoft/PowerToys/issues/21473) for Windows is an excellent utility. However, something similar was missing for MacOS.

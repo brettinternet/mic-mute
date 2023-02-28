@@ -1,59 +1,71 @@
 // Use better Apple logging support? https://lib.rs/crates/oslog
 use env_logger::{Builder, Env};
-use log::{debug, error, info, trace};
-use std::sync::{
-    mpsc::{self, RecvTimeoutError},
-    Arc, RwLock,
-};
+use log::{error, info, trace};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 use std::{process, thread};
 mod audio;
 mod config;
-mod macos;
+mod popup;
+mod shortcuts;
 mod tray;
 mod ui;
 mod utils;
+use async_std::task;
 
 use audio::AudioController;
-use macos::quit;
-use ui::UI;
+use ui::{start, UI};
+use utils::arc_lock;
 
 pub enum Message {
     ToggleMic,
+    HidePopup,
     Exit,
-}
-
-fn init_controller() -> Arc<RwLock<AudioController>> {
-    let controller = AudioController::new().unwrap();
-    trace!("Controller initialized {:?}", controller);
-    let rwlock = RwLock::new(controller);
-    Arc::new(rwlock)
 }
 
 fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
     info!("Starting app");
-
-    let controller = init_controller();
-    let ui_controller = controller.clone();
-    let ui = UI::new(ui_controller).unwrap();
+    let controller = arc_lock(AudioController::new().unwrap());
+    trace!("Controller initialized {:?}", controller);
+    let controller_main = controller.clone();
+    let controller_message = controller.clone();
     let (tx, rx) = mpsc::channel::<Message>();
-    let tray = ui.tray.clone();
+    let (ui, event_loop, event_ids) = UI::new(controller_main).unwrap();
+    let ui = arc_lock(ui);
+    trace!("UI initialized");
+    let ui_message = ui.clone();
+    let tx_main = tx.clone();
+    let tx_message = tx.clone();
     trace!("Spawning message listener thread");
-    let message_controller = controller.clone();
     thread::spawn(move || {
         trace!("Listening for messages on app actions channel");
         loop {
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(Message::ToggleMic) => {
                     trace!("ToggleMic message received");
-                    let mut controller = message_controller.write().unwrap();
-                    controller.toggle().unwrap();
-                    let mut tray = tray.write().unwrap();
-                    tray.update(controller.muted).unwrap();
+                    let mut controller = controller_message.write().unwrap();
+                    let mut ui = ui_message.write().unwrap();
+                    controller.toggle(None).unwrap();
+                    ui.update(controller.muted).unwrap();
+                    if !controller.muted {
+                        let tx_message = tx_message.clone();
+                        task::spawn(async move {
+                            task::sleep(Duration::from_secs(1)).await;
+                            // let tx_message = tx_message.lock().await;
+                            tx_message.send(Message::HidePopup).unwrap();
+                        });
+                    }
+                }
+                Ok(Message::HidePopup) => {
+                    let mut ui = ui_message.write().unwrap();
+                    ui.hide_popup().unwrap();
                 }
                 Ok(Message::Exit) => {
-                    quit();
+                    let mut controller = controller_message.write().unwrap();
+                    controller.toggle(Some(false)).unwrap();
+                    let ui = ui_message.write().unwrap();
+                    ui.quit();
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     error!("App actions channel disconnected");
@@ -64,5 +76,5 @@ fn main() {
         }
     });
 
-    ui.start(tx);
+    start(event_loop, event_ids, tx_main);
 }

@@ -23,10 +23,10 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
 
 fn get_icon(muted: bool) -> Result<Icon> {
     trace!("Fetching icons");
-    // const DARK_MIC_ON: &[u8] = include_bytes!("../mic.png");
-    // const DARK_MIC_OFF: &[u8] = include_bytes!("../mic-off.png");
-    const LIGHT_MIC_ON: &[u8] = include_bytes!("../mic-light.png");
-    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../mic-off-light.png");
+    // const DARK_MIC_ON: &[u8] = include_bytes!("../assets/mic.png");
+    // const DARK_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.png");
+    const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/mic-light.png");
+    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off-light.png");
 
     let icon = match dark_light::detect() {
         dark_light::Mode::Light if muted => LIGHT_MIC_OFF,
@@ -74,6 +74,7 @@ impl Tray {
             .with_menu(Box::new(tray_menu))
             .with_tooltip(format!("{} service is running", app_name))
             .with_icon(icon)
+            // .with_menu_on_left_click(false)
             .build()
             .context("Failed to create tray icon")?;
 
@@ -96,6 +97,9 @@ impl Tray {
     fn update_icon(&mut self, muted: bool) -> Result<()> {
         let icon = get_icon(muted)?;
         self.systray.set_icon(Some(icon))?;
+        // self.systray.set_visible(muted);
+
+        self.systray.set_visible(true);
         trace!("Updated tray icon");
         Ok(())
     }

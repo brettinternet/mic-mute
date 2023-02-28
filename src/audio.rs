@@ -15,7 +15,7 @@ use coreaudio::sys::{
     AudioObjectHasProperty, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
     AudioStreamBasicDescription, AudioStreamRangedDescription,
 };
-use log::{debug, error, trace};
+use log::{error, trace};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::mem;
@@ -318,8 +318,9 @@ impl AudioController {
         Ok(self)
     }
 
-    pub fn toggle(&mut self) -> Result<&Self> {
-        self.mute_all(!self.muted)
+    pub fn toggle(&mut self, state: Option<bool>) -> Result<&Self> {
+        let state = state.unwrap_or(!self.muted);
+        self.mute_all(state)
     }
 
     // fn add_input_property_listener()
