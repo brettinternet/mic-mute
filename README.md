@@ -10,6 +10,7 @@ Mute your mic with a global shortcut and visual confirmation of mute status.
 - [ ] While active, keep input devices muted
 - [x] Show mute status in tray
 - [ ] Show mute status in small popup window
+- [ ] Follow screen with cursor
 - [x] Provide global hotkey muting
 - [ ] Add configurable settings (hotkey, window position)
 
