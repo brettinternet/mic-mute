@@ -3,26 +3,35 @@ use crate::popup_content::PopupContent;
 use crate::utils::get_cursor_pos;
 use anyhow::{Context, Result};
 use cocoa::{
-    appkit::{NSView, NSWindow},
-    base::{id, nil, YES},
+    appkit::{NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility},
+    base::{id, YES},
 };
 use log::trace;
 use tao::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    event_loop::EventLoop,
+    dpi::{LogicalPosition, LogicalSize, PhysicalSize},
     monitor::MonitorHandle,
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::{Window, WindowBuilder},
 };
 
-const MUTED_TEXT: &str = "Muted";
-const UNMUTED_TEXT: &str = "Unmuted";
+const MUTED_TITLE: &str = "Muted";
+const UNMUTED_TITLE: &str = "Unmuted";
+const MUTED_DESCRIPTION: &str = "Microphone muted";
+const UNMUTED_DESCRIPTION: &str = "Microphone unmuted";
 
 pub fn get_mute_title_text(muted: bool) -> &'static str {
     if muted {
-        MUTED_TEXT
+        MUTED_TITLE
     } else {
-        UNMUTED_TEXT
+        UNMUTED_TITLE
+    }
+}
+
+pub fn get_mute_description_text(muted: bool) -> &'static str {
+    if muted {
+        MUTED_DESCRIPTION
+    } else {
+        UNMUTED_DESCRIPTION
     }
 }
 
@@ -45,7 +54,6 @@ impl Popup {
             .with_maximized(false)
             .with_minimizable(false)
             .with_resizable(false)
-            .with_inner_size(Popup::get_size())
             .with_visible_on_all_workspaces(true)
             .with_visible(false)
             .with_has_shadow(true)
@@ -53,10 +61,26 @@ impl Popup {
             .context("Failed to build window")?;
         window.set_ignore_cursor_events(true)?;
 
-        let content = PopupContent::new("");
+        let size = Popup::get_size(window.scale_factor());
+        let content = PopupContent::new("", size.cast());
         unsafe {
             let ns_view = window.ns_view() as id;
             ns_view.addSubview_(content.textfield);
+
+            let ns_window = window.ns_window() as id;
+            // Rounded edges hack: https://stackoverflow.com/a/37418915
+            let style_mask = ns_window.styleMask();
+            let _: () = msg_send![
+                ns_window,
+                setStyleMask: style_mask
+                    | NSWindowStyleMask::NSTitledWindowMask
+                    | NSWindowStyleMask::NSFullSizeContentViewWindowMask // NSWindowStyleMask::NSResizableWindowMask
+            ];
+            let _: () = msg_send![
+                ns_window,
+                setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
+            ];
+            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
         };
 
         let popup = Self {
@@ -65,6 +89,10 @@ impl Popup {
             cursor_on_separate_monitor: false,
         };
         Ok(popup)
+    }
+
+    fn get_size(scale: f64) -> LogicalSize<f32> {
+        PhysicalSize::new(400., 80.).to_logical(scale)
     }
 
     /// TODO: add blur?
@@ -82,7 +110,7 @@ impl Popup {
     }
 
     fn update_content(&mut self, muted: bool) -> Result<&mut Self> {
-        let text = get_mute_title_text(muted);
+        let text = get_mute_description_text(muted);
         self.content.set_text(text);
         Ok(self)
     }
@@ -92,18 +120,14 @@ impl Popup {
         Ok(self)
     }
 
-    pub fn get_size() -> PhysicalSize<i32> {
-        PhysicalSize::new(200, 40)
-    }
-
     pub fn update_placement(&mut self) -> Result<&mut Self> {
-        let size = Popup::get_size();
+        let size = Popup::get_size(self.window.scale_factor());
         self.window.set_inner_size(size);
         let monitor = self.get_current_monitor()?;
         if let Some(monitor) = monitor {
             self.cursor_on_separate_monitor = false;
             self.window
-                .set_outer_position(Popup::get_position(monitor, size));
+                .set_outer_position(self.get_position(monitor, size));
         }
         Ok(self)
     }
@@ -128,22 +152,15 @@ impl Popup {
     }
 
     fn get_position(
+        &self,
         monitor: MonitorHandle,
-        window_size: PhysicalSize<i32>,
-    ) -> PhysicalPosition<f32> {
-        let monitor_position = monitor.position();
-        let monitor_size = monitor.size();
-        let [size_width, size_height] = [monitor_size.width, monitor_size.height].map(|n| n as f32);
-        let [position_x, position_y, window_size_width, window_size_height] = [
-            monitor_position.x,
-            monitor_position.y,
-            window_size.width,
-            window_size.height,
-        ]
-        .map(|n| n as f32);
-        let x: f32 = ((size_width + position_x) / 2.) - (window_size_width / 2.);
-        let y: f32 = (position_y + size_height) - (window_size_height * 2.);
-        trace!("Setting window position {:?}", (x, y));
-        PhysicalPosition::new(x, y)
+        window_size: LogicalSize<f32>,
+    ) -> LogicalPosition<f32> {
+        let scale = self.window.scale_factor();
+        let monitor_position: LogicalPosition<f32> = monitor.position().to_logical(scale);
+        let monitor_size: LogicalSize<f32> = monitor.size().to_logical(scale);
+        let x: f32 = ((monitor_position.x + monitor_size.width) / 2.) - (window_size.width / 2.);
+        let y: f32 = (monitor_position.y + monitor_size.height) - (window_size.height * 2.);
+        LogicalPosition::new(x, y)
     }
 }
