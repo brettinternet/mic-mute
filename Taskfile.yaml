@@ -52,3 +52,7 @@ tasks:
   release:
     cmds:
       - cargo build --release
+
+  clean:
+    cmds:
+      - rm -rf ./target

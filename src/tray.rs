@@ -1,6 +1,7 @@
 use crate::config;
 use anyhow::{Context, Result};
 use log::trace;
+use std::fmt;
 use tray_icon::{
     icon::Icon,
     menu::{
@@ -53,6 +54,13 @@ fn get_icon(muted: bool) -> Result<Icon> {
 unsafe impl Send for Tray {}
 unsafe impl Sync for Tray {}
 
+impl fmt::Debug for Tray {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TrayIcon ID: {}", self.systray.id())
+    }
+}
+
+// #[derive(Debug)]
 pub struct Tray {
     pub systray: TrayIcon,
     pub toggle_mute: MenuItem,
