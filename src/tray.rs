@@ -22,29 +22,30 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-fn get_icon(muted: bool) -> Result<Icon> {
-    trace!("Fetching icons");
+pub fn get_image(muted: bool) -> Result<(Vec<u8>, u32, u32)> {
     // const DARK_MIC_ON: &[u8] = include_bytes!("../assets/mic.png");
     // const DARK_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.png");
     const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/mic-light.png");
     const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off-light.png");
 
-    let icon = match dark_light::detect() {
+    let image = match dark_light::detect() {
         dark_light::Mode::Light if muted => LIGHT_MIC_OFF,
         dark_light::Mode::Light if !muted => LIGHT_MIC_ON,
         dark_light::Mode::Dark if muted => LIGHT_MIC_OFF,
         _ => LIGHT_MIC_ON,
     };
 
-    let (icon_rgba, icon_width, icon_height) = {
-        let image = image::load_from_memory(icon)
-            .context("Failed to open icon path")?
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        let rgba = image.into_raw();
-        (rgba, width, height)
-    };
+    let image_buff = image::load_from_memory(image)
+        .context("Failed to open icon path")?
+        .into_rgba8();
+    let (width, height) = image_buff.dimensions();
+    let rgba = image_buff.into_raw();
+    Ok((rgba, width, height))
+}
 
+fn get_icon(muted: bool) -> Result<Icon> {
+    trace!("Fetching icons");
+    let (icon_rgba, icon_width, icon_height) = get_image(muted)?;
     let icon = tray_icon::icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 

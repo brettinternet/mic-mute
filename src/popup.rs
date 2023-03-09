@@ -16,10 +16,8 @@ use tao::{
 
 const MUTED_TITLE: &str = "Muted";
 const UNMUTED_TITLE: &str = "Unmuted";
-const MUTED_DESCRIPTION: &str = "Microphone muted";
-const UNMUTED_DESCRIPTION: &str = "Microphone unmuted";
 
-pub fn get_mute_title_text(muted: bool) -> &'static str {
+fn get_mute_title_text(muted: bool) -> &'static str {
     if muted {
         MUTED_TITLE
     } else {
@@ -27,12 +25,22 @@ pub fn get_mute_title_text(muted: bool) -> &'static str {
     }
 }
 
-pub fn get_mute_description_text(muted: bool) -> &'static str {
-    if muted {
-        MUTED_DESCRIPTION
-    } else {
-        UNMUTED_DESCRIPTION
-    }
+fn setup_window(window: id) {
+    unsafe {
+        // Rounded edges hack: https://stackoverflow.com/a/37418915
+        let style_mask = window.styleMask();
+        let _: () = msg_send![
+            window,
+            setStyleMask: style_mask
+                | NSWindowStyleMask::NSTitledWindowMask
+                | NSWindowStyleMask::NSFullSizeContentViewWindowMask // NSWindowStyleMask::NSResizableWindowMask
+        ];
+        let _: () = msg_send![
+            window,
+            setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
+        ];
+        let _: () = msg_send![window, setTitlebarAppearsTransparent: YES];
+    };
 }
 
 pub struct Popup {
@@ -61,26 +69,17 @@ impl Popup {
             .context("Failed to build window")?;
         window.set_ignore_cursor_events(true)?;
 
-        let size = Popup::get_size(window.scale_factor());
-        let content = PopupContent::new("", size.cast());
+        let scale = window.scale_factor();
+        println!("SCALE---- {}", scale);
+        let size = Popup::get_size(scale);
+        let content = PopupContent::new(muted, size.cast())?;
+
         unsafe {
             let ns_view = window.ns_view() as id;
-            ns_view.addSubview_(content.textfield);
+            ns_view.addSubview_(content.view);
 
             let ns_window = window.ns_window() as id;
-            // Rounded edges hack: https://stackoverflow.com/a/37418915
-            let style_mask = ns_window.styleMask();
-            let _: () = msg_send![
-                ns_window,
-                setStyleMask: style_mask
-                    | NSWindowStyleMask::NSTitledWindowMask
-                    | NSWindowStyleMask::NSFullSizeContentViewWindowMask // NSWindowStyleMask::NSResizableWindowMask
-            ];
-            let _: () = msg_send![
-                ns_window,
-                setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
-            ];
-            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+            setup_window(ns_window);
         };
 
         let popup = Self {
@@ -91,8 +90,9 @@ impl Popup {
         Ok(popup)
     }
 
-    fn get_size(scale: f64) -> LogicalSize<f32> {
-        PhysicalSize::new(400., 80.).to_logical(scale)
+    fn get_size(scale: f64) -> PhysicalSize<f32> {
+        // PhysicalSize::new(400., 80.).to_logical(scale)
+        PhysicalSize::new(200., 40.)
     }
 
     /// TODO: add blur?
@@ -102,16 +102,10 @@ impl Popup {
     pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
         self.window.set_title(get_mute_title_text(muted));
         self.update_placement()?;
-        self.update_content(muted)?;
+        self.content.update(muted)?;
         if muted {
             self.window.set_visible(true);
         }
-        Ok(self)
-    }
-
-    fn update_content(&mut self, muted: bool) -> Result<&mut Self> {
-        let text = get_mute_description_text(muted);
-        self.content.set_text(text);
         Ok(self)
     }
 
@@ -154,7 +148,7 @@ impl Popup {
     fn get_position(
         &self,
         monitor: MonitorHandle,
-        window_size: LogicalSize<f32>,
+        window_size: PhysicalSize<f32>,
     ) -> LogicalPosition<f32> {
         let scale = self.window.scale_factor();
         let monitor_position: LogicalPosition<f32> = monitor.position().to_logical(scale);

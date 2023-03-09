@@ -71,8 +71,11 @@ pub fn start(
                 toggle_mic(ui.clone(), controller.clone(), proxy.clone());
             }
             Event::UserEvent(Message::HidePopup) => {
-                let mut ui = ui.write().unwrap();
-                ui.hide_popup().unwrap();
+                let controller = controller.read().unwrap();
+                if !controller.muted {
+                    let mut ui = ui.write().unwrap();
+                    ui.hide_popup().unwrap();
+                }
             }
             Event::WindowEvent { .. } => {
                 println!("event: {:?}", event);
