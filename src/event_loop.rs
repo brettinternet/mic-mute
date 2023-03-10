@@ -1,4 +1,4 @@
-use crate::{audio::AudioController, ui::UI};
+use crate::{mic::MicController, ui::UI};
 use async_std::task;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
@@ -30,7 +30,7 @@ pub struct EventIds {
 
 fn toggle_mic(
     ui: Arc<RwLock<UI>>,
-    controller: Arc<RwLock<AudioController>>,
+    controller: Arc<RwLock<MicController>>,
     proxy: EventLoopProxyMessage,
 ) {
     let mut controller = controller.write().unwrap();
@@ -49,7 +49,7 @@ pub fn start(
     mut event_loop: EventLoop<Message>,
     event_ids: EventIds,
     ui: Arc<RwLock<UI>>,
-    controller: Arc<RwLock<AudioController>>,
+    controller: Arc<RwLock<MicController>>,
 ) {
     let EventIds {
         button_toggle_mute,

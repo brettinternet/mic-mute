@@ -2,7 +2,7 @@ use crate::event_loop::{create, EventIds, EventLoopMessage};
 use crate::popup::Popup;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
-use crate::AudioController;
+use crate::MicController;
 use anyhow::{Context, Result};
 use log::trace;
 use std::sync::{Arc, RwLock};
@@ -20,7 +20,7 @@ unsafe impl Sync for UI {}
 
 impl UI {
     pub fn new(
-        controller: Arc<RwLock<AudioController>>,
+        controller: Arc<RwLock<MicController>>,
     ) -> Result<(Self, EventLoopMessage, EventIds)> {
         let controller = controller.read().unwrap();
         let muted = controller.muted;
