@@ -28,19 +28,19 @@ tasks:
     aliases:
       - watch
     cmds:
-      - cargo watch -x build
+      - cargo watch -x run
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
 
-  run:
+  debug:
     cmds:
       - ./target/debug/mvcm
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
 
-  setup:
+  test:
     cmds:
       - cargo clippy
       - cargo test
