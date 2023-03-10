@@ -15,16 +15,28 @@ tasks:
       - task -l
 
   init:
-    desc: Install dependencies and setup environment
+    desc: Install dependencies
     cmds:
       - task: dependencies
 
   dependencies:
-    desc: Setup project dependencies
+    internal: true
+    desc: Project dependencies
     cmds:
         - cargo install cargo-watch
+    status:
+      - test -f $HOME/.cargo/bin/cargo-watch
+
+  dependencies-release:
+    internal: true
+    desc: Release dependencies
+    cmds:
+      - cargo install cargo-bundle
+    status:
+      - test -f $HOME/.cargo/bin/cargo-bundle
 
   start:
+    desc: Compile, run and watch for changes
     aliases:
       - watch
     cmds:
@@ -55,7 +67,23 @@ tasks:
 
   release:
     cmds:
-      - cargo build --release
+      - task: dependencies-release
+      - task: release-arch
+        vars:
+          ARCH: aarch64-apple-darwin
+      # - task: release-arch
+      #   vars:
+      #     ARCH: x86_64-apple-darwin
+    env:
+      RUST_LOG: warn
+
+  release-arch:
+    internal: true
+    cmds:
+      - cargo build --locked --release --target {{ .ARCH }}
+      - cargo bundle --release --target {{ .ARCH }}
+      - open ./target/{{ .ARCH }}/release/bundle/osx
+      - hdiutil create -volname MicMute -srcfolder ./target/{{ .ARCH }}/release/bundle/osx -ov -format UDZO mic-mute.dmg
 
   clean:
     cmds:

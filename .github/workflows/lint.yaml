@@ -25,7 +25,7 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-          target: x86_64-apple-darwin
+          target: aarch64-apple-darwin
 
       - name: Clippy
         uses: actions-rs/clippy-check@v1

@@ -1,17 +1,16 @@
 [package]
 name = "mic-mute"
+description = "System-wide mic mute for macOS"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 log = "0.4"
 env_logger = "0.10"
-anyhow = "1.0.69" # error handling
-tao = "0.18" # window manager and event loop
-tray-icon = "0.4" # system tray
-image = "0.24" # icon image manipulation
+anyhow = "1.0.69"
+tao = "0.18"
+tray-icon = "0.4"
+image = "0.24"
 global-hotkey = "0.1"
 async-std = "1.12"
 libc = "0.2"
@@ -19,6 +18,20 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.24"
 objc = "0.2"
-dark-light = "1.0" # detect appearance mode
-coreaudio-rs = "0.11" # macos audio
+dark-light = "1.0"
+coreaudio-rs = "0.11"
 core-foundation-sys = "0.8"
+
+[package.metadata.bundle]
+name = "mic-mute"
+identifier = "com.brettinternet.micmute"
+icon = ["assets/32x32.png", "assets/128x128.png"]
+version = "0.1.0"
+copyright = "Copyright (c) Brett Gardiner 2023. All rights reserved."
+category = "Utility"
+short_description = "System-wide mic mute for macOS"
+long_description = """
+A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by VCM for Windows.
+"""
+osx_frameworks = ["Cocoa", "CoreAudio", "AppKit", "Foundation"]
+osx_url_schemes = ["com.brettinternet.micmute"]

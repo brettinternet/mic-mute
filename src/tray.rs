@@ -23,10 +23,8 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
 }
 
 pub fn get_image(muted: bool) -> Result<(Vec<u8>, u32, u32)> {
-    // const DARK_MIC_ON: &[u8] = include_bytes!("../assets/mic.png");
-    // const DARK_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.png");
-    const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/mic-light.png");
-    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/mic-off-light.png");
+    const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-light.png");
+    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light.png");
 
     let image = match dark_light::detect() {
         dark_light::Mode::Light if muted => LIGHT_MIC_OFF,
