@@ -5,14 +5,6 @@ use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
 use tao::dpi::LogicalSize;
 
-#[allow(dead_code)]
-#[repr(usize)]
-pub enum NSStackViewGravity {
-    Leading = 1,
-    Center = 2,
-    Trailing = 3,
-}
-
 const MUTED_DESCRIPTION: &str = "Microphone off";
 const UNMUTED_DESCRIPTION: &str = "Microphone on";
 pub fn get_mic_mute_description_text(muted: bool) -> &'static str {
