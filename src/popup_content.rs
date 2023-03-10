@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
-use cocoa::base::{id, nil, NO, YES};
+use cocoa::base::{id, nil, NO};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
-use objc::runtime::{Class, Object};
-use tao::dpi::{LogicalSize, PhysicalSize};
+use objc::runtime::Object;
+use tao::dpi::LogicalSize;
 
 #[allow(dead_code)]
 #[repr(usize)]
@@ -21,6 +21,14 @@ pub fn get_mic_mute_description_text(muted: bool) -> &'static str {
     } else {
         UNMUTED_DESCRIPTION
     }
+}
+
+fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
+    const LINE_HEIGHT: f64 = 18.;
+    NSRect::new(
+        NSPoint::new(0., (size.height - LINE_HEIGHT) / 2.),
+        NSSize::new(size.width, LINE_HEIGHT),
+    )
 }
 
 fn get_mic_mute_color(muted: bool) -> id {
@@ -42,7 +50,7 @@ fn get_mic_mute_color(muted: bool) -> id {
     }
 }
 
-fn create_textfield(muted: bool, frame: NSRect) -> id {
+fn get_textfield(muted: bool, frame: NSRect) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
         let _: () = msg_send![label, initWithFrame: frame];
@@ -59,7 +67,7 @@ fn create_textfield(muted: bool, frame: NSRect) -> id {
         let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
 
         const FONT_INCREASE: f64 = 3.0;
-        let ns_font = Class::get("NSFont").unwrap();
+        let ns_font = class!(NSFont);
         let default_size: f64 = msg_send![ns_font, systemFontSize];
         let custom_font: *mut Object =
             msg_send![ns_font, systemFontOfSize: default_size + FONT_INCREASE];
@@ -119,12 +127,9 @@ pub struct PopupContent {
 /// TODO: set image
 /// https://github.com/tauri-apps/tray-icon/blob/b4fc8f888a07cb66661cf15d0da9d39951995e04/src/platform_impl/macos/mod.rs#L155
 impl PopupContent {
-    pub fn new(muted: bool, size: PhysicalSize<f64>) -> Result<Self> {
-        let frame = NSRect::new(
-            NSPoint::new(0., (size.height - 18.) / 2.),
-            NSSize::new(size.width, 18.),
-        );
-        let label = create_textfield(muted, frame);
+    pub fn new(muted: bool, size: LogicalSize<f64>) -> Result<Self> {
+        let frame = get_frame_rect(size);
+        let label = get_textfield(muted, frame);
         let image = get_image(muted)?;
         let image = unsafe {
             let image_view = NSImageView::alloc(nil);
@@ -134,6 +139,8 @@ impl PopupContent {
         };
 
         let view = unsafe {
+            // NSStackView e.g. https://github.com/balthild/native-dialog-rs/blob/d2ddd443f8c01e92dc22cc8132159c1b9598eaca/src/dialog_impl/mac/file.rs#L130
+            // https://developer.apple.com/documentation/appkit/nsstackview?language=objc
             let stack_view: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![stack_view, initWithFrame: frame];
             const NS_STACK_VIEW_GRAVITY_CENTER: i32 = 2;

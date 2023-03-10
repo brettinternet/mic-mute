@@ -1,19 +1,11 @@
 use anyhow::{anyhow, Result};
-use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringGetCString, CFStringRef};
-use coreaudio::audio_unit::macos_helpers::{
-    get_audio_device_ids, get_device_name, get_supported_physical_stream_formats,
-};
+use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
 use coreaudio::sys::{
-    kAudioDevicePropertyDeviceNameCFString, kAudioDevicePropertyMute,
-    kAudioDevicePropertyScopeInput, kAudioDevicePropertyScopeOutput,
-    kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError, kAudioHardwarePropertyDevices,
-    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioQueueDeviceProperty_NumberChannels, kAudioStreamPropertyAvailablePhysicalFormats,
-    kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat, AudioBufferList,
+    kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
+    kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError,
+    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster, AudioBufferList,
     AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
-    AudioObjectHasProperty, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
-    AudioStreamBasicDescription, AudioStreamRangedDescription,
+    AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
 use log::{error, trace};
 use std::fmt;

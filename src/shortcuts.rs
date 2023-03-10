@@ -4,6 +4,7 @@ use global_hotkey::{
     GlobalHotKeyManager,
 };
 
+#[allow(dead_code)]
 pub struct Shortcuts {
     hotkeys_manager: GlobalHotKeyManager,
     pub shift_meta_a: HotKey,

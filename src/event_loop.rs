@@ -12,7 +12,6 @@ use tray_icon::menu::MenuEvent;
 
 #[derive(Debug)]
 pub enum Message {
-    ToggleMic,
     HidePopup,
 }
 
@@ -63,13 +62,8 @@ pub fn start(
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        // *control_flow = ControlFlow::Poll;
 
         match event {
-            Event::UserEvent(Message::ToggleMic) => {
-                trace!("Toggle mic app message");
-                toggle_mic(ui.clone(), controller.clone(), proxy.clone());
-            }
             Event::UserEvent(Message::HidePopup) => {
                 let controller = controller.read().unwrap();
                 if !controller.muted {
@@ -78,10 +72,10 @@ pub fn start(
                 }
             }
             Event::WindowEvent { .. } => {
-                println!("event: {:?}", event);
+                // println!("event: {:?}", event);
             }
             _ => {
-                trace!("event: {:?}", event);
+                // trace!("event: {:?}", event);
                 let mut ui = ui.write().unwrap();
                 ui.detect().unwrap();
             }
@@ -94,8 +88,6 @@ pub fn start(
                     trace!("Exit tray menu item selected");
                     let mut controller = controller.write().unwrap();
                     controller.toggle(Some(false)).unwrap();
-                    let ui = ui.write().unwrap();
-                    ui.quit();
                     *control_flow = ControlFlow::Exit;
                 }
                 MenuEvent { id } if id == button_toggle_mute => {
