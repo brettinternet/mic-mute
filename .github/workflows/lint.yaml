@@ -1,0 +1,47 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  lint:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up cargo cache
+        id: cache
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Clippy
+        uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --locked --release -- -D warnings
+
+      - name: Format
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: -- --check
