@@ -11,9 +11,11 @@ jobs:
     name: Release Darwin
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@v3
+
       - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.2
+        # https://github.com/rust-build/rust-build.action/issues/62
+        uses: rust-build/rust-build.action@v1.4.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
