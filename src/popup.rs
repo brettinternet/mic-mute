@@ -8,7 +8,7 @@ use cocoa::{
 };
 use log::trace;
 use tao::{
-    dpi::{PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::{Window, WindowBuilder},
@@ -72,7 +72,7 @@ impl Popup {
             .build(event_loop)
             .context("Failed to build window")?;
         window.set_ignore_cursor_events(true)?;
-        let size = Popup::get_size();
+        let size = Popup::get_size(window.scale_factor());
         window.set_inner_size(size);
 
         let scale = window.scale_factor();
@@ -93,9 +93,9 @@ impl Popup {
         Ok(popup)
     }
 
-    fn get_size() -> WindowSize {
-        PhysicalSize::new(400., 80.)
-        // LogicalSize::new(200., 40.).to_physical(scale)
+    fn get_size(scale: f64) -> WindowSize {
+        // PhysicalSize::new(400., 80.)
+        LogicalSize::new(200., 40.).to_physical(scale)
     }
 
     /// TODO: add blur?
@@ -118,10 +118,9 @@ impl Popup {
     }
 
     pub fn update_placement(&mut self) -> Result<&mut Self> {
-        let size = Popup::get_size();
-        self.window.set_inner_size(size);
-        let monitor = self.get_current_monitor()?;
-        if let Some(monitor) = monitor {
+        if let Some(monitor) = self.get_current_monitor()? {
+            let size = Popup::get_size(monitor.scale_factor());
+            self.window.set_inner_size(size);
             self.window.available_monitors().for_each(|m| {
                 println!("{:?}", m);
             });
