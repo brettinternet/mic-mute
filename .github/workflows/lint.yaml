@@ -13,19 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set up cargo cache
-        id: cache
-        uses: actions/cache/restore@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -33,6 +20,7 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
+          target: x86_64-apple-darwin
 
       - name: Clippy
         uses: actions-rs/clippy-check@v1

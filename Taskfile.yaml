@@ -40,9 +40,13 @@ tasks:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
 
+  lint:
+    cmds:
+      - cargo clippy --locked --release -- -D warnings
+      - cargo fmt -- --check
+
   test:
     cmds:
-      - cargo clippy
       - cargo test
 
   build:
