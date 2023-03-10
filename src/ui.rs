@@ -2,10 +2,8 @@ use crate::event_loop::{create, EventIds, EventLoopMessage};
 use crate::popup::Popup;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
-use crate::MicController;
 use anyhow::{Context, Result};
 use log::trace;
-use std::sync::{Arc, RwLock};
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -19,11 +17,7 @@ unsafe impl Send for UI {}
 unsafe impl Sync for UI {}
 
 impl UI {
-    pub fn new(
-        controller: Arc<RwLock<MicController>>,
-    ) -> Result<(Self, EventLoopMessage, EventIds)> {
-        let controller = controller.read().unwrap();
-        let muted = controller.muted;
+    pub fn new(muted: bool) -> Result<(Self, EventLoopMessage, EventIds)> {
         let event_loop = create();
         let tray = Tray::new(muted).unwrap();
         let popup = Popup::new(&event_loop, muted).context("Failed to setup popup window")?;

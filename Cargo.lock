@@ -1493,6 +1493,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mic-mute"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "cocoa",
+ "core-foundation-sys 0.8.3",
+ "coreaudio-rs",
+ "dark-light",
+ "env_logger",
+ "global-hotkey",
+ "image",
+ "libc",
+ "log",
+ "objc",
+ "tao",
+ "tray-icon",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1525,26 +1545,6 @@ dependencies = [
  "png",
  "thiserror",
  "windows-sys 0.45.0",
-]
-
-[[package]]
-name = "mvcm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-std",
- "cocoa",
- "core-foundation-sys 0.8.3",
- "coreaudio-rs",
- "dark-light",
- "env_logger",
- "global-hotkey",
- "image",
- "libc",
- "log",
- "objc",
- "tao",
- "tray-icon",
 ]
 
 [[package]]

@@ -33,14 +33,9 @@ macro_rules! try_status_or_return {
     };
 }
 
+#[derive(Default)]
 pub struct MicController {
     pub muted: bool,
-}
-
-impl Default for MicController {
-    fn default() -> Self {
-        Self { muted: false }
-    }
 }
 
 impl Debug for MicController {
@@ -124,7 +119,7 @@ impl MicController {
             audio_device_ids
         );
         let mut input_device_ids = vec![];
-        for id in audio_device_ids.clone() {
+        for id in audio_device_ids {
             let property_address = AudioObjectPropertyAddress {
                 mSelector: kAudioDevicePropertyStreamConfiguration,
                 mScope: kAudioDevicePropertyScopeInput,
@@ -191,7 +186,7 @@ impl MicController {
             mScope: kAudioDevicePropertyScopeInput,
             mElement: kAudioObjectPropertyElementMaster,
         };
-        let muted = 0 as u32;
+        let muted = 0_u32;
         let data_size = mem::size_of::<u32>();
         let status = unsafe {
             // AudioObjectHasProperty(

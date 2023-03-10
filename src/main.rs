@@ -22,12 +22,12 @@ use utils::arc_lock;
 fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
     info!("Starting app");
-    let controller = arc_lock(MicController::new().unwrap());
+    let controller = MicController::new().unwrap();
+    let muted = controller.muted;
+    let controller = arc_lock(controller);
     trace!("Controller initialized {:?}", controller);
-    let controller_main = controller.clone();
-    let controller_loop = controller.clone();
-    let (ui, event_loop, event_ids) = UI::new(controller_main).unwrap();
+    let (ui, event_loop, event_ids) = UI::new(muted).unwrap();
     trace!("UI initialized");
     let ui = arc_lock(ui);
-    start(event_loop, event_ids, ui, controller_loop);
+    start(event_loop, event_ids, ui, controller);
 }

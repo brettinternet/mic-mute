@@ -76,7 +76,7 @@ impl Tray {
         let tray_menu = Menu::new();
         let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
-        let quit = MenuItem::new("Exit".to_owned(), true, None);
+        let quit = MenuItem::new("Exit", true, None);
         tray_menu.append_items(&[&toggle_mute, &quit]);
 
         let systray = TrayIconBuilder::new()
