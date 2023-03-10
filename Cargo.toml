@@ -15,7 +15,6 @@ image = "0.24" # icon image manipulation
 global-hotkey = "0.1"
 async-std = "1.12"
 libc = "0.2"
-# notify-rust = "4" # system notifications
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.24"
