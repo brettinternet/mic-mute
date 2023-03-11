@@ -20,8 +20,9 @@ unsafe impl Sync for UI {}
 impl UI {
     pub fn new(muted: bool, app_vars: AppVars) -> Result<(Self, EventLoopMessage, EventIds)> {
         let event_loop = create();
-        let tray = Tray::new(muted, app_vars).context("Failed to create system tray")?;
         let popup = Popup::new(&event_loop, muted).context("Failed to setup popup window")?;
+        let theme = popup.get_theme();
+        let tray = Tray::new(muted, theme, app_vars).context("Failed to create system tray")?;
         let shortcuts = Shortcuts::new().context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
@@ -41,7 +42,7 @@ impl UI {
     pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
         trace!("Updating UI with state {}", muted);
         self.tray
-            .update(muted)
+            .update(muted, self.popup.get_theme())
             .context("Failed to update UI tray")?;
         self.popup
             .update(muted)

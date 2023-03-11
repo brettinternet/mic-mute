@@ -2,6 +2,7 @@ use crate::config::AppVars;
 use anyhow::{Context, Result};
 use log::trace;
 use std::fmt;
+use tao::window::Theme;
 use tray_icon::{
     icon::Icon,
     menu::{
@@ -22,14 +23,14 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-pub fn get_image(muted: bool) -> Result<(Vec<u8>, u32, u32)> {
+fn get_image(muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
     const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-light.png");
     const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light.png");
 
-    let image = match dark_light::detect() {
-        dark_light::Mode::Light if muted => LIGHT_MIC_OFF,
-        dark_light::Mode::Light if !muted => LIGHT_MIC_ON,
-        dark_light::Mode::Dark if muted => LIGHT_MIC_OFF,
+    let image = match theme {
+        Theme::Light if muted => LIGHT_MIC_OFF,
+        Theme::Light if !muted => LIGHT_MIC_ON,
+        Theme::Dark if muted => LIGHT_MIC_OFF,
         _ => LIGHT_MIC_ON,
     };
 
@@ -41,9 +42,9 @@ pub fn get_image(muted: bool) -> Result<(Vec<u8>, u32, u32)> {
     Ok((rgba, width, height))
 }
 
-fn get_icon(muted: bool) -> Result<Icon> {
+fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     trace!("Fetching icons");
-    let (icon_rgba, icon_width, icon_height) = get_image(muted)?;
+    let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
     let icon = tray_icon::icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 
@@ -67,9 +68,9 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(muted: bool, app_vars: AppVars) -> Result<Self> {
+    pub fn new(muted: bool, theme: Theme, app_vars: AppVars) -> Result<Self> {
         trace!("Creating tray icon");
-        let icon = get_icon(muted)?;
+        let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
         let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
@@ -80,7 +81,6 @@ impl Tray {
             .with_menu(Box::new(tray_menu))
             .with_tooltip(format!("{} service is running", app_vars.name))
             .with_icon(icon)
-            // .with_menu_on_left_click(false)
             .build()
             .context("Failed to create tray icon")?;
 
@@ -93,19 +93,16 @@ impl Tray {
         Ok(tray)
     }
 
-    pub fn update(&mut self, muted: bool) -> Result<()> {
+    pub fn update(&mut self, muted: bool, theme: Theme) -> Result<()> {
         trace!("Updating tray with {} state", get_mute_menu_text(muted));
-        self.update_icon(muted)?;
+        self.update_icon(muted, theme)?;
         self.update_menu(muted)?;
         Ok(())
     }
 
-    fn update_icon(&mut self, muted: bool) -> Result<()> {
-        let icon = get_icon(muted)?;
+    fn update_icon(&mut self, muted: bool, theme: Theme) -> Result<()> {
+        let icon = get_icon(muted, theme)?;
         self.systray.set_icon(Some(icon))?;
-        // self.systray.set_visible(muted);
-
-        self.systray.set_visible(true);
         trace!("Updated tray icon");
         Ok(())
     }

@@ -11,7 +11,7 @@ use tao::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
-    window::{Window, WindowBuilder},
+    window::{Theme, Window, WindowBuilder},
 };
 
 const MUTED_TITLE: &str = "Muted";
@@ -77,7 +77,7 @@ impl Popup {
 
         let scale = window.scale_factor();
         trace!("Window scale factor {}", scale);
-        let content = PopupContent::new(muted, size.to_logical(scale))?;
+        let content = PopupContent::new(muted, size.to_logical(scale), window.theme())?;
         unsafe {
             let ns_view = window.ns_view() as id;
             ns_view.addSubview_(content.view);
@@ -98,6 +98,10 @@ impl Popup {
         LogicalSize::new(200., 40.).to_physical(scale)
     }
 
+    pub fn get_theme(&self) -> Theme {
+        self.window.theme()
+    }
+
     /// TODO: add blur?
     /// https://github.com/rust-windowing/winit/issues/538
     /// https://github.com/servo/core-foundation-rs/blob/master/cocoa/examples/nsvisualeffectview_blur.rs
@@ -105,7 +109,7 @@ impl Popup {
     pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
         self.window.set_title(get_mute_title_text(muted));
         self.update_placement()?;
-        self.content.update(muted)?;
+        self.content.update(muted, self.get_theme())?;
         if muted {
             self.window.set_visible(true);
         }

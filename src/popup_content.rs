@@ -4,6 +4,7 @@ use cocoa::base::{id, nil, NO};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
 use tao::dpi::LogicalSize;
+use tao::window::Theme;
 
 const MUTED_DESCRIPTION: &str = "Microphone off";
 const UNMUTED_DESCRIPTION: &str = "Microphone on";
@@ -23,7 +24,7 @@ fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
     )
 }
 
-fn get_mic_mute_color(muted: bool) -> id {
+fn get_mic_mute_color(muted: bool, theme: Theme) -> id {
     let (black, white, dark_red, light_red) = unsafe {
         // 239, 68, 68
         let dark_red = NSColor::colorWithRed_green_blue_alpha_(nil, 0.9372, 0.2666, 0.2666, 1.);
@@ -34,21 +35,23 @@ fn get_mic_mute_color(muted: bool) -> id {
         (black, white, dark_red, light_red)
     };
 
-    match dark_light::detect() {
-        dark_light::Mode::Light if muted => dark_red,
-        dark_light::Mode::Light if !muted => black,
-        dark_light::Mode::Dark if muted => light_red,
-        _ => white,
+    match theme {
+        Theme::Light if muted => dark_red,
+        Theme::Light if !muted => black,
+        Theme::Dark if muted => light_red,
+        Theme::Dark if !muted => white,
+        // Fallback, readable on both themes
+        _ => dark_red,
     }
 }
 
-fn get_textfield(muted: bool, frame: NSRect) -> id {
+fn get_textfield(muted: bool, frame: NSRect, theme: Theme) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
         let _: () = msg_send![label, initWithFrame: frame];
         let text = get_mic_mute_description_text(muted);
         label.setStringValue_(NSString::alloc(nil).init_str(text));
-        let color = get_mic_mute_color(muted);
+        let color = get_mic_mute_color(muted, theme);
         let _: () = msg_send![label, setTextColor: color];
 
         let _: () = msg_send![label, setBezeled: NO];
@@ -69,16 +72,16 @@ fn get_textfield(muted: bool, frame: NSRect) -> id {
     }
 }
 
-fn get_image(muted: bool) -> Result<id> {
+fn get_image(muted: bool, theme: Theme) -> Result<id> {
     const DARK_MIC_ON: &[u8] = include_bytes!("../assets/images/mic.png");
     const DARK_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off.png");
     const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-light.png");
     const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light.png");
 
-    let image = match dark_light::detect() {
-        dark_light::Mode::Light if muted => DARK_MIC_OFF,
-        dark_light::Mode::Light if !muted => DARK_MIC_ON,
-        dark_light::Mode::Dark if muted => LIGHT_MIC_OFF,
+    let image = match theme {
+        Theme::Light if muted => DARK_MIC_OFF,
+        Theme::Light if !muted => DARK_MIC_ON,
+        Theme::Dark if muted => LIGHT_MIC_OFF,
         _ => LIGHT_MIC_ON,
     };
 
@@ -119,10 +122,10 @@ pub struct PopupContent {
 /// TODO: set image
 /// https://github.com/tauri-apps/tray-icon/blob/b4fc8f888a07cb66661cf15d0da9d39951995e04/src/platform_impl/macos/mod.rs#L155
 impl PopupContent {
-    pub fn new(muted: bool, size: LogicalSize<f64>) -> Result<Self> {
+    pub fn new(muted: bool, size: LogicalSize<f64>, theme: Theme) -> Result<Self> {
         let frame = get_frame_rect(size);
-        let label = get_textfield(muted, frame);
-        let image = get_image(muted)?;
+        let label = get_textfield(muted, frame, theme);
+        let image = get_image(muted, theme)?;
         let image = unsafe {
             let image_view = NSImageView::alloc(nil);
             let _: () = msg_send![image_view, initWithFrame: frame];
@@ -148,10 +151,10 @@ impl PopupContent {
         Ok(content)
     }
 
-    pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
+    pub fn update(&mut self, muted: bool, theme: Theme) -> Result<&mut Self> {
         let text = get_mic_mute_description_text(muted);
-        let color = get_mic_mute_color(muted);
-        let img = get_image(muted)?;
+        let color = get_mic_mute_color(muted, theme);
+        let img = get_image(muted, theme)?;
 
         unsafe {
             self.label
