@@ -16,7 +16,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
   - [x] Mute input devices
     - Note: Some virtual devices may be unable to mute for now
   - [x] Provide global hotkey muting
-  - [ ] Polls for new devices to mute while active
+  - [x] Poll new devices to mute while microphones should be off
 - Visual confirmation of mute status
   - [x] Show microphone mute status in system tray
   - [x] Show microphone mute status in small popup window
