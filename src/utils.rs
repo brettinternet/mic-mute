@@ -49,7 +49,7 @@ impl Throttle {
 
     fn flush(&mut self) {
         while let Some(first) = self.deque.front() {
-            if first.elapsed() >= self.timeout.clone() {
+            if first.elapsed() >= self.timeout {
                 self.deque.pop_front();
             } else {
                 break;
@@ -68,8 +68,8 @@ impl Throttle {
 
     pub fn accept(&mut self) -> Result<(), Instant> {
         self.flush();
-        if self.deque.len() >= 1 {
-            return Err(self.deque.front().unwrap().clone() + self.timeout.clone());
+        if !self.deque.is_empty() {
+            return Err(*self.deque.front().unwrap() + self.timeout);
         }
 
         self.deque.push_back(Instant::now());

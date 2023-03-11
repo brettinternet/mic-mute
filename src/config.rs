@@ -20,12 +20,12 @@ impl AppVars {
     pub fn new() -> Self {
         let shortname = env!("CARGO_PKG_NAME");
         let name = shortname
-            .split("-")
+            .split('-')
             .map(capitalize)
             .collect::<Vec<String>>()
             .join(" ");
         let authors: Vec<String> = env!("CARGO_PKG_AUTHORS")
-            .split(":")
+            .split(':')
             .map(|s| s.to_string())
             .collect();
 
