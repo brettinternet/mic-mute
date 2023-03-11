@@ -38,7 +38,18 @@ core-foundation-sys = "0.8"
 [package.metadata.bundle]
 name = "Mic Mute"
 identifier = "com.brettinternet.mic-mute"
-icon = ["assets/32x32.png", "assets/128x128.png"]
+icon = [
+  "assets/icons/16x16.png",
+  "assets/icons/16x16@2x.png",
+  "assets/icons/32x32.png",
+  "assets/icons/32x32@2x.png",
+  "assets/icons/128x128.png",
+  "assets/icons/128x128@2x.png",
+  "assets/icons/256x256.png",
+  "assets/icons/256x256@2x.png",
+  "assets/icons/512x512.png",
+  "assets/icons/512x512@2x.png"
+]
 copyright = "Copyright (c) Brett Gardiner 2023. All rights reserved."
 category = "Utility"
 short_description = "System-wide mic mute for macOS"

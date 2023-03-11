@@ -1,4 +1,8 @@
-# Mic Mute for macOS
+<p align="center">
+  <img width="256" src="./assets/icons/256x256@2x.png" style="padding:1rem;">
+</p>
+
+<h1 align="center">Mic Mute for macOS</h1>
 
 A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by [VCM](https://github.com/microsoft/PowerToys/issues/21473) for Windows.
 
