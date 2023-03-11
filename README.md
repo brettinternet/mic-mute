@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="256" src="./assets/icons/256x256@2x.png" style="padding:1rem;">
+  <img width="128" src="./assets/icons/128x128@2x.png" style="padding:0.5rem;">
 </p>
 
 <h1 align="center">Mic Mute for macOS</h1>
@@ -16,8 +16,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
   - [x] Mute input devices
     - Note: Some virtual devices may be unable to mute for now
   - [x] Provide global hotkey muting
-  - [ ] Mute newly connected input devices
-  - [ ] While active, keep input devices muted even if toggled by other methods
+  - [ ] Polls for new devices to mute while active
 - Visual confirmation of mute status
   - [x] Show microphone mute status in system tray
   - [x] Show microphone mute status in small popup window
