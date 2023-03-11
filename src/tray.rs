@@ -1,4 +1,4 @@
-use crate::config;
+use crate::config::AppVars;
 use anyhow::{Context, Result};
 use log::trace;
 use std::fmt;
@@ -6,7 +6,7 @@ use tray_icon::{
     icon::Icon,
     menu::{
         accelerator::{Accelerator, Code, Modifiers},
-        Menu, MenuItem,
+        Menu, MenuItem, PredefinedMenuItem,
     },
     TrayIcon, TrayIconBuilder,
 };
@@ -67,19 +67,18 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(muted: bool) -> Result<Self> {
+    pub fn new(muted: bool, app_vars: AppVars) -> Result<Self> {
         trace!("Creating tray icon");
-        let app_name = config::get_app_name();
         let icon = get_icon(muted)?;
         let tray_menu = Menu::new();
         let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
         let quit = MenuItem::new("Exit", true, None);
-        tray_menu.append_items(&[&toggle_mute, &quit]);
+        tray_menu.append_items(&[&toggle_mute, &PredefinedMenuItem::separator(), &quit]);
 
         let systray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
-            .with_tooltip(format!("{} service is running", app_name))
+            .with_tooltip(format!("{} service is running", app_vars.name))
             .with_icon(icon)
             // .with_menu_on_left_click(false)
             .build()

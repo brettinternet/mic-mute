@@ -70,20 +70,17 @@ tasks:
       - task: dependencies-release
       - task: release-arch
         vars:
-          ARCH: aarch64-apple-darwin
-      # - task: release-arch
-      #   vars:
-      #     ARCH: x86_64-apple-darwin
+          TARGET: aarch64-apple-darwin
     env:
       RUST_LOG: warn
 
   release-arch:
     internal: true
     cmds:
-      - cargo build --locked --release --target {{ .ARCH }}
-      - cargo bundle --release --target {{ .ARCH }}
-      - open ./target/{{ .ARCH }}/release/bundle/osx
-      - hdiutil create -volname MicMute -srcfolder ./target/{{ .ARCH }}/release/bundle/osx -ov -format UDZO mic-mute.dmg
+      - cargo build --locked --release --target {{ .TARGET }}
+      - cargo bundle --release --target {{ .TARGET }}
+      - TARGET={{ .TARGET }} cargo run --bin post-build
+      - open ./target/{{ .TARGET }}/release/bundle/osx
 
   clean:
     cmds:

@@ -121,9 +121,6 @@ impl Popup {
         if let Some(monitor) = self.get_current_monitor()? {
             let size = Popup::get_size(monitor.scale_factor());
             self.window.set_inner_size(size);
-            self.window.available_monitors().for_each(|m| {
-                println!("{:?}", m);
-            });
             self.cursor_on_separate_monitor = false;
             self.window
                 .set_outer_position(self.get_position(monitor, size));

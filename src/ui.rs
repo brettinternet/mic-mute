@@ -1,3 +1,4 @@
+use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
 use crate::popup::Popup;
 use crate::shortcuts::Shortcuts;
@@ -17,9 +18,9 @@ unsafe impl Send for UI {}
 unsafe impl Sync for UI {}
 
 impl UI {
-    pub fn new(muted: bool) -> Result<(Self, EventLoopMessage, EventIds)> {
+    pub fn new(muted: bool, app_vars: AppVars) -> Result<(Self, EventLoopMessage, EventIds)> {
         let event_loop = create();
-        let tray = Tray::new(muted).unwrap();
+        let tray = Tray::new(muted, app_vars).context("Failed to create system tray")?;
         let popup = Popup::new(&event_loop, muted).context("Failed to setup popup window")?;
         let shortcuts = Shortcuts::new().context("Failed to setup shortcuts")?;
 
