@@ -6,11 +6,7 @@ edition = "2021"
 authors = ["Brett Gardiner"]
 license = "MIT"
 
-default-run = "main"
-
-[[bin]]
-name = "main"
-path = "src/main.rs"
+default-run = "mic-mute"
 
 [[bin]]
 name = "post-build"
@@ -51,7 +47,7 @@ icon = [
   "assets/icons/512x512@2x.png"
 ]
 copyright = "Copyright (c) Brett Gardiner 2023. All rights reserved."
-category = "Utility"
+category = "public.app-category.utilities"
 short_description = "System-wide mic mute for macOS"
 long_description = """
 A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by VCM for Windows.

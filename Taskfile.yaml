@@ -68,13 +68,14 @@ tasks:
   release:
     cmds:
       - task: dependencies-release
-      - task: release-arch
+      - cargo clean
+      - task: release-target
         vars:
           TARGET: aarch64-apple-darwin
     env:
       RUST_LOG: warn
 
-  release-arch:
+  release-target:
     internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
@@ -87,4 +88,4 @@ tasks:
 
   clean:
     cmds:
-      - rm -rf ./target
+      - cargo clean
