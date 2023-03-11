@@ -81,6 +81,9 @@ tasks:
       - cargo bundle --release --target {{ .TARGET }}
       - TARGET={{ .TARGET }} cargo run --bin post-build
       - open ./target/{{ .TARGET }}/release/bundle/osx
+    env:
+      RUST_LOG: warn
+
 
   clean:
     cmds:
