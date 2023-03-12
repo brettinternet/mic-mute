@@ -82,7 +82,6 @@ pub fn start(
                 }
             }
             _ => {
-                println!("poll");
                 if throttle.available() {
                     update_mic(ui.clone(), controller.clone(), proxy.clone(), false);
                     let mut ui = ui.write().unwrap();
