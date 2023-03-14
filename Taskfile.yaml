@@ -27,14 +27,6 @@ tasks:
     status:
       - test -f $HOME/.cargo/bin/cargo-watch
 
-  dependencies-release:
-    internal: true
-    desc: Release dependencies
-    cmds:
-      - cargo install cargo-bundle
-    status:
-      - test -f $HOME/.cargo/bin/cargo-bundle
-
   start:
     desc: Compile, run and watch for changes
     aliases:
@@ -63,11 +55,28 @@ tasks:
 
   build:
     cmds:
-      - cargo build
+      - task: build-dependencies
+      - task: build-target
+        vars:
+          TARGET: aarch64-apple-darwin
+
+  bundle-dependencies:
+    internal: true
+    desc: Bundle dependencies
+    cmds:
+      - cargo install cargo-bundle
+    status:
+      - test -f $HOME/.cargo/bin/cargo-bundle
+
+  build-target:
+    cmds:
+      - cargo build --locked --release --target {{ .TARGET }}
+      - cargo bundle --release --target {{ .TARGET }}
+      - open ./target/{{ .TARGET }}/release/bundle/osx
 
   release:
     cmds:
-      - task: dependencies-release
+      - task: release-dependencies
       - cargo clean
       - task: release-target
         vars:
@@ -75,16 +84,33 @@ tasks:
     env:
       RUST_LOG: warn
 
+  release-dependencies:
+    internal: true
+    desc: Release dependencies
+    cmds:
+      - cargo install apple-codesign
+      - cargo install toml-cli
+    status:
+      - test -f $HOME/.cargo/bin/apple-codesign
+      - test -f $HOME/.cargo/bin/toml-cli
+
   release-target:
     internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
       - cargo bundle --release --target {{ .TARGET }}
-      - TARGET={{ .TARGET }} cargo run --bin post-build
-      - open ./target/{{ .TARGET }}/release/bundle/osx
+      - rcodesign sign --pem-source {{ .PEM_FILE }} ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app
+      - hdiutil create -volname {{ .TITLE }} -srcfolder ./target/{{ .TARGET }}/release/bundle/osx -ov -format UDZO {{ .TITLE }}.dmg
+      # - rcodesign sign --pem-source {{ .PEM_FILE }} {{ .TITLE }}.dmg
     env:
       RUST_LOG: warn
-
+    vars:
+      PEM_FILE: sign.crt
+      NAME:
+        sh: toml get Cargo.toml package.name --raw
+      VERSION:
+        sh: toml get Cargo.toml package.version --raw
+      TITLE: "{{ .NAME }}-{{ .VERSION }}-{{ .TARGET }}"
 
   clean:
     cmds:

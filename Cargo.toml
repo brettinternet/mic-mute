@@ -8,11 +8,6 @@ license = "MIT"
 
 default-run = "mic-mute"
 
-[[bin]]
-name = "post-build"
-test = false
-bench = false
-
 [dependencies]
 log = "0.4"
 env_logger = "0.10"
@@ -23,12 +18,15 @@ image = "0.24"
 global-hotkey = "0.1"
 async-std = "1.12"
 libc = "0.2"
+chrono = "0.4"
+x509-certificate = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.24"
 objc = "0.2"
 coreaudio-rs = "0.11"
 core-foundation-sys = "0.8"
+apple-codesign = "0.22"
 
 [package.metadata.bundle]
 name = "Mic Mute"
@@ -51,5 +49,6 @@ short_description = "System-wide mic mute for macOS"
 long_description = """
 A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by VCM for Windows.
 """
-osx_frameworks = ["Cocoa", "CoreAudio", "AppKit", "Foundation"]
+# osx_frameworks = ["Cocoa", "CoreAudio", "AppKit", "Foundation"]
 osx_url_schemes = ["com.brettinternet.mic-mute"]
+osx_minimum_system_version = "10"
