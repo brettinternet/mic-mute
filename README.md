@@ -4,7 +4,7 @@
 
 <h1 align="center">Mic Mute for macOS</h1>
 
-A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by [VCM](https://github.com/microsoft/PowerToys/issues/21473) for Windows.
+A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by [VCM](https://learn.microsoft.com/en-us/windows/powertoys/video-conference-mute) for Windows.
 
 ![popup window screenshot indicating the microphone is off](./screenshot.png)
 
@@ -26,13 +26,29 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
 - [ ] Add configurable settings (hotkey, window position)
 - [ ] Open app on system startup
 
+## Releases
+
+I have not elected to sign the app by joining the Apple Developer Program. The releases have been self-signed by me and can be installed by bypassing the typical app security on macOS. You're also welcome to build and bundle the app yourself with the simple instructions described below.
+
+[View releases](https://github.com/brettinternet/mic-mute/releases)
+
+## Build
+
+[Install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
+
+Install the build dependencies, build and bundle the app.
+
+```
+task build
+```
+
+Once the build is complete, a finder window should open to the built bundle in the the folder `./target/aarch64-apple-darwin/release/bundle/osx`.
+
 ## Develop
 
 ### Setup
 
-[Install Rust](https://www.rust-lang.org/tools/install).
-
-Optionally, [install go-task](https://taskfile.dev/installation/).
+[Install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
 
 Install development dependencies.
 

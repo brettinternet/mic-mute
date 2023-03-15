@@ -60,7 +60,7 @@ tasks:
         vars:
           TARGET: aarch64-apple-darwin
 
-  bundle-dependencies:
+  build-dependencies:
     internal: true
     desc: Bundle dependencies
     cmds:
