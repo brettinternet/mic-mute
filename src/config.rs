@@ -29,7 +29,6 @@ impl AppVars {
             .map(|s| s.to_string())
             .collect();
 
-        println!("NAME: {}", name);
         Self {
             name,
             shortname,
