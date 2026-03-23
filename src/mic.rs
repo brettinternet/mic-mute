@@ -1,22 +1,18 @@
 use anyhow::{anyhow, Result};
 use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
-use coreaudio::sys::{
+use log::{error, trace};
+use objc2_core_audio::{
     kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError,
-    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster, AudioBufferList,
+    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster,
     AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
-use log::{error, trace};
+use objc2_core_audio_types::AudioBufferList;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::mem;
-use std::ptr::null;
-
-#[derive(Debug)]
-pub struct AudioError {
-    pub msg: String,
-}
+use std::ptr::{null, NonNull};
 
 macro_rules! try_status_or_return {
     ($status:expr) => {
@@ -24,10 +20,7 @@ macro_rules! try_status_or_return {
             status if status == kAudioHardwareUnknownPropertyError as i32 => {}
             status if status == kAudioHardwareNoError as i32 => {}
             status => {
-                return Err(anyhow!(
-                    "Error: {}",
-                    coreaudio::Error::from_os_status(status).err().unwrap()
-                ));
+                return Err(anyhow!("Error: {}", status));
             }
         }
     };
@@ -61,55 +54,13 @@ impl MicController {
 
     fn names(&self) -> Result<Vec<String>> {
         let mut names = vec![];
-        // match MicController::<F>::get_input_device_ids() {
         let ids = get_audio_device_ids().map_err(anyhow::Error::msg)?;
         for id in ids {
             let name = get_device_name(id).map_err(anyhow::Error::msg)?;
             names.push(format!("{}: {}", id, name));
-            // let formats = MicController::get_asbd(id)?;
-            // for fmt in formats {
-            //     trace!("{}: {} - {:?}", id, name, fmt);
-            // }
         }
         Ok(names)
     }
-
-    // fn get_asbd(&self, id: AudioDeviceID) -> Result<Vec<AudioStreamRangedDescription>> {
-    //     // Get available formats.
-    //     let property_address = AudioObjectPropertyAddress {
-    //         mSelector: kAudioStreamPropertyAvailablePhysicalFormats,
-    //         mScope: kAudioDevicePropertyScopeInput,
-    //         mElement: kAudioObjectPropertyElementMaster,
-    //     };
-    //     let allformats = unsafe {
-    //         // property_address.mSelector = kAudioStreamPropertyAvailablePhysicalFormats;
-    //         let mut data_size = 0u32;
-    //         let status = AudioObjectGetPropertyDataSize(
-    //             id,
-    //             &property_address as *const _,
-    //             0,
-    //             null(),
-    //             &mut data_size as *mut _,
-    //         );
-    //         try_status_or_return!(status);
-    //         let n_formats = data_size as usize / mem::size_of::<AudioStreamRangedDescription>();
-    //         let mut formats: Vec<AudioStreamRangedDescription> = vec![];
-    //         formats.reserve_exact(n_formats as usize);
-    //         formats.set_len(n_formats);
-
-    //         let status = AudioObjectGetPropertyData(
-    //             id,
-    //             &property_address as *const _,
-    //             0,
-    //             null(),
-    //             &data_size as *const _ as *mut _,
-    //             formats.as_mut_ptr() as *mut _,
-    //         );
-    //         try_status_or_return!(status);
-    //         formats
-    //     };
-    //     Ok(allformats)
-    // }
 
     fn get_input_device_ids(&self) -> Result<Vec<AudioDeviceID>> {
         let audio_device_ids = get_audio_device_ids().map_err(anyhow::Error::msg)?;
@@ -120,37 +71,41 @@ impl MicController {
         );
         let mut input_device_ids = vec![];
         for id in audio_device_ids {
-            let property_address = AudioObjectPropertyAddress {
+            let mut property_address = AudioObjectPropertyAddress {
                 mSelector: kAudioDevicePropertyStreamConfiguration,
                 mScope: kAudioDevicePropertyScopeInput,
                 mElement: kAudioObjectPropertyElementMaster,
             };
-            let data_size = 0u32;
+            let mut data_size = 0u32;
             let status = unsafe {
                 AudioObjectGetPropertyDataSize(
                     id,
-                    &property_address as *const _,
+                    NonNull::new_unchecked(&mut property_address),
                     0,
                     null(),
-                    &data_size as *const _ as *mut _,
+                    NonNull::new_unchecked(&mut data_size),
                 )
             };
             try_status_or_return!(status);
 
-            // To determine if a device is an input device you need to check and see if it has any input channels
+            // To determine if a device is an input device check if it has input channels
             // https://stackoverflow.com/a/4577271
-            let audio_buffer_list = AudioBufferList {
+            let mut audio_buffer_list = AudioBufferList {
                 mNumberBuffers: data_size,
-                ..Default::default()
+                mBuffers: [objc2_core_audio_types::AudioBuffer {
+                    mNumberChannels: 0,
+                    mDataByteSize: 0,
+                    mData: std::ptr::null_mut(),
+                }],
             };
             let status = unsafe {
                 AudioObjectGetPropertyData(
                     id,
-                    &property_address as *const _,
+                    NonNull::new_unchecked(&mut property_address),
                     0,
                     null(),
-                    &data_size as *const _ as *mut _,
-                    &audio_buffer_list as *const _ as *mut _,
+                    NonNull::new_unchecked(&mut data_size),
+                    NonNull::new_unchecked(&mut audio_buffer_list as *mut _ as *mut _),
                 )
             };
             trace!(
@@ -160,13 +115,8 @@ impl MicController {
             );
             try_status_or_return!(status);
             if audio_buffer_list.mNumberBuffers > 0 {
-                // kAudioQueueDeviceProperty_NumberChannels
                 input_device_ids.push(id);
             }
-            // for i in 1..audio_buffer_list.mNumberBuffers {
-            //     let audio_buffer = audio_buffer_list[i];
-            //     channel_count = channel_count + audio_buffer.ch
-            // }
         }
 
         trace!(
@@ -181,29 +131,21 @@ impl MicController {
         let name = get_device_name(audio_device_id).map_err(anyhow::Error::msg)?;
         trace!("BEFORE Device {} - {}", audio_device_id, name);
 
-        let property_address = AudioObjectPropertyAddress {
+        let mut property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
             mElement: kAudioObjectPropertyElementMaster,
         };
         let muted = 0_u32;
-        let data_size = mem::size_of::<u32>();
+        let mut data_size = mem::size_of::<u32>() as u32;
         let status = unsafe {
-            // AudioObjectHasProperty(
-            //     audio_device_id,
-            //     &property_address as *const _,
-            //     0,
-            //     null(),
-            //     &data_size as *const _ as *mut _,
-            //     &muted as *const _ as *mut _,
-            // )
             AudioObjectGetPropertyData(
                 audio_device_id,
-                &property_address as *const _,
+                NonNull::new_unchecked(&mut property_address),
                 0,
                 null(),
-                &data_size as *const _ as *mut _,
-                &muted as *const _ as *mut _,
+                NonNull::new_unchecked(&mut data_size),
+                NonNull::new_unchecked(&muted as *const u32 as *mut _),
             )
         };
         try_status_or_return!(status);
@@ -229,7 +171,7 @@ impl MicController {
     }
 
     fn mute(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID> {
-        let property_address = AudioObjectPropertyAddress {
+        let mut property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
             mElement: kAudioObjectPropertyElementMaster,
@@ -239,17 +181,16 @@ impl MicController {
         let status = unsafe {
             AudioObjectSetPropertyData(
                 audio_device_id,
-                &property_address as *const _,
+                NonNull::new_unchecked(&mut property_address),
                 0,
                 null(),
                 data_size,
-                &data as *const _ as _,
+                NonNull::new_unchecked(&data as *const u32 as *mut _),
             )
         };
 
         trace!("RESULT FROM STATUS: {}", status);
 
-        // try_status_or_return!(status);
         match status {
             status if status == kAudioHardwareNoError as i32 => {}
             status if status == kAudioHardwareUnknownPropertyError as i32 => {}
@@ -289,7 +230,38 @@ impl MicController {
         let state = state.unwrap_or(!self.muted);
         self.mute_all(state)
     }
+}
 
-    // fn add_input_property_listener()
-    // fn add hardware_listener()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mic_controller_new() {
+        // Should succeed (even if no input devices)
+        let result = MicController::new();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mic_controller_default() {
+        let c = MicController::default();
+        assert!(!c.muted);
+    }
+
+    #[test]
+    fn test_toggle_logic() {
+        // Test the toggle state logic without touching hardware
+        let mut c = MicController { muted: false };
+        let new_state = None::<bool>.unwrap_or(!c.muted);
+        assert!(new_state, "Toggle from false should give true");
+
+        c.muted = true;
+        let new_state = None::<bool>.unwrap_or(!c.muted);
+        assert!(!new_state, "Toggle from true should give false");
+
+        // Explicit state override
+        let new_state = Some(false).unwrap_or(!c.muted);
+        assert!(!new_state);
+    }
 }

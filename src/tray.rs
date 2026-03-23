@@ -1,16 +1,13 @@
 use crate::config::AppVars;
 use anyhow::{Context, Result};
 use log::trace;
+use muda::{
+    accelerator::{Accelerator, Code, Modifiers},
+    Menu, MenuEvent, MenuItem, MenuId, PredefinedMenuItem,
+};
 use std::fmt;
 use tao::window::Theme;
-use tray_icon::{
-    icon::Icon,
-    menu::{
-        accelerator::{Accelerator, Code, Modifiers},
-        Menu, MenuItem, PredefinedMenuItem,
-    },
-    TrayIcon, TrayIconBuilder,
-};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
@@ -45,7 +42,7 @@ fn get_image(muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
 fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     trace!("Fetching icons");
     let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
-    let icon = tray_icon::icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
+    let icon = Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 
     Ok(icon)
@@ -56,14 +53,14 @@ unsafe impl Sync for Tray {}
 
 impl fmt::Debug for Tray {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TrayIcon ID: {}", self.systray.id())
+        write!(f, "TrayIcon ID: {:?}", self.systray.id())
     }
 }
 
-// #[derive(Debug)]
 pub struct Tray {
     pub systray: TrayIcon,
     pub toggle_mute: MenuItem,
+    pub toggle_camera: MenuItem,
     pub quit: MenuItem,
 }
 
@@ -74,13 +71,22 @@ impl Tray {
         let tray_menu = Menu::new();
         let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
+        let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyV);
+        let toggle_camera = MenuItem::new("Toggle Camera", true, Some(camera_shortcut));
         let quit = MenuItem::new("Exit", true, None);
-        tray_menu.append_items(&[&toggle_mute, &PredefinedMenuItem::separator(), &quit]);
+
+        tray_menu.append_items(&[
+            &toggle_mute,
+            &toggle_camera,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ]).context("Failed to append menu items")?;
 
         let systray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
             .with_tooltip(format!("{} service is running", app_vars.name))
             .with_icon(icon)
+            .with_menu_on_left_click(true)
             .build()
             .context("Failed to create tray icon")?;
 
@@ -88,6 +94,7 @@ impl Tray {
         let tray = Self {
             systray,
             toggle_mute,
+            toggle_camera,
             quit,
         };
         Ok(tray)
@@ -111,5 +118,32 @@ impl Tray {
         self.toggle_mute.set_text(get_mute_menu_text(muted));
         trace!("Updated tray menu");
         Ok(())
+    }
+
+    pub fn toggle_mute_id(&self) -> &MenuId {
+        self.toggle_mute.id()
+    }
+
+    pub fn toggle_camera_id(&self) -> &MenuId {
+        self.toggle_camera.id()
+    }
+
+    pub fn quit_id(&self) -> &MenuId {
+        self.quit.id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_mute_menu_text_muted() {
+        assert_eq!(get_mute_menu_text(true), "Unmute");
+    }
+
+    #[test]
+    fn test_get_mute_menu_text_unmuted() {
+        assert_eq!(get_mute_menu_text(false), "Mute");
     }
 }

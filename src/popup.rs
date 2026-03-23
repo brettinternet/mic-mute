@@ -36,7 +36,7 @@ fn setup_window(window: id) {
             window,
             setStyleMask: mask
                 | NSWindowStyleMask::NSTitledWindowMask
-                | NSWindowStyleMask::NSFullSizeContentViewWindowMask // NSWindowStyleMask::NSResizableWindowMask
+                | NSWindowStyleMask::NSFullSizeContentViewWindowMask
         ];
         let _: () = msg_send![
             window,
@@ -53,9 +53,10 @@ pub struct Popup {
 }
 
 impl Popup {
-    pub fn new(event_loop: &EventLoopMessage, muted: bool) -> Result<Self> {
+    pub fn new(event_loop: &EventLoopMessage, mic_muted: bool) -> Result<Self> {
+        let camera_muted = false;
         let window = WindowBuilder::new()
-            .with_title(get_mute_title_text(muted))
+            .with_title(get_mute_title_text(mic_muted))
             .with_titlebar_hidden(true)
             .with_movable_by_window_background(true)
             .with_always_on_top(true)
@@ -67,7 +68,6 @@ impl Popup {
             .with_resizable(false)
             .with_visible_on_all_workspaces(true)
             .with_visible(false)
-            // Doesn't work
             .with_has_shadow(true)
             .build(event_loop)
             .context("Failed to build window")?;
@@ -77,7 +77,7 @@ impl Popup {
 
         let scale = window.scale_factor();
         trace!("Window scale factor {}", scale);
-        let content = PopupContent::new(muted, size.to_logical(scale), window.theme())?;
+        let content = PopupContent::new(mic_muted, camera_muted, size.to_logical(scale), window.theme())?;
         unsafe {
             let ns_view = window.ns_view() as id;
             ns_view.addSubview_(content.view);
@@ -94,23 +94,30 @@ impl Popup {
     }
 
     fn get_size(scale: f64) -> WindowSize {
-        // PhysicalSize::new(400., 80.)
-        LogicalSize::new(200., 40.).to_physical(scale)
+        // Taller window to fit mic + camera rows
+        LogicalSize::new(200., 85.).to_physical(scale)
     }
 
     pub fn get_theme(&self) -> Theme {
         self.window.theme()
     }
 
-    /// TODO: add blur?
-    /// https://github.com/rust-windowing/winit/issues/538
-    /// https://github.com/servo/core-foundation-rs/blob/master/cocoa/examples/nsvisualeffectview_blur.rs
-
-    pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
-        self.window.set_title(get_mute_title_text(muted));
+    pub fn update(&mut self, mic_muted: bool) -> Result<&mut Self> {
+        self.window.set_title(get_mute_title_text(mic_muted));
         self.update_placement()?;
-        self.content.update(muted, self.get_theme())?;
-        if muted {
+        // Camera state not tracked by popup directly; caller should use update_with_camera
+        self.content.update(mic_muted, false, self.get_theme())?;
+        if mic_muted {
+            self.window.set_visible(true);
+        }
+        Ok(self)
+    }
+
+    pub fn update_with_camera(&mut self, mic_muted: bool, camera_muted: bool) -> Result<&mut Self> {
+        self.window.set_title(get_mute_title_text(mic_muted));
+        self.update_placement()?;
+        self.content.update(mic_muted, camera_muted, self.get_theme())?;
+        if mic_muted || camera_muted {
             self.window.set_visible(true);
         }
         Ok(self)
