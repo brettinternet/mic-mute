@@ -76,3 +76,38 @@ impl Throttle {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_throttle_available_initially() {
+        let mut t = Throttle::new(Duration::from_millis(100));
+        assert!(t.available());
+        assert_eq!(t.size(), 0);
+    }
+
+    #[test]
+    fn test_throttle_not_available_after_accept() {
+        let mut t = Throttle::new(Duration::from_millis(1000));
+        assert!(t.available());
+        t.accept().unwrap();
+        assert!(!t.available());
+    }
+
+    #[test]
+    fn test_throttle_accept_twice_fails() {
+        let mut t = Throttle::new(Duration::from_millis(1000));
+        t.accept().unwrap();
+        assert!(t.accept().is_err());
+    }
+
+    #[test]
+    fn test_throttle_available_after_timeout() {
+        let mut t = Throttle::new(Duration::from_millis(1));
+        t.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(t.available());
+    }
+}

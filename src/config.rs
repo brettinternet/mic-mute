@@ -41,3 +41,37 @@ impl AppVars {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_capitalize_empty() {
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn test_capitalize_single() {
+        assert_eq!(capitalize("a"), "A");
+    }
+
+    #[test]
+    fn test_capitalize_word() {
+        assert_eq!(capitalize("hello"), "Hello");
+    }
+
+    #[test]
+    fn test_capitalize_already_capitalized() {
+        assert_eq!(capitalize("Hello"), "Hello");
+    }
+
+    #[test]
+    fn test_app_vars_name() {
+        let vars = AppVars::new();
+        // CARGO_PKG_NAME = "mic-mute" -> "Mic Mute"
+        assert_eq!(vars.name, "Mic Mute");
+        assert_eq!(vars.shortname, "mic-mute");
+        assert!(!vars.version.is_empty());
+    }
+}
