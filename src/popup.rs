@@ -4,7 +4,8 @@ use crate::utils::get_cursor_pos;
 use anyhow::{Context, Result};
 use cocoa::{
     appkit::{NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility},
-    base::{id, YES},
+    base::{id, NO, YES},
+    foundation::{NSPoint, NSRect, NSSize},
 };
 use log::trace;
 use tao::{
@@ -20,11 +21,7 @@ const UNMUTED_TITLE: &str = "Unmuted";
 pub type WindowSize<T = f64> = PhysicalSize<T>;
 
 fn get_mute_title_text(muted: bool) -> &'static str {
-    if muted {
-        MUTED_TITLE
-    } else {
-        UNMUTED_TITLE
-    }
+    if muted { MUTED_TITLE } else { UNMUTED_TITLE }
 }
 
 fn setup_window(window: id) {
@@ -44,12 +41,10 @@ fn setup_window(window: id) {
         ];
         let _: () = msg_send![window, setTitlebarAppearsTransparent: YES];
 
-        // Set an adaptive background so text is always legible in dark and light mode.
-        // NSColor.windowBackgroundColor is a dynamic color that resolves to the correct
-        // system background shade based on the window's effective appearance.
-        let bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
-        let _: () = msg_send![window, setBackgroundColor: bg_color];
-        let _: () = msg_send![window, setOpaque: YES];
+        // Non-opaque window with clear background so NSVisualEffectView shows through.
+        let clear: id = msg_send![class!(NSColor), clearColor];
+        let _: () = msg_send![window, setBackgroundColor: clear];
+        let _: () = msg_send![window, setOpaque: NO];
     };
 }
 
@@ -84,11 +79,33 @@ impl Popup {
 
         let scale = window.scale_factor();
         trace!("Window scale factor {}", scale);
-        let content = PopupContent::new(mic_muted, camera_muted, size.to_logical(scale), window.theme())?;
+        let logical: LogicalSize<f64> = size.to_logical(scale);
+        let content = PopupContent::new(mic_muted, camera_muted, logical, window.theme())?;
+
         unsafe {
             let ns_view = window.ns_view() as id;
-            ns_view.addSubview_(content.view);
             let ns_window = window.ns_window() as id;
+
+            // NSVisualEffectView handles dark/light mode automatically.
+            // It propagates the correct effective appearance to child views so
+            // adaptive NSColor values (labelColor, systemRedColor) always resolve correctly.
+            let frame = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(logical.width, logical.height),
+            );
+            let vev: id = msg_send![class!(NSVisualEffectView), alloc];
+            let vev: id = msg_send![vev, initWithFrame: frame];
+            // NSVisualEffectMaterialPopover (6): solid-ish, adapts to dark/light
+            let _: () = msg_send![vev, setMaterial: 6i64];
+            // NSVisualEffectBlendingModeWithinWindow (1): more opaque, not see-through
+            let _: () = msg_send![vev, setBlendingMode: 1i64];
+            // NSVisualEffectStateActive (1): always render as active
+            let _: () = msg_send![vev, setState: 1i64];
+            // Resize with the window (NSViewWidthSizable|NSViewHeightSizable = 2|16)
+            let _: () = msg_send![vev, setAutoresizingMask: 18i64];
+
+            ns_view.addSubview_(vev);
+            ns_view.addSubview_(content.view);
             setup_window(ns_window);
         };
 
