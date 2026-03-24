@@ -59,6 +59,13 @@ impl Settings {
         serde_json::from_str(&data).ok()
     }
 
+    /// Returns the last-modified time of the settings file, or None if it doesn't exist.
+    pub fn mtime() -> Option<std::time::SystemTime> {
+        Self::config_path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(path) = Self::config_path() {
             if let Some(parent) = path.parent() {

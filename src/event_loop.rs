@@ -11,7 +11,7 @@ use log::trace;
 use muda::{MenuEvent, MenuId};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
@@ -105,6 +105,12 @@ pub fn start(
 
     let mut throttle = Throttle::new(Duration::from_millis(THROTTLE_TIMEOUT_MILLIS));
 
+    // Poll the settings file for changes every 2 seconds so edits to
+    // settings.json take effect without restarting the app.
+    let settings_poll_interval = Duration::from_secs(2);
+    let mut last_settings_check = Instant::now();
+    let mut last_settings_mtime = Settings::mtime();
+
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
@@ -191,6 +197,28 @@ pub fn start(
                 } else if shortcut_camera.load(Ordering::Relaxed) == id {
                     trace!("Toggle camera shortcut activated");
                     update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
+                }
+            }
+        }
+
+        // Reload settings if the file has been modified since we last checked.
+        if last_settings_check.elapsed() >= settings_poll_interval {
+            last_settings_check = Instant::now();
+            let current_mtime = Settings::mtime();
+            if current_mtime != last_settings_mtime {
+                last_settings_mtime = current_mtime;
+                trace!("settings.json changed on disk — reloading");
+                let new_settings = Settings::load();
+                let mut s = settings.write().unwrap();
+                *s = new_settings.clone();
+                drop(s);
+                let mut ui_w = ui.write().unwrap();
+                if let Err(e) = ui_w.reload_shortcuts(&new_settings) {
+                    log::error!("Failed to apply reloaded settings: {}", e);
+                } else {
+                    shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
+                    shortcut_camera.store(ui_w.camera_shortcut_id(), Ordering::Relaxed);
+                    trace!("Shortcuts reloaded from settings.json");
                 }
             }
         }
