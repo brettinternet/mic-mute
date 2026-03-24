@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use log::trace;
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
-    Menu, MenuItem, MenuId, PredefinedMenuItem,
+    CheckMenuItem, Menu, MenuItem, MenuId, PredefinedMenuItem,
 };
 use std::fmt;
 use tao::window::Theme;
@@ -60,12 +60,20 @@ pub struct Tray {
     pub systray: TrayIcon,
     pub toggle_mute: MenuItem,
     pub toggle_camera: MenuItem,
+    pub launch_at_login: CheckMenuItem,
+    pub show_in_dock: CheckMenuItem,
     pub preferences: MenuItem,
     pub quit: MenuItem,
 }
 
 impl Tray {
-    pub fn new(muted: bool, theme: Theme, app_vars: AppVars) -> Result<Self> {
+    pub fn new(
+        muted: bool,
+        theme: Theme,
+        app_vars: AppVars,
+        login_enabled: bool,
+        dock_visible: bool,
+    ) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
@@ -73,6 +81,8 @@ impl Tray {
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
         let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyV);
         let toggle_camera = MenuItem::new("Toggle Camera", true, Some(camera_shortcut));
+        let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
+        let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
         let preferences = MenuItem::new("Preferences\u{2026}", true, None);
         let quit = MenuItem::new("Exit", true, None);
 
@@ -81,6 +91,8 @@ impl Tray {
                 &toggle_mute,
                 &toggle_camera,
                 &PredefinedMenuItem::separator(),
+                &launch_at_login,
+                &show_in_dock,
                 &preferences,
                 &PredefinedMenuItem::separator(),
                 &quit,
@@ -100,6 +112,8 @@ impl Tray {
             systray,
             toggle_mute,
             toggle_camera,
+            launch_at_login,
+            show_in_dock,
             preferences,
             quit,
         };
@@ -132,6 +146,14 @@ impl Tray {
 
     pub fn toggle_camera_id(&self) -> &MenuId {
         self.toggle_camera.id()
+    }
+
+    pub fn launch_at_login_id(&self) -> &MenuId {
+        self.launch_at_login.id()
+    }
+
+    pub fn show_in_dock_id(&self) -> &MenuId {
+        self.show_in_dock.id()
     }
 
     pub fn preferences_id(&self) -> &MenuId {

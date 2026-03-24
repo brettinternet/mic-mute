@@ -31,13 +31,22 @@ impl UI {
         let event_loop = create();
         let popup = Popup::new(&event_loop, mic_muted).context("Failed to setup popup window")?;
         let theme = popup.get_theme();
-        let tray = Tray::new(mic_muted, theme, app_vars).context("Failed to create system tray")?;
+        let tray = Tray::new(
+            mic_muted,
+            theme,
+            app_vars,
+            crate::launch_at_login::is_enabled(),
+            settings.show_in_dock,
+        )
+        .context("Failed to create system tray")?;
         let shortcuts =
             Shortcuts::new(settings).context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
             button_toggle_mute: tray.toggle_mute_id().clone(),
             button_toggle_camera: tray.toggle_camera_id().clone(),
+            button_launch_at_login: tray.launch_at_login_id().clone(),
+            button_show_in_dock: tray.show_in_dock_id().clone(),
             button_preferences: tray.preferences_id().clone(),
             button_quit: tray.quit_id().clone(),
             shortcut_mic: shortcuts.mic_hotkey.id(),

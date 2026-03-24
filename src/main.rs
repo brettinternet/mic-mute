@@ -1,6 +1,7 @@
 mod camera;
 mod config;
 mod event_loop;
+mod launch_at_login;
 mod mic;
 mod popup;
 mod popup_content;
@@ -30,6 +31,10 @@ fn main() {
     info!("Starting app");
 
     let settings = Settings::load();
+
+    // Apply persisted dock visibility before the event loop starts
+    launch_at_login::set_dock_visible(settings.show_in_dock);
+
     let app_vars = AppVars::new();
 
     let controller = MicController::new().unwrap();

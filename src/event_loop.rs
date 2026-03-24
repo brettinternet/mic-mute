@@ -1,4 +1,5 @@
 use crate::camera::CameraController;
+use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::preferences::show_preferences;
 use crate::settings::Settings;
@@ -31,6 +32,8 @@ pub fn create() -> EventLoopMessage {
 pub struct EventIds {
     pub button_toggle_mute: MenuId,
     pub button_toggle_camera: MenuId,
+    pub button_launch_at_login: MenuId,
+    pub button_show_in_dock: MenuId,
     pub button_preferences: MenuId,
     pub button_quit: MenuId,
     pub shortcut_mic: u32,
@@ -91,6 +94,8 @@ pub fn start(
     let EventIds {
         button_toggle_mute,
         button_toggle_camera,
+        button_launch_at_login,
+        button_show_in_dock,
         button_preferences,
         button_quit,
         shortcut_mic,
@@ -139,6 +144,22 @@ pub fn start(
             } else if event.id == button_toggle_camera {
                 trace!("Toggle camera tray menu item selected");
                 update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
+            } else if event.id == button_launch_at_login {
+                trace!("Launch at login toggled");
+                let enabled = launch_at_login::is_enabled();
+                if let Err(e) = launch_at_login::set(!enabled) {
+                    log::error!("Launch at login error: {}", e);
+                }
+            } else if event.id == button_show_in_dock {
+                trace!("Show in dock toggled");
+                let mut s = settings.write().unwrap();
+                s.show_in_dock = !s.show_in_dock;
+                let visible = s.show_in_dock;
+                if let Err(e) = s.save() {
+                    log::error!("Failed to save settings: {}", e);
+                }
+                drop(s);
+                launch_at_login::set_dock_visible(visible);
             } else if event.id == button_preferences {
                 trace!("Preferences tray menu item selected");
                 let mut s = settings.write().unwrap();

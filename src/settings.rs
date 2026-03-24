@@ -17,10 +17,22 @@ impl Default for ShortcutConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub mic_shortcut: ShortcutConfig,
     pub camera_shortcut: Option<ShortcutConfig>,
+    #[serde(default)]
+    pub show_in_dock: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            mic_shortcut: ShortcutConfig::default(),
+            camera_shortcut: None,
+            show_in_dock: false,
+        }
+    }
 }
 
 impl Settings {
@@ -100,6 +112,7 @@ mod tests {
                 key: "M".to_string(),
             },
             camera_shortcut: None,
+            show_in_dock: false,
         };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
