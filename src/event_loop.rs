@@ -113,7 +113,13 @@ pub fn start(
 
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
-    event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    // Set activation policy based on persisted show_in_dock before the loop starts.
+    let initial_show_in_dock = settings.read().unwrap().show_in_dock;
+    event_loop.set_activation_policy(if initial_show_in_dock {
+        ActivationPolicy::Regular
+    } else {
+        ActivationPolicy::Accessory
+    });
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
@@ -153,8 +159,14 @@ pub fn start(
                 update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
-                let enabled = launch_at_login::is_enabled();
-                if let Err(e) = launch_at_login::set(!enabled) {
+                let mut s = settings.write().unwrap();
+                s.launch_at_login = !s.launch_at_login;
+                let enabled = s.launch_at_login;
+                if let Err(e) = s.save() {
+                    log::error!("Failed to save settings: {}", e);
+                }
+                drop(s);
+                if let Err(e) = launch_at_login::set(enabled) {
                     log::error!("Launch at login error: {}", e);
                 }
             } else if event.id == button_show_in_dock {

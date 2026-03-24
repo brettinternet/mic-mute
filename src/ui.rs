@@ -36,7 +36,7 @@ impl UI {
             mic_muted,
             theme,
             app_vars,
-            crate::launch_at_login::is_enabled(),
+            settings.launch_at_login,
             settings.show_in_dock,
             &settings.mic_shortcut,
             &settings.camera_shortcut,
@@ -104,6 +104,12 @@ impl UI {
         // Sync dock visibility and its tray checkbox
         self.tray.show_in_dock.set_checked(settings.show_in_dock);
         crate::launch_at_login::set_dock_visible(settings.show_in_dock);
+
+        // Sync launch-at-login plist and its tray checkbox
+        self.tray.launch_at_login.set_checked(settings.launch_at_login);
+        if let Err(e) = crate::launch_at_login::set(settings.launch_at_login) {
+            log::error!("Failed to apply launch_at_login setting: {}", e);
+        }
 
         Ok(())
     }

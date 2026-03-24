@@ -30,10 +30,15 @@ fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
     info!("Starting app");
 
-    let settings = Settings::load();
+    let mut settings = Settings::load();
 
-    // Apply persisted dock visibility before the event loop starts
-    launch_at_login::set_dock_visible(settings.show_in_dock);
+    // On first run (or after upgrading from a version without launch_at_login in
+    // settings), adopt the existing plist state so we don't silently disable it.
+    let plist_enabled = launch_at_login::is_enabled();
+    if plist_enabled != settings.launch_at_login {
+        settings.launch_at_login = plist_enabled;
+        let _ = settings.save();
+    }
 
     let app_vars = AppVars::new();
 

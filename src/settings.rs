@@ -32,6 +32,8 @@ pub struct Settings {
     pub camera_shortcut: ShortcutConfig,
     #[serde(default)]
     pub show_in_dock: bool,
+    #[serde(default)]
+    pub launch_at_login: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             mic_shortcut: ShortcutConfig::default(),
             camera_shortcut: default_camera_shortcut(),
             show_in_dock: false,
+            launch_at_login: false,
         }
     }
 }
@@ -133,6 +136,7 @@ mod tests {
                 key: "O".to_string(),
             },
             show_in_dock: false,
+            launch_at_login: false,
         };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
