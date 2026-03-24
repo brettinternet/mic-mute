@@ -8,12 +8,6 @@ fn capitalize(s: &str) -> String {
 
 pub struct AppVars {
     pub name: String,
-    pub shortname: &'static str,
-    pub version: &'static str,
-    pub description: &'static str,
-    pub repository: &'static str,
-    pub license: &'static str,
-    pub authors: Vec<String>,
 }
 
 impl AppVars {
@@ -24,20 +18,8 @@ impl AppVars {
             .map(capitalize)
             .collect::<Vec<String>>()
             .join(" ");
-        let authors: Vec<String> = env!("CARGO_PKG_AUTHORS")
-            .split(':')
-            .map(|s| s.to_string())
-            .collect();
 
-        Self {
-            name,
-            shortname,
-            version: env!("CARGO_PKG_VERSION"),
-            description: env!("CARGO_PKG_DESCRIPTION"),
-            repository: env!("CARGO_PKG_REPOSITORY"),
-            license: env!("CARGO_PKG_LICENSE"),
-            authors,
-        }
+        Self { name }
     }
 }
 
@@ -70,7 +52,5 @@ mod tests {
         let vars = AppVars::new();
         // CARGO_PKG_NAME = "mic-mute" -> "Mic Mute"
         assert_eq!(vars.name, "Mic Mute");
-        assert_eq!(vars.shortname, "mic-mute");
-        assert!(!vars.version.is_empty());
     }
 }

@@ -6,7 +6,6 @@ use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
 use log::trace;
-use muda::MenuId;
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -101,7 +100,4 @@ impl UI {
         Ok(self)
     }
 
-    pub fn preferences_id(&self) -> &MenuId {
-        self.tray.preferences_id()
-    }
 }
