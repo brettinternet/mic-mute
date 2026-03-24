@@ -31,6 +31,10 @@ core-foundation-sys = "0.8"
 objc2-core-audio = { version = "0.3", features = ["AudioHardware", "AudioHardwareDeprecated"] }
 objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes"] }
 
+[lints.rust]
+# objc 0.2.x macros use the old cfg(cargo-clippy) pattern which triggers this lint
+unexpected_cfgs = "allow"
+
 [package.metadata.bundle]
 name = "Mic Mute"
 identifier = "com.brettinternet.mic-mute"
