@@ -1,5 +1,7 @@
 use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 use crate::popup::Popup;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
@@ -36,6 +38,8 @@ impl UI {
             app_vars,
             crate::launch_at_login::is_enabled(),
             settings.show_in_dock,
+            &settings.mic_shortcut,
+            &settings.camera_shortcut,
         )
         .context("Failed to create system tray")?;
         let shortcuts =
@@ -48,8 +52,8 @@ impl UI {
             button_show_in_dock: tray.show_in_dock_id().clone(),
             button_preferences: tray.preferences_id().clone(),
             button_quit: tray.quit_id().clone(),
-            shortcut_mic: shortcuts.mic_hotkey.id(),
-            shortcut_camera: shortcuts.camera_hotkey.id(),
+            shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
+            shortcut_camera: Arc::new(AtomicU32::new(shortcuts.camera_hotkey.id())),
         };
 
         let ui = Self {
@@ -86,6 +90,23 @@ impl UI {
     pub fn hide_popup(&mut self) -> Result<&mut Self> {
         self.popup.hide().context("Failed to hide UI popup")?;
         Ok(self)
+    }
+
+    /// Re-register global hotkeys and update tray menu accelerators from new settings.
+    pub fn reload_shortcuts(&mut self, settings: &Settings) -> Result<()> {
+        self.shortcuts.reload(settings)?;
+        self.tray
+            .update_accelerators(&settings.mic_shortcut, &settings.camera_shortcut)
+            .context("Failed to update tray accelerators")?;
+        Ok(())
+    }
+
+    pub fn mic_shortcut_id(&self) -> u32 {
+        self.shortcuts.mic_hotkey.id()
+    }
+
+    pub fn camera_shortcut_id(&self) -> u32 {
+        self.shortcuts.camera_hotkey.id()
     }
 
     pub fn detect(&mut self) -> Result<&mut Self> {

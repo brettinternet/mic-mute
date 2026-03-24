@@ -1,4 +1,5 @@
 use crate::config::AppVars;
+use crate::settings::ShortcutConfig;
 use anyhow::{Context, Result};
 use log::trace;
 use muda::{
@@ -47,6 +48,56 @@ fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     Ok(icon)
 }
 
+fn muda_modifiers(config: &ShortcutConfig) -> Modifiers {
+    let mut mods = Modifiers::empty();
+    for m in &config.modifiers {
+        match m.as_str() {
+            "shift" => mods |= Modifiers::SHIFT,
+            "meta" | "cmd" | "command" => mods |= Modifiers::META,
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "alt" | "option" => mods |= Modifiers::ALT,
+            _ => {}
+        }
+    }
+    mods
+}
+
+fn muda_code(key: &str) -> Code {
+    match key.to_uppercase().as_str() {
+        "A" => Code::KeyA,
+        "B" => Code::KeyB,
+        "C" => Code::KeyC,
+        "D" => Code::KeyD,
+        "E" => Code::KeyE,
+        "F" => Code::KeyF,
+        "G" => Code::KeyG,
+        "H" => Code::KeyH,
+        "I" => Code::KeyI,
+        "J" => Code::KeyJ,
+        "K" => Code::KeyK,
+        "L" => Code::KeyL,
+        "M" => Code::KeyM,
+        "N" => Code::KeyN,
+        "O" => Code::KeyO,
+        "P" => Code::KeyP,
+        "Q" => Code::KeyQ,
+        "R" => Code::KeyR,
+        "S" => Code::KeyS,
+        "T" => Code::KeyT,
+        "U" => Code::KeyU,
+        "V" => Code::KeyV,
+        "W" => Code::KeyW,
+        "X" => Code::KeyX,
+        "Y" => Code::KeyY,
+        "Z" => Code::KeyZ,
+        _ => Code::KeyA,
+    }
+}
+
+fn accelerator_from_config(config: &ShortcutConfig) -> Accelerator {
+    Accelerator::new(Some(muda_modifiers(config)), muda_code(&config.key))
+}
+
 unsafe impl Send for Tray {}
 unsafe impl Sync for Tray {}
 
@@ -73,14 +124,22 @@ impl Tray {
         app_vars: AppVars,
         login_enabled: bool,
         dock_visible: bool,
+        mic_shortcut: &ShortcutConfig,
+        camera_shortcut: &ShortcutConfig,
     ) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
-        let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
-        let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
-        let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyO);
-        let toggle_camera = MenuItem::new("Toggle Camera", true, Some(camera_shortcut));
+        let toggle_mute = MenuItem::new(
+            get_mute_menu_text(muted),
+            true,
+            Some(accelerator_from_config(mic_shortcut)),
+        );
+        let toggle_camera = MenuItem::new(
+            "Toggle Camera",
+            true,
+            Some(accelerator_from_config(camera_shortcut)),
+        );
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
         let preferences = MenuItem::new("Preferences\u{2026}", true, None);
@@ -137,6 +196,21 @@ impl Tray {
     fn update_menu(&mut self, muted: bool) -> Result<()> {
         self.toggle_mute.set_text(get_mute_menu_text(muted));
         trace!("Updated tray menu");
+        Ok(())
+    }
+
+    /// Update the displayed keyboard shortcuts after settings change.
+    pub fn update_accelerators(
+        &mut self,
+        mic_shortcut: &ShortcutConfig,
+        camera_shortcut: &ShortcutConfig,
+    ) -> Result<()> {
+        self.toggle_mute
+            .set_accelerator(Some(accelerator_from_config(mic_shortcut)))
+            .context("Failed to update mic accelerator")?;
+        self.toggle_camera
+            .set_accelerator(Some(accelerator_from_config(camera_shortcut)))
+            .context("Failed to update camera accelerator")?;
         Ok(())
     }
 

@@ -69,11 +69,7 @@ impl Shortcuts {
         let hotkeys_manager = GlobalHotKeyManager::new().unwrap();
 
         let mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
-        let camera_config = settings.camera_shortcut.as_ref().cloned().unwrap_or(ShortcutConfig {
-            modifiers: vec!["shift".to_string(), "meta".to_string()],
-            key: "O".to_string(),
-        });
-        let camera_hotkey = hotkey_from_config(&camera_config);
+        let camera_hotkey = hotkey_from_config(&settings.camera_shortcut);
 
         hotkeys_manager
             .register(mic_hotkey)
@@ -87,6 +83,24 @@ impl Shortcuts {
             mic_hotkey,
             camera_hotkey,
         })
+    }
+
+    /// Unregister the current hotkeys and register new ones from updated settings.
+    pub fn reload(&mut self, settings: &Settings) -> Result<()> {
+        let _ = self.hotkeys_manager.unregister(self.mic_hotkey);
+        let _ = self.hotkeys_manager.unregister(self.camera_hotkey);
+
+        self.mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
+        self.camera_hotkey = hotkey_from_config(&settings.camera_shortcut);
+
+        self.hotkeys_manager
+            .register(self.mic_hotkey)
+            .context("Failed to register mic hotkey")?;
+        self.hotkeys_manager
+            .register(self.camera_hotkey)
+            .context("Failed to register camera hotkey")?;
+
+        Ok(())
     }
 }
 

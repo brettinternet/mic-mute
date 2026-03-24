@@ -9,6 +9,7 @@ use async_std::task;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
 use muda::{MenuEvent, MenuId};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tao::event::Event;
@@ -36,8 +37,8 @@ pub struct EventIds {
     pub button_show_in_dock: MenuId,
     pub button_preferences: MenuId,
     pub button_quit: MenuId,
-    pub shortcut_mic: u32,
-    pub shortcut_camera: u32,
+    pub shortcut_mic: Arc<AtomicU32>,
+    pub shortcut_camera: Arc<AtomicU32>,
 }
 
 fn update_mic(
@@ -163,8 +164,19 @@ pub fn start(
             } else if event.id == button_preferences {
                 trace!("Preferences tray menu item selected");
                 let mut s = settings.write().unwrap();
-                if let Err(e) = show_preferences(&mut s) {
-                    log::error!("Preferences error: {}", e);
+                match show_preferences(&mut s) {
+                    Ok(true) => {
+                        // Reset to Default clicked — reload hotkeys and tray accelerators
+                        let mut ui = ui.write().unwrap();
+                        if let Err(e) = ui.reload_shortcuts(&s) {
+                            log::error!("Failed to reload shortcuts: {}", e);
+                        } else {
+                            shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
+                            shortcut_camera.store(ui.camera_shortcut_id(), Ordering::Relaxed);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => log::error!("Preferences error: {}", e),
                 }
             }
         }
@@ -172,10 +184,11 @@ pub fn start(
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             // Only act on key-down; global-hotkey fires both Pressed and Released
             if event.state() == global_hotkey::HotKeyState::Pressed {
-                if shortcut_mic == event.id() {
+                let id = event.id();
+                if shortcut_mic.load(Ordering::Relaxed) == id {
                     trace!("Toggle mic shortcut activated");
                     update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
-                } else if shortcut_camera == event.id() {
+                } else if shortcut_camera.load(Ordering::Relaxed) == id {
                     trace!("Toggle camera shortcut activated");
                     update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
                 }

@@ -22,9 +22,10 @@ fn format_shortcut(config: &ShortcutConfig) -> String {
 }
 
 /// Show the preferences window as an NSAlert dialog.
-/// Returns Ok(true) if user pressed "Reset to Default", Ok(false) if dismissed.
+/// Returns Ok(true) if settings were reset to defaults, Ok(false) if dismissed.
 pub fn show_preferences(settings: &mut Settings) -> Result<bool> {
-    let mic_shortcut_str = format_shortcut(&settings.mic_shortcut);
+    let mic_str = format_shortcut(&settings.mic_shortcut);
+    let camera_str = format_shortcut(&settings.camera_shortcut);
 
     let reset_clicked = unsafe {
         let alert: *mut Object = msg_send![class!(NSAlert), new];
@@ -33,26 +34,25 @@ pub fn show_preferences(settings: &mut Settings) -> Result<bool> {
         let _: () = msg_send![alert, setMessageText: title];
 
         let info = format!(
-            "Current mic shortcut: {}\n\nTo change, edit ~/Library/Application Support/mic-mute/settings.json",
-            mic_shortcut_str
+            "Mic shortcut: {}\nCamera shortcut: {}\n\nTo change, edit:\n~/Library/Application Support/mic-mute/settings.json",
+            mic_str, camera_str
         );
         let info_str = NSString::alloc(nil).init_str(&info);
         let _: () = msg_send![alert, setInformativeText: info_str];
 
-        // Add buttons (first added = rightmost = default)
         let ok_str = NSString::alloc(nil).init_str("OK");
         let _: () = msg_send![alert, addButtonWithTitle: ok_str];
         let reset_str = NSString::alloc(nil).init_str("Reset to Default");
         let _: () = msg_send![alert, addButtonWithTitle: reset_str];
 
-        // Run the alert modal (returns 1000 for first button, 1001 for second, etc.)
+        // 1000 = first button (OK), 1001 = second button (Reset to Default)
         let response: i64 = msg_send![alert, runModal];
-        // 1001 = second button = "Reset to Default"
         response == 1001
     };
 
     if reset_clicked {
         settings.mic_shortcut = ShortcutConfig::default();
+        settings.camera_shortcut = Settings::default().camera_shortcut;
         settings.save()?;
     }
 
