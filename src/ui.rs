@@ -39,7 +39,6 @@ impl UI {
             settings.launch_at_login,
             settings.show_in_dock,
             &settings.mic_shortcut,
-            &settings.camera_shortcut,
         )
         .context("Failed to create system tray")?;
         let shortcuts =
@@ -47,13 +46,11 @@ impl UI {
 
         let event_ids = EventIds {
             button_toggle_mute: tray.toggle_mute_id().clone(),
-            button_toggle_camera: tray.toggle_camera_id().clone(),
             button_launch_at_login: tray.launch_at_login_id().clone(),
             button_show_in_dock: tray.show_in_dock_id().clone(),
             button_preferences: tray.preferences_id().clone(),
             button_quit: tray.quit_id().clone(),
             shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
-            shortcut_camera: Arc::new(AtomicU32::new(shortcuts.camera_hotkey.id())),
         };
 
         let ui = Self {
@@ -98,7 +95,7 @@ impl UI {
         // Re-register hotkeys and update tray accelerator labels
         self.shortcuts.reload(settings)?;
         self.tray
-            .update_accelerators(&settings.mic_shortcut, &settings.camera_shortcut)
+            .update_accelerators(&settings.mic_shortcut)
             .context("Failed to update tray accelerators")?;
 
         // Sync dock visibility and its tray checkbox
@@ -116,10 +113,6 @@ impl UI {
 
     pub fn mic_shortcut_id(&self) -> u32 {
         self.shortcuts.mic_hotkey.id()
-    }
-
-    pub fn camera_shortcut_id(&self) -> u32 {
-        self.shortcuts.camera_hotkey.id()
     }
 
     pub fn detect(&mut self) -> Result<&mut Self> {

@@ -17,19 +17,10 @@ impl Default for ShortcutConfig {
     }
 }
 
-fn default_camera_shortcut() -> ShortcutConfig {
-    ShortcutConfig {
-        modifiers: vec!["shift".to_string(), "meta".to_string()],
-        key: "O".to_string(),
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub mic_shortcut: ShortcutConfig,
-    #[serde(default = "default_camera_shortcut")]
-    pub camera_shortcut: ShortcutConfig,
     #[serde(default)]
     pub show_in_dock: bool,
     #[serde(default)]
@@ -40,7 +31,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             mic_shortcut: ShortcutConfig::default(),
-            camera_shortcut: default_camera_shortcut(),
             show_in_dock: false,
             launch_at_login: false,
         }
@@ -94,31 +84,17 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_default() {
-        let s = Settings::default();
-        assert_eq!(s.camera_shortcut.key, "O");
-        assert!(s.camera_shortcut.modifiers.contains(&"shift".to_string()));
-        assert!(s.camera_shortcut.modifiers.contains(&"meta".to_string()));
-    }
-
-    #[test]
     fn test_settings_json_round_trip() {
-        let mut s = Settings::default();
-        s.camera_shortcut = ShortcutConfig {
-            modifiers: vec!["shift".to_string(), "meta".to_string()],
-            key: "V".to_string(),
-        };
+        let s = Settings::default();
 
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "A");
-        assert_eq!(loaded.camera_shortcut.key, "V");
     }
 
     #[test]
     fn test_settings_save_and_load() {
         use std::fs;
-        use std::path::PathBuf;
 
         // Use a temp path for testing
         let tmp_dir = std::env::temp_dir().join("mic-mute-test-settings");
@@ -130,10 +106,6 @@ mod tests {
             mic_shortcut: ShortcutConfig {
                 modifiers: vec!["shift".to_string()],
                 key: "M".to_string(),
-            },
-            camera_shortcut: ShortcutConfig {
-                modifiers: vec!["shift".to_string(), "meta".to_string()],
-                key: "O".to_string(),
             },
             show_in_dock: false,
             launch_at_login: false,

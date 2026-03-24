@@ -32,13 +32,11 @@ pub fn create() -> EventLoopMessage {
 
 pub struct EventIds {
     pub button_toggle_mute: MenuId,
-    pub button_toggle_camera: MenuId,
     pub button_launch_at_login: MenuId,
     pub button_show_in_dock: MenuId,
     pub button_preferences: MenuId,
     pub button_quit: MenuId,
     pub shortcut_mic: Arc<AtomicU32>,
-    pub shortcut_camera: Arc<AtomicU32>,
 }
 
 fn update_mic(
@@ -63,27 +61,6 @@ fn update_mic(
     }
 }
 
-fn update_camera(
-    ui: Arc<RwLock<UI>>,
-    camera: Arc<RwLock<CameraController>>,
-    proxy: EventLoopProxyMessage,
-    toggle: bool,
-) {
-    let mut camera = camera.write().unwrap();
-    if toggle || camera.muted {
-        let state = if toggle { None } else { Some(camera.muted) };
-        camera.toggle(state).unwrap();
-        let mut ui = ui.write().unwrap();
-        ui.update_camera(camera.muted).unwrap();
-    }
-    if toggle && !camera.muted {
-        task::spawn(async move {
-            task::sleep(Duration::from_secs(1)).await;
-            proxy.send_event(Message::HidePopup).unwrap();
-        });
-    }
-}
-
 pub fn start(
     mut event_loop: EventLoop<Message>,
     event_ids: EventIds,
@@ -94,13 +71,11 @@ pub fn start(
 ) {
     let EventIds {
         button_toggle_mute,
-        button_toggle_camera,
         button_launch_at_login,
         button_show_in_dock,
         button_preferences,
         button_quit,
         shortcut_mic,
-        shortcut_camera,
     } = event_ids;
 
     let mut throttle = Throttle::new(Duration::from_millis(THROTTLE_TIMEOUT_MILLIS));
@@ -110,6 +85,9 @@ pub fn start(
     let settings_poll_interval = Duration::from_secs(2);
     let mut last_settings_check = Instant::now();
     let mut last_settings_mtime = Settings::mtime();
+
+    let camera_poll_interval = Duration::from_secs(2);
+    let mut last_camera_check = Instant::now();
 
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
@@ -126,8 +104,7 @@ pub fn start(
         match event {
             Event::UserEvent(Message::HidePopup) => {
                 let mic_controller = controller.read().unwrap();
-                let cam_controller = camera.read().unwrap();
-                if !mic_controller.muted && !cam_controller.muted {
+                if !mic_controller.muted {
                     let mut ui = ui.write().unwrap();
                     ui.hide_popup().unwrap();
                 }
@@ -148,15 +125,10 @@ pub fn start(
                 trace!("Exit tray menu item selected");
                 let mut mic = controller.write().unwrap();
                 mic.toggle(Some(false)).unwrap();
-                let mut cam = camera.write().unwrap();
-                cam.toggle(Some(false)).unwrap();
                 *control_flow = ControlFlow::Exit;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
                 update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
-            } else if event.id == button_toggle_camera {
-                trace!("Toggle camera tray menu item selected");
-                update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
                 let mut s = settings.write().unwrap();
@@ -190,7 +162,6 @@ pub fn start(
                             log::error!("Failed to apply settings: {}", e);
                         } else {
                             shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
-                            shortcut_camera.store(ui.camera_shortcut_id(), Ordering::Relaxed);
                         }
                     }
                     Ok(false) => {}
@@ -206,9 +177,6 @@ pub fn start(
                 if shortcut_mic.load(Ordering::Relaxed) == id {
                     trace!("Toggle mic shortcut activated");
                     update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
-                } else if shortcut_camera.load(Ordering::Relaxed) == id {
-                    trace!("Toggle camera shortcut activated");
-                    update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
                 }
             }
         }
@@ -229,9 +197,19 @@ pub fn start(
                     log::error!("Failed to apply reloaded settings: {}", e);
                 } else {
                     shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
-                    shortcut_camera.store(ui_w.camera_shortcut_id(), Ordering::Relaxed);
                     trace!("Settings reloaded from settings.json");
                 }
+            }
+        }
+
+        if last_camera_check.elapsed() >= camera_poll_interval {
+            last_camera_check = Instant::now();
+            // muted=false means camera is active (running somewhere); muted=true means idle
+            let active = camera.read().unwrap().is_running_anywhere().unwrap_or(false);
+            let muted = !active;
+            if muted != camera.read().unwrap().muted {
+                camera.write().unwrap().muted = muted;
+                ui.write().unwrap().update_camera(muted).unwrap();
             }
         }
     });

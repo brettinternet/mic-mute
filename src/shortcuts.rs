@@ -9,7 +9,6 @@ use global_hotkey::{
 pub struct Shortcuts {
     hotkeys_manager: GlobalHotKeyManager,
     pub mic_hotkey: HotKey,
-    pub camera_hotkey: HotKey,
 }
 
 fn modifiers_from_config(config: &ShortcutConfig) -> Modifiers {
@@ -69,36 +68,26 @@ impl Shortcuts {
         let hotkeys_manager = GlobalHotKeyManager::new().unwrap();
 
         let mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
-        let camera_hotkey = hotkey_from_config(&settings.camera_shortcut);
 
         hotkeys_manager
             .register(mic_hotkey)
             .context("Failed to register mic hotkey")?;
-        hotkeys_manager
-            .register(camera_hotkey)
-            .context("Failed to register camera hotkey")?;
 
         Ok(Self {
             hotkeys_manager,
             mic_hotkey,
-            camera_hotkey,
         })
     }
 
     /// Unregister the current hotkeys and register new ones from updated settings.
     pub fn reload(&mut self, settings: &Settings) -> Result<()> {
         let _ = self.hotkeys_manager.unregister(self.mic_hotkey);
-        let _ = self.hotkeys_manager.unregister(self.camera_hotkey);
 
         self.mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
-        self.camera_hotkey = hotkey_from_config(&settings.camera_shortcut);
 
         self.hotkeys_manager
             .register(self.mic_hotkey)
             .context("Failed to register mic hotkey")?;
-        self.hotkeys_manager
-            .register(self.camera_hotkey)
-            .context("Failed to register camera hotkey")?;
 
         Ok(())
     }

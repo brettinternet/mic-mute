@@ -110,7 +110,6 @@ impl fmt::Debug for Tray {
 pub struct Tray {
     pub systray: TrayIcon,
     pub toggle_mute: MenuItem,
-    pub toggle_camera: MenuItem,
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
     pub preferences: MenuItem,
@@ -125,7 +124,6 @@ impl Tray {
         login_enabled: bool,
         dock_visible: bool,
         mic_shortcut: &ShortcutConfig,
-        camera_shortcut: &ShortcutConfig,
     ) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
@@ -135,11 +133,6 @@ impl Tray {
             true,
             Some(accelerator_from_config(mic_shortcut)),
         );
-        let toggle_camera = MenuItem::new(
-            "Toggle Camera",
-            true,
-            Some(accelerator_from_config(camera_shortcut)),
-        );
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
         let preferences = MenuItem::new("Preferences\u{2026}", true, None);
@@ -148,7 +141,6 @@ impl Tray {
         tray_menu
             .append_items(&[
                 &toggle_mute,
-                &toggle_camera,
                 &PredefinedMenuItem::separator(),
                 &launch_at_login,
                 &show_in_dock,
@@ -170,7 +162,6 @@ impl Tray {
         let tray = Self {
             systray,
             toggle_mute,
-            toggle_camera,
             launch_at_login,
             show_in_dock,
             preferences,
@@ -203,23 +194,15 @@ impl Tray {
     pub fn update_accelerators(
         &mut self,
         mic_shortcut: &ShortcutConfig,
-        camera_shortcut: &ShortcutConfig,
     ) -> Result<()> {
         self.toggle_mute
             .set_accelerator(Some(accelerator_from_config(mic_shortcut)))
             .context("Failed to update mic accelerator")?;
-        self.toggle_camera
-            .set_accelerator(Some(accelerator_from_config(camera_shortcut)))
-            .context("Failed to update camera accelerator")?;
         Ok(())
     }
 
     pub fn toggle_mute_id(&self) -> &MenuId {
         self.toggle_mute.id()
-    }
-
-    pub fn toggle_camera_id(&self) -> &MenuId {
-        self.toggle_camera.id()
     }
 
     pub fn launch_at_login_id(&self) -> &MenuId {

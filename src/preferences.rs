@@ -25,7 +25,6 @@ fn format_shortcut(config: &ShortcutConfig) -> String {
 /// Returns Ok(true) if settings were reset to defaults, Ok(false) if dismissed.
 pub fn show_preferences(settings: &mut Settings) -> Result<bool> {
     let mic_str = format_shortcut(&settings.mic_shortcut);
-    let camera_str = format_shortcut(&settings.camera_shortcut);
 
     let reset_clicked = unsafe {
         let alert: *mut Object = msg_send![class!(NSAlert), new];
@@ -34,8 +33,7 @@ pub fn show_preferences(settings: &mut Settings) -> Result<bool> {
         let _: () = msg_send![alert, setMessageText: title];
 
         let info = format!(
-            "Mic shortcut: {}\nCamera shortcut: {}\n\nTo change, edit:\n~/Library/Application Support/mic-mute/settings.json",
-            mic_str, camera_str
+            "Mic shortcut: {mic_str}\n\nTo change, edit:\n~/Library/Application Support/mic-mute/settings.json"
         );
         let info_str = NSString::alloc(nil).init_str(&info);
         let _: () = msg_send![alert, setInformativeText: info_str];
@@ -52,7 +50,6 @@ pub fn show_preferences(settings: &mut Settings) -> Result<bool> {
 
     if reset_clicked {
         settings.mic_shortcut = ShortcutConfig::default();
-        settings.camera_shortcut = Settings::default().camera_shortcut;
         settings.save()?;
     }
 

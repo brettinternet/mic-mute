@@ -167,6 +167,8 @@ impl PopupContent {
             let _: () = msg_send![stack, addArrangedSubview: mic_label];
             let _: () = msg_send![stack, setCustomSpacing: 18.0_f64 afterView: mic_label];
             let _: () = msg_send![stack, addArrangedSubview: camera_label];
+            // Resize with parent view (NSViewWidthSizable|NSViewHeightSizable = 2|16)
+            let _: () = msg_send![stack, setAutoresizingMask: 18i64];
 
             stack
         };
