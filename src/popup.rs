@@ -94,7 +94,7 @@ impl Popup {
     }
 
     fn get_size(scale: f64) -> WindowSize {
-        LogicalSize::new(224., 92.).to_physical(scale)
+        LogicalSize::new(220., 44.).to_physical(scale)
     }
 
     pub fn get_theme(&self) -> Theme {
