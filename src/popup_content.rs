@@ -1,10 +1,20 @@
 use anyhow::{Context, Result};
 use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
-use cocoa::base::{id, nil, NO};
+use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
 use tao::dpi::LogicalSize;
 use tao::window::Theme;
+
+/// NSEdgeInsets for passing to `setEdgeInsets:` on NSStackView.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSEdgeInsets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
 
 const MUTED_DESCRIPTION: &str = "Microphone off";
 const UNMUTED_DESCRIPTION: &str = "Microphone on";
@@ -27,18 +37,8 @@ pub fn get_camera_mute_description_text(muted: bool) -> &'static str {
     }
 }
 
-fn get_row_frame(size: LogicalSize<f64>, row: u32) -> NSRect {
-    const ROW_HEIGHT: f64 = 22.;
-    const PADDING: f64 = 8.;
-    // row 0 = top (mic), row 1 = bottom (camera)
-    let total_rows = 2;
-    let total_height = (ROW_HEIGHT * total_rows as f64) + PADDING;
-    let y_start = (size.height - total_height) / 2.;
-    let y = y_start + (ROW_HEIGHT * (total_rows - 1 - row) as f64);
-    NSRect::new(
-        NSPoint::new(0., y),
-        NSSize::new(size.width, ROW_HEIGHT),
-    )
+fn zero_rect() -> NSRect {
+    NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.))
 }
 
 fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
@@ -74,10 +74,10 @@ fn make_ns_image(bytes: &[u8], icon_height: f64) -> Result<id> {
     Ok(ns_image)
 }
 
-fn make_label(frame: NSRect, text: &str, color: id) -> id {
+fn make_label(text: &str, color: id) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
-        let _: () = msg_send![label, initWithFrame: frame];
+        let _: () = msg_send![label, initWithFrame: zero_rect()];
         let ns_text = NSString::alloc(nil).init_str(text);
         label.setStringValue_(ns_text);
         let _: () = msg_send![label, setTextColor: color];
@@ -85,22 +85,18 @@ fn make_label(frame: NSRect, text: &str, color: id) -> id {
         let _: () = msg_send![label, setEditable: NO];
         let _: () = msg_send![label, setDrawsBackground: NO];
         let _: () = msg_send![label, setSelectable: NO];
-        const NSALIGNMENT_CENTER: i32 = 1;
-        let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
-        const FONT_INCREASE: f64 = 2.0;
         let ns_font = class!(NSFont);
         let default_size: f64 = msg_send![ns_font, systemFontSize];
-        let custom_font: *mut Object =
-            msg_send![ns_font, systemFontOfSize: default_size + FONT_INCREASE];
-        let _: () = msg_send![label, setFont: custom_font];
+        let font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size];
+        let _: () = msg_send![label, setFont: font];
         label
     }
 }
 
-fn make_small_label(frame: NSRect, text: &str, color: id) -> id {
+fn make_small_label(text: &str, color: id) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
-        let _: () = msg_send![label, initWithFrame: frame];
+        let _: () = msg_send![label, initWithFrame: zero_rect()];
         let ns_text = NSString::alloc(nil).init_str(text);
         label.setStringValue_(ns_text);
         let _: () = msg_send![label, setTextColor: color];
@@ -108,13 +104,52 @@ fn make_small_label(frame: NSRect, text: &str, color: id) -> id {
         let _: () = msg_send![label, setEditable: NO];
         let _: () = msg_send![label, setDrawsBackground: NO];
         let _: () = msg_send![label, setSelectable: NO];
-        const NSALIGNMENT_CENTER: i32 = 1;
-        let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
         let ns_font = class!(NSFont);
-        let default_size: f64 = msg_send![ns_font, smallSystemFontSize];
-        let small_font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size];
-        let _: () = msg_send![label, setFont: small_font];
+        let small_size: f64 = msg_send![ns_font, smallSystemFontSize];
+        let font: *mut Object = msg_send![ns_font, systemFontOfSize: small_size];
+        let _: () = msg_send![label, setFont: font];
         label
+    }
+}
+
+fn make_image_view(image: id) -> id {
+    unsafe {
+        let image_view = NSImageView::alloc(nil);
+        let _: () = msg_send![image_view, initWithFrame: zero_rect()];
+        image_view.setImage_(image);
+        image_view
+    }
+}
+
+/// Build a horizontal NSStackView row: [icon  label  subtitle?]
+fn make_row(icon: id, label: id, subtitle: Option<id>) -> id {
+    unsafe {
+        const HORIZONTAL: i64 = 0;
+        const GRAVITY_CENTER: i32 = 2;
+        const ALIGN_CENTER_Y: i32 = 9; // NSLayoutAttributeCenterY
+
+        let row: *mut Object = msg_send![class!(NSStackView), alloc];
+        let _: () = msg_send![row, initWithFrame: zero_rect()];
+        let _: () = msg_send![row, setOrientation: HORIZONTAL];
+        let _: () = msg_send![row, setAlignment: ALIGN_CENTER_Y];
+        let _: () = msg_send![row, setSpacing: 6.0_f64];
+        let _: () = msg_send![row, addView: icon inGravity: GRAVITY_CENTER];
+        let _: () = msg_send![row, addView: label inGravity: GRAVITY_CENTER];
+        if let Some(sub) = subtitle {
+            let _: () = msg_send![row, addView: sub inGravity: GRAVITY_CENTER];
+        }
+        row
+    }
+}
+
+fn make_separator() -> id {
+    unsafe {
+        // NSBox with NSBoxSeparator (type 2) draws a native 1pt horizontal rule
+        const NS_BOX_SEPARATOR: i32 = 2;
+        let sep: *mut Object = msg_send![class!(NSBox), alloc];
+        let _: () = msg_send![sep, init];
+        let _: () = msg_send![sep, setBoxType: NS_BOX_SEPARATOR];
+        sep
     }
 }
 
@@ -193,8 +228,6 @@ impl PopupContent {
         let color_gray_light = make_ns_color(0.4, 0.4, 0.4, 1.);
         let color_gray_dark = make_ns_color(0.6, 0.6, 0.6, 1.);
 
-        let mic_row_frame = get_row_frame(size, 0);
-        let camera_row_frame = get_row_frame(size, 1);
         let view_frame = get_frame_rect(size);
 
         let (initial_mic_image, initial_mic_color) = Self::pick_mic_image_and_color(
@@ -211,38 +244,34 @@ impl PopupContent {
 
         let initial_device_color = if theme == Theme::Dark { color_gray_dark } else { color_gray_light };
 
-        let mic_label = make_label(mic_row_frame, get_mic_mute_description_text(mic_muted), initial_mic_color);
-        let mic_device_label = make_small_label(mic_row_frame, "", initial_device_color);
-        let camera_label = make_label(camera_row_frame, get_camera_mute_description_text(camera_muted), initial_camera_color);
+        let mic_label = make_label(get_mic_mute_description_text(mic_muted), initial_mic_color);
+        let mic_device_label = make_small_label("", initial_device_color);
+        let camera_label = make_label(get_camera_mute_description_text(camera_muted), initial_camera_color);
 
-        let mic_image_view = unsafe {
-            let image_view = NSImageView::alloc(nil);
-            let _: () = msg_send![image_view, initWithFrame: mic_row_frame];
-            image_view.setImage_(initial_mic_image);
-            image_view
-        };
+        let mic_image_view = make_image_view(initial_mic_image);
+        let mic_row = make_row(mic_image_view, mic_label, Some(mic_device_label));
+        let camera_row = make_row(make_image_view(nil), camera_label, None);
+        let separator = make_separator();
 
         let view = unsafe {
+            const VERTICAL: i64 = 1;
+            const GRAVITY_CENTER: i32 = 2;
+            const ALIGN_CENTER_X: i32 = 10; // NSLayoutAttributeCenterX
+
             let stack_view: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![stack_view, initWithFrame: view_frame];
-            const NS_USER_INTERFACE_LAYOUT_ORIENTATION_VERTICAL: i64 = 1;
-            let _: () = msg_send![stack_view, setOrientation: NS_USER_INTERFACE_LAYOUT_ORIENTATION_VERTICAL];
-            const NS_STACK_VIEW_GRAVITY_CENTER: i32 = 2;
+            let _: () = msg_send![stack_view, setOrientation: VERTICAL];
+            let _: () = msg_send![stack_view, setAlignment: ALIGN_CENTER_X];
+            let _: () = msg_send![stack_view, setSpacing: 6.0_f64];
+            let insets = NSEdgeInsets { top: 12., left: 14., bottom: 12., right: 14. };
+            let _: () = msg_send![stack_view, setEdgeInsets: insets];
 
-            // Mic row: icon + status label + (optional) device name label
-            let mic_row: *mut Object = msg_send![class!(NSStackView), alloc];
-            let _: () = msg_send![mic_row, initWithFrame: mic_row_frame];
-            let _: () = msg_send![mic_row, addView: mic_image_view inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
-            let _: () = msg_send![mic_row, addView: mic_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
-            let _: () = msg_send![mic_row, addView: mic_device_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
+            let _: () = msg_send![stack_view, addView: mic_row inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack_view, addView: separator inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack_view, addView: camera_row inGravity: GRAVITY_CENTER];
 
-            // Camera row: status label only
-            let camera_row: *mut Object = msg_send![class!(NSStackView), alloc];
-            let _: () = msg_send![camera_row, initWithFrame: camera_row_frame];
-            let _: () = msg_send![camera_row, addView: camera_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
-
-            let _: () = msg_send![stack_view, addView: mic_row inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
-            let _: () = msg_send![stack_view, addView: camera_row inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
+            // Make the separator stretch full width
+            let _: () = msg_send![separator, setTranslatesAutoresizingMaskIntoConstraints: YES];
 
             stack_view
         };

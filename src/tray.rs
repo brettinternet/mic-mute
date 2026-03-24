@@ -79,7 +79,7 @@ impl Tray {
         let tray_menu = Menu::new();
         let mute_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
-        let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyV);
+        let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyO);
         let toggle_camera = MenuItem::new("Toggle Camera", true, Some(camera_shortcut));
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);

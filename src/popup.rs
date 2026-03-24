@@ -94,8 +94,7 @@ impl Popup {
     }
 
     fn get_size(scale: f64) -> WindowSize {
-        // Taller window to fit mic + camera rows
-        LogicalSize::new(200., 85.).to_physical(scale)
+        LogicalSize::new(224., 92.).to_physical(scale)
     }
 
     pub fn get_theme(&self) -> Theme {

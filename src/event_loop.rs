@@ -170,12 +170,15 @@ pub fn start(
         }
 
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if shortcut_mic == event.id() {
-                trace!("Toggle mic shortcut activated");
-                update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
-            } else if shortcut_camera == event.id() {
-                trace!("Toggle camera shortcut activated");
-                update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
+            // Only act on key-down; global-hotkey fires both Pressed and Released
+            if event.state() == global_hotkey::HotKeyState::Pressed {
+                if shortcut_mic == event.id() {
+                    trace!("Toggle mic shortcut activated");
+                    update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
+                } else if shortcut_camera == event.id() {
+                    trace!("Toggle camera shortcut activated");
+                    update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
+                }
             }
         }
     });

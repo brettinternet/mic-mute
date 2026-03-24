@@ -71,7 +71,7 @@ impl Shortcuts {
         let mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
         let camera_config = settings.camera_shortcut.as_ref().cloned().unwrap_or(ShortcutConfig {
             modifiers: vec!["shift".to_string(), "meta".to_string()],
-            key: "V".to_string(),
+            key: "O".to_string(),
         });
         let camera_hotkey = hotkey_from_config(&camera_config);
 
