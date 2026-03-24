@@ -92,12 +92,19 @@ impl UI {
         Ok(self)
     }
 
-    /// Re-register global hotkeys and update tray menu accelerators from new settings.
-    pub fn reload_shortcuts(&mut self, settings: &Settings) -> Result<()> {
+    /// Apply all settings to the live app state.
+    /// Safe to call whenever settings change — all operations are idempotent.
+    pub fn apply_settings(&mut self, settings: &Settings) -> Result<()> {
+        // Re-register hotkeys and update tray accelerator labels
         self.shortcuts.reload(settings)?;
         self.tray
             .update_accelerators(&settings.mic_shortcut, &settings.camera_shortcut)
             .context("Failed to update tray accelerators")?;
+
+        // Sync dock visibility and its tray checkbox
+        self.tray.show_in_dock.set_checked(settings.show_in_dock);
+        crate::launch_at_login::set_dock_visible(settings.show_in_dock);
+
         Ok(())
     }
 

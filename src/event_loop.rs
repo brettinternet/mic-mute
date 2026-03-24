@@ -172,10 +172,10 @@ pub fn start(
                 let mut s = settings.write().unwrap();
                 match show_preferences(&mut s) {
                     Ok(true) => {
-                        // Reset to Default clicked — reload hotkeys and tray accelerators
+                        // Reset to Default clicked — apply all settings immediately
                         let mut ui = ui.write().unwrap();
-                        if let Err(e) = ui.reload_shortcuts(&s) {
-                            log::error!("Failed to reload shortcuts: {}", e);
+                        if let Err(e) = ui.apply_settings(&s) {
+                            log::error!("Failed to apply settings: {}", e);
                         } else {
                             shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
                             shortcut_camera.store(ui.camera_shortcut_id(), Ordering::Relaxed);
@@ -213,12 +213,12 @@ pub fn start(
                 *s = new_settings.clone();
                 drop(s);
                 let mut ui_w = ui.write().unwrap();
-                if let Err(e) = ui_w.reload_shortcuts(&new_settings) {
+                if let Err(e) = ui_w.apply_settings(&new_settings) {
                     log::error!("Failed to apply reloaded settings: {}", e);
                 } else {
                     shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
                     shortcut_camera.store(ui_w.camera_shortcut_id(), Ordering::Relaxed);
-                    trace!("Shortcuts reloaded from settings.json");
+                    trace!("Settings reloaded from settings.json");
                 }
             }
         }
