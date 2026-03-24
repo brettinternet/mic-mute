@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use cocoa::appkit::{NSImage, NSImageView, NSTextField};
+use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
 use cocoa::base::{id, nil, NO};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
@@ -34,10 +34,11 @@ fn zero_rect() -> NSRect {
 }
 
 fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
-    NSRect::new(
-        NSPoint::new(0., 0.),
-        NSSize::new(size.width, size.height),
-    )
+    NSRect::new(NSPoint::new(0., 0.), NSSize::new(size.width, size.height))
+}
+
+fn make_ns_color(r: f64, g: f64, b: f64, a: f64) -> id {
+    unsafe { NSColor::colorWithRed_green_blue_alpha_(nil, r, g, b, a) }
 }
 
 fn make_ns_image(bytes: &[u8], icon_height: f64) -> Result<id> {
@@ -60,18 +61,6 @@ fn make_ns_image(bytes: &[u8], icon_height: f64) -> Result<id> {
         ns_image
     };
     Ok(ns_image)
-}
-
-/// Returns a system-adaptive color: red when muted, primary label color when unmuted.
-/// These NSColor values automatically adapt to dark/light mode without manual switching.
-fn adaptive_text_color(muted: bool) -> id {
-    unsafe {
-        if muted {
-            msg_send![class!(NSColor), systemRedColor]
-        } else {
-            msg_send![class!(NSColor), labelColor]
-        }
-    }
 }
 
 fn make_label(text: &str, color: id) -> id {
@@ -102,22 +91,56 @@ fn make_image_view(image: id) -> id {
     }
 }
 
+/// Text color for the given mute state and theme.
+/// Returns a cached id — callers must not release it.
+fn text_color(muted: bool, theme: Theme, colors: &ColorCache) -> id {
+    match (muted, theme) {
+        (false, Theme::Light) => colors.normal_light,
+        (false, _) => colors.normal_dark,
+        (true, Theme::Light) => colors.muted_light,
+        (true, _) => colors.muted_dark,
+    }
+}
+
+/// Pre-allocated NSColor objects for text. Created once, reused every update.
+struct ColorCache {
+    // Unmuted: near-black on light, near-white on dark
+    normal_light: id,
+    normal_dark: id,
+    // Muted: red variants
+    muted_light: id,
+    muted_dark: id,
+}
+
+impl ColorCache {
+    fn new() -> Self {
+        Self {
+            normal_light: make_ns_color(0.10, 0.10, 0.10, 1.0),
+            normal_dark: make_ns_color(0.92, 0.92, 0.92, 1.0),
+            muted_light: make_ns_color(0.82, 0.12, 0.12, 1.0),
+            muted_dark: make_ns_color(1.00, 0.38, 0.38, 1.0),
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct PopupContent {
     mic_label: id,
     mic_image_view: id,
     camera_label: id,
     pub view: id,
-    // Cached images (created once, reused on update)
+    // Cached images (created once, reused on every update)
     image_muted_light: id,
     image_muted_dark: id,
     image_unmuted_light: id,
     image_unmuted_dark: id,
-    // Cached NSString objects for label text (no allocations in update)
+    // Cached text strings (no NSString allocation per update)
     ns_text_mic_on: id,
     ns_text_mic_off: id,
     ns_text_camera_on: id,
     ns_text_camera_off: id,
+    // Cached colors
+    colors: ColorCache,
 }
 
 unsafe impl Send for PopupContent {}
@@ -131,34 +154,40 @@ impl PopupContent {
         const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light.png");
         const ICON_HEIGHT: f64 = 16.0;
 
-        // Create all cached images once
         let image_muted_light = make_ns_image(DARK_MIC_OFF, ICON_HEIGHT)?;
         let image_muted_dark = make_ns_image(LIGHT_MIC_OFF, ICON_HEIGHT)?;
         let image_unmuted_light = make_ns_image(DARK_MIC_ON, ICON_HEIGHT)?;
         let image_unmuted_dark = make_ns_image(LIGHT_MIC_ON, ICON_HEIGHT)?;
 
-        // Cached label text strings (no per-update allocs)
         let ns_text_mic_on = unsafe { NSString::alloc(nil).init_str(UNMUTED_DESCRIPTION) };
         let ns_text_mic_off = unsafe { NSString::alloc(nil).init_str(MUTED_DESCRIPTION) };
         let ns_text_camera_on = unsafe { NSString::alloc(nil).init_str(CAMERA_UNMUTED_DESCRIPTION) };
         let ns_text_camera_off = unsafe { NSString::alloc(nil).init_str(CAMERA_MUTED_DESCRIPTION) };
+
+        let colors = ColorCache::new();
 
         let initial_mic_image = Self::pick_mic_image(
             mic_muted, theme,
             image_muted_light, image_muted_dark, image_unmuted_light, image_unmuted_dark,
         );
 
-        let mic_label = make_label(get_mic_mute_description_text(mic_muted), adaptive_text_color(mic_muted));
-        let camera_label = make_label(get_camera_mute_description_text(camera_muted), adaptive_text_color(camera_muted));
+        let mic_label = make_label(
+            get_mic_mute_description_text(mic_muted),
+            text_color(mic_muted, theme, &colors),
+        );
+        let camera_label = make_label(
+            get_camera_mute_description_text(camera_muted),
+            text_color(camera_muted, theme, &colors),
+        );
         let mic_image_view = make_image_view(initial_mic_image);
 
         let view_frame = get_frame_rect(size);
 
-        // Horizontal layout: [mic_icon | mic_label   camera_label]
-        // Uses system-adaptive NSColors — no manual dark/light switching needed for text.
+        // Horizontal NSStackView: [mic_icon | mic_label  ·  camera_label]
+        // Uses addArrangedSubview: (the standard API) rather than the deprecated
+        // gravity-based addView:inGravity: to avoid vertical overflow bugs.
         let view = unsafe {
             const HORIZONTAL: i64 = 0;
-            const GRAVITY_CENTER: i32 = 2;
             const ALIGN_CENTER_Y: i32 = 9;
 
             let stack: *mut Object = msg_send![class!(NSStackView), alloc];
@@ -166,14 +195,14 @@ impl PopupContent {
             let _: () = msg_send![stack, setOrientation: HORIZONTAL];
             let _: () = msg_send![stack, setAlignment: ALIGN_CENTER_Y];
             let _: () = msg_send![stack, setSpacing: 8.0_f64];
-            let insets = NSEdgeInsets { top: 8., left: 12., bottom: 8., right: 12. };
+            let insets = NSEdgeInsets { top: 10., left: 14., bottom: 10., right: 14. };
             let _: () = msg_send![stack, setEdgeInsets: insets];
 
-            let _: () = msg_send![stack, addView: mic_image_view inGravity: GRAVITY_CENTER];
-            let _: () = msg_send![stack, addView: mic_label inGravity: GRAVITY_CENTER];
-            // Extra spacing creates a visual break between mic and camera sections
-            let _: () = msg_send![stack, setCustomSpacing: 20.0_f64 afterView: mic_label];
-            let _: () = msg_send![stack, addView: camera_label inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addArrangedSubview: mic_image_view];
+            let _: () = msg_send![stack, addArrangedSubview: mic_label];
+            // Add extra gap before the camera section
+            let _: () = msg_send![stack, setCustomSpacing: 18.0_f64 afterView: mic_label];
+            let _: () = msg_send![stack, addArrangedSubview: camera_label];
 
             stack
         };
@@ -191,6 +220,7 @@ impl PopupContent {
             ns_text_mic_off,
             ns_text_camera_on,
             ns_text_camera_off,
+            colors,
         })
     }
 
@@ -231,9 +261,9 @@ impl PopupContent {
         unsafe {
             self.mic_image_view.setImage_(img);
             self.mic_label.setStringValue_(ns_mic_text);
-            let _: () = msg_send![self.mic_label, setTextColor: adaptive_text_color(mic_muted)];
+            let _: () = msg_send![self.mic_label, setTextColor: text_color(mic_muted, theme, &self.colors)];
             self.camera_label.setStringValue_(ns_camera_text);
-            let _: () = msg_send![self.camera_label, setTextColor: adaptive_text_color(camera_muted)];
+            let _: () = msg_send![self.camera_label, setTextColor: text_color(camera_muted, theme, &self.colors)];
         }
 
         Ok(self)

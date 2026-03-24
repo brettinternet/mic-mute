@@ -43,6 +43,13 @@ fn setup_window(window: id) {
             setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
         ];
         let _: () = msg_send![window, setTitlebarAppearsTransparent: YES];
+
+        // Set an adaptive background so text is always legible in dark and light mode.
+        // NSColor.windowBackgroundColor is a dynamic color that resolves to the correct
+        // system background shade based on the window's effective appearance.
+        let bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
+        let _: () = msg_send![window, setBackgroundColor: bg_color];
+        let _: () = msg_send![window, setOpaque: YES];
     };
 }
 
@@ -94,7 +101,7 @@ impl Popup {
     }
 
     fn get_size(scale: f64) -> WindowSize {
-        LogicalSize::new(220., 44.).to_physical(scale)
+        LogicalSize::new(220., 52.).to_physical(scale)
     }
 
     pub fn get_theme(&self) -> Theme {
