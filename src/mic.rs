@@ -4,7 +4,8 @@ use log::{error, trace};
 use objc2_core_audio::{
     kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError,
-    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMaster,
+    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal,
     AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
     AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
@@ -74,7 +75,7 @@ impl MicController {
             let mut property_address = AudioObjectPropertyAddress {
                 mSelector: kAudioDevicePropertyStreamConfiguration,
                 mScope: kAudioDevicePropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMaster,
+                mElement: kAudioObjectPropertyElementMain,
             };
             let mut data_size = 0u32;
             let status = unsafe {
@@ -134,7 +135,7 @@ impl MicController {
         let mut property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMaster,
+            mElement: kAudioObjectPropertyElementMain,
         };
         let muted = 0_u32;
         let mut data_size = mem::size_of::<u32>() as u32;
@@ -174,7 +175,7 @@ impl MicController {
         let mut property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMaster,
+            mElement: kAudioObjectPropertyElementMain,
         };
         let data = state as u32;
         let data_size = mem::size_of::<u32>() as u32;
@@ -229,6 +230,31 @@ impl MicController {
     pub fn toggle(&mut self, state: Option<bool>) -> Result<&Self> {
         let state = state.unwrap_or(!self.muted);
         self.mute_all(state)
+    }
+
+    /// Returns the name of the default system input device, if available.
+    pub fn active_device_name(&self) -> Option<String> {
+        let mut property_address = AudioObjectPropertyAddress {
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let mut device_id: AudioDeviceID = 0;
+        let mut data_size = mem::size_of::<AudioDeviceID>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                1, // kAudioObjectSystemObject
+                NonNull::new_unchecked(&mut property_address),
+                0,
+                null(),
+                NonNull::new_unchecked(&mut data_size),
+                NonNull::new_unchecked(&mut device_id as *mut _ as *mut _),
+            )
+        };
+        if status != kAudioHardwareNoError as i32 || device_id == 0 {
+            return None;
+        }
+        get_device_name(device_id).ok()
     }
 }
 

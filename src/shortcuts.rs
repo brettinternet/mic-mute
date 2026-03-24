@@ -1,3 +1,4 @@
+use crate::settings::{Settings, ShortcutConfig};
 use anyhow::{Context, Result};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -7,26 +8,132 @@ use global_hotkey::{
 #[allow(dead_code)]
 pub struct Shortcuts {
     hotkeys_manager: GlobalHotKeyManager,
-    pub shift_meta_a: HotKey,
-    pub shift_meta_v: HotKey,
+    pub mic_hotkey: HotKey,
+    pub camera_hotkey: HotKey,
+}
+
+fn modifiers_from_config(config: &ShortcutConfig) -> Modifiers {
+    let mut mods = Modifiers::empty();
+    for m in &config.modifiers {
+        match m.as_str() {
+            "shift" => mods |= Modifiers::SHIFT,
+            "meta" | "cmd" | "command" => mods |= Modifiers::META,
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "alt" | "option" => mods |= Modifiers::ALT,
+            _ => {}
+        }
+    }
+    mods
+}
+
+fn code_from_str(key: &str) -> Code {
+    match key.to_uppercase().as_str() {
+        "A" => Code::KeyA,
+        "B" => Code::KeyB,
+        "C" => Code::KeyC,
+        "D" => Code::KeyD,
+        "E" => Code::KeyE,
+        "F" => Code::KeyF,
+        "G" => Code::KeyG,
+        "H" => Code::KeyH,
+        "I" => Code::KeyI,
+        "J" => Code::KeyJ,
+        "K" => Code::KeyK,
+        "L" => Code::KeyL,
+        "M" => Code::KeyM,
+        "N" => Code::KeyN,
+        "O" => Code::KeyO,
+        "P" => Code::KeyP,
+        "Q" => Code::KeyQ,
+        "R" => Code::KeyR,
+        "S" => Code::KeyS,
+        "T" => Code::KeyT,
+        "U" => Code::KeyU,
+        "V" => Code::KeyV,
+        "W" => Code::KeyW,
+        "X" => Code::KeyX,
+        "Y" => Code::KeyY,
+        "Z" => Code::KeyZ,
+        _ => Code::KeyA,
+    }
+}
+
+fn hotkey_from_config(config: &ShortcutConfig) -> HotKey {
+    let mods = modifiers_from_config(config);
+    let code = code_from_str(&config.key);
+    HotKey::new(Some(mods), code)
 }
 
 impl Shortcuts {
-    pub fn new() -> Result<Self> {
+    pub fn new(settings: &Settings) -> Result<Self> {
         let hotkeys_manager = GlobalHotKeyManager::new().unwrap();
-        let shift_meta_a = HotKey::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyA);
-        let shift_meta_v = HotKey::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyV);
+
+        let mic_hotkey = hotkey_from_config(&settings.mic_shortcut);
+        let camera_config = settings.camera_shortcut.as_ref().cloned().unwrap_or(ShortcutConfig {
+            modifiers: vec!["shift".to_string(), "meta".to_string()],
+            key: "V".to_string(),
+        });
+        let camera_hotkey = hotkey_from_config(&camera_config);
+
         hotkeys_manager
-            .register(shift_meta_a)
+            .register(mic_hotkey)
             .context("Failed to register mic hotkey")?;
         hotkeys_manager
-            .register(shift_meta_v)
+            .register(camera_hotkey)
             .context("Failed to register camera hotkey")?;
-        let shortcuts = Self {
+
+        Ok(Self {
             hotkeys_manager,
-            shift_meta_a,
-            shift_meta_v,
+            mic_hotkey,
+            camera_hotkey,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::ShortcutConfig;
+
+    #[test]
+    fn test_code_from_str_uppercase() {
+        assert!(matches!(code_from_str("A"), Code::KeyA));
+        assert!(matches!(code_from_str("V"), Code::KeyV));
+    }
+
+    #[test]
+    fn test_code_from_str_lowercase() {
+        assert!(matches!(code_from_str("a"), Code::KeyA));
+        assert!(matches!(code_from_str("v"), Code::KeyV));
+    }
+
+    #[test]
+    fn test_modifiers_from_config() {
+        let config = ShortcutConfig {
+            modifiers: vec!["shift".to_string(), "meta".to_string()],
+            key: "A".to_string(),
         };
-        Ok(shortcuts)
+        let mods = modifiers_from_config(&config);
+        assert!(mods.contains(Modifiers::SHIFT));
+        assert!(mods.contains(Modifiers::META));
+        assert!(!mods.contains(Modifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_modifiers_from_config_all() {
+        let config = ShortcutConfig {
+            modifiers: vec![
+                "shift".to_string(),
+                "ctrl".to_string(),
+                "alt".to_string(),
+                "meta".to_string(),
+            ],
+            key: "A".to_string(),
+        };
+        let mods = modifiers_from_config(&config);
+        assert!(mods.contains(Modifiers::SHIFT));
+        assert!(mods.contains(Modifiers::CONTROL));
+        assert!(mods.contains(Modifiers::ALT));
+        assert!(mods.contains(Modifiers::META));
     }
 }

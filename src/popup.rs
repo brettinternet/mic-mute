@@ -102,21 +102,15 @@ impl Popup {
         self.window.theme()
     }
 
-    pub fn update(&mut self, mic_muted: bool) -> Result<&mut Self> {
+    pub fn update_with_camera(
+        &mut self,
+        mic_muted: bool,
+        camera_muted: bool,
+        active_device_name: Option<&str>,
+    ) -> Result<&mut Self> {
         self.window.set_title(get_mute_title_text(mic_muted));
         self.update_placement()?;
-        // Camera state not tracked by popup directly; caller should use update_with_camera
-        self.content.update(mic_muted, false, self.get_theme())?;
-        if mic_muted {
-            self.window.set_visible(true);
-        }
-        Ok(self)
-    }
-
-    pub fn update_with_camera(&mut self, mic_muted: bool, camera_muted: bool) -> Result<&mut Self> {
-        self.window.set_title(get_mute_title_text(mic_muted));
-        self.update_placement()?;
-        self.content.update(mic_muted, camera_muted, self.get_theme())?;
+        self.content.update(mic_muted, camera_muted, self.get_theme(), active_device_name)?;
         if mic_muted || camera_muted {
             self.window.set_visible(true);
         }

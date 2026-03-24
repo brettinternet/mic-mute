@@ -97,9 +97,35 @@ fn make_label(frame: NSRect, text: &str, color: id) -> id {
     }
 }
 
+fn make_small_label(frame: NSRect, text: &str, color: id) -> id {
+    unsafe {
+        let label = NSTextField::alloc(nil);
+        let _: () = msg_send![label, initWithFrame: frame];
+        let ns_text = NSString::alloc(nil).init_str(text);
+        label.setStringValue_(ns_text);
+        let _: () = msg_send![label, setTextColor: color];
+        let _: () = msg_send![label, setBezeled: NO];
+        let _: () = msg_send![label, setEditable: NO];
+        let _: () = msg_send![label, setDrawsBackground: NO];
+        let _: () = msg_send![label, setSelectable: NO];
+        const NSALIGNMENT_CENTER: i32 = 1;
+        let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
+        let ns_font = class!(NSFont);
+        let default_size: f64 = msg_send![ns_font, smallSystemFontSize];
+        let small_font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size];
+        let _: () = msg_send![label, setFont: small_font];
+        label
+    }
+}
+
+fn make_cached_ns_string(text: &str) -> id {
+    unsafe { NSString::alloc(nil).init_str(text) }
+}
+
 #[allow(dead_code)]
 pub struct PopupContent {
     mic_label: id,
+    mic_device_label: id,
     mic_image_view: id,
     camera_label: id,
     pub view: id,
@@ -118,6 +144,14 @@ pub struct PopupContent {
     color_camera_muted_dark: id,
     color_camera_unmuted_light: id,
     color_camera_unmuted_dark: id,
+    // Cached NSString objects for label text (no allocations in update)
+    ns_text_mic_on: id,
+    ns_text_mic_off: id,
+    ns_text_camera_on: id,
+    ns_text_camera_off: id,
+    // Cached gray color for device name subtitle
+    color_gray_light: id,
+    color_gray_dark: id,
 }
 
 unsafe impl Send for PopupContent {}
@@ -149,6 +183,16 @@ impl PopupContent {
         let color_camera_unmuted_light = make_ns_color(0., 0., 0., 1.);
         let color_camera_unmuted_dark = make_ns_color(1., 1., 1., 1.);
 
+        // Cached label text strings (no per-update allocs)
+        let ns_text_mic_on = make_cached_ns_string(UNMUTED_DESCRIPTION);
+        let ns_text_mic_off = make_cached_ns_string(MUTED_DESCRIPTION);
+        let ns_text_camera_on = make_cached_ns_string(CAMERA_UNMUTED_DESCRIPTION);
+        let ns_text_camera_off = make_cached_ns_string(CAMERA_MUTED_DESCRIPTION);
+
+        // Subtitle colors for device name
+        let color_gray_light = make_ns_color(0.4, 0.4, 0.4, 1.);
+        let color_gray_dark = make_ns_color(0.6, 0.6, 0.6, 1.);
+
         let mic_row_frame = get_row_frame(size, 0);
         let camera_row_frame = get_row_frame(size, 1);
         let view_frame = get_frame_rect(size);
@@ -165,7 +209,10 @@ impl PopupContent {
             color_camera_unmuted_light, color_camera_unmuted_dark,
         );
 
+        let initial_device_color = if theme == Theme::Dark { color_gray_dark } else { color_gray_light };
+
         let mic_label = make_label(mic_row_frame, get_mic_mute_description_text(mic_muted), initial_mic_color);
+        let mic_device_label = make_small_label(mic_row_frame, "", initial_device_color);
         let camera_label = make_label(camera_row_frame, get_camera_mute_description_text(camera_muted), initial_camera_color);
 
         let mic_image_view = unsafe {
@@ -178,18 +225,18 @@ impl PopupContent {
         let view = unsafe {
             let stack_view: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![stack_view, initWithFrame: view_frame];
-            // NSStackView vertical orientation
             const NS_USER_INTERFACE_LAYOUT_ORIENTATION_VERTICAL: i64 = 1;
             let _: () = msg_send![stack_view, setOrientation: NS_USER_INTERFACE_LAYOUT_ORIENTATION_VERTICAL];
             const NS_STACK_VIEW_GRAVITY_CENTER: i32 = 2;
 
-            // Mic row: horizontal stack (image + label)
+            // Mic row: icon + status label + (optional) device name label
             let mic_row: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![mic_row, initWithFrame: mic_row_frame];
             let _: () = msg_send![mic_row, addView: mic_image_view inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
             let _: () = msg_send![mic_row, addView: mic_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
+            let _: () = msg_send![mic_row, addView: mic_device_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
 
-            // Camera row: just label (no icon yet)
+            // Camera row: status label only
             let camera_row: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![camera_row, initWithFrame: camera_row_frame];
             let _: () = msg_send![camera_row, addView: camera_label inGravity: NS_STACK_VIEW_GRAVITY_CENTER];
@@ -202,6 +249,7 @@ impl PopupContent {
 
         Ok(Self {
             mic_label,
+            mic_device_label,
             mic_image_view,
             camera_label,
             view,
@@ -217,6 +265,12 @@ impl PopupContent {
             color_camera_muted_dark,
             color_camera_unmuted_light,
             color_camera_unmuted_dark,
+            ns_text_mic_on,
+            ns_text_mic_off,
+            ns_text_camera_on,
+            ns_text_camera_off,
+            color_gray_light,
+            color_gray_dark,
         })
     }
 
@@ -257,8 +311,13 @@ impl PopupContent {
         }
     }
 
-    pub fn update(&mut self, mic_muted: bool, camera_muted: bool, theme: Theme) -> Result<&mut Self> {
-
+    pub fn update(
+        &mut self,
+        mic_muted: bool,
+        camera_muted: bool,
+        theme: Theme,
+        active_device_name: Option<&str>,
+    ) -> Result<&mut Self> {
         let (img, mic_color) = Self::pick_mic_image_and_color(
             mic_muted,
             theme,
@@ -281,18 +340,26 @@ impl PopupContent {
             self.color_camera_unmuted_dark,
         );
 
-        let mic_text = get_mic_mute_description_text(mic_muted);
-        let camera_text = get_camera_mute_description_text(camera_muted);
+        // Use cached NSString objects — zero new Cocoa allocations per update
+        let ns_mic_text = if mic_muted { self.ns_text_mic_off } else { self.ns_text_mic_on };
+        let ns_camera_text = if camera_muted { self.ns_text_camera_off } else { self.ns_text_camera_on };
+        let device_color = if theme == Theme::Dark { self.color_gray_dark } else { self.color_gray_light };
 
         unsafe {
-            let ns_mic_text = NSString::alloc(nil).init_str(mic_text);
             self.mic_label.setStringValue_(ns_mic_text);
             let _: () = msg_send![self.mic_label, setTextColor: mic_color];
             self.mic_image_view.setImage_(img);
 
-            let ns_camera_text = NSString::alloc(nil).init_str(camera_text);
             self.camera_label.setStringValue_(ns_camera_text);
             let _: () = msg_send![self.camera_label, setTextColor: camera_color];
+
+            // Update active device name subtitle (allocates one small NSString only if name changed)
+            if let Some(name) = active_device_name {
+                let truncated = if name.len() > 20 { &name[..20] } else { name };
+                let ns_device = NSString::alloc(nil).init_str(truncated);
+                self.mic_device_label.setStringValue_(ns_device);
+                let _: () = msg_send![self.mic_device_label, setTextColor: device_color];
+            }
         };
 
         Ok(self)

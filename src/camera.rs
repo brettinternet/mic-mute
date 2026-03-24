@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use log::{error, trace};
 use std::ffi::c_void;
 use std::mem;

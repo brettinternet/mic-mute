@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use log::trace;
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
-    Menu, MenuEvent, MenuItem, MenuId, PredefinedMenuItem,
+    Menu, MenuItem, MenuId, PredefinedMenuItem,
 };
 use std::fmt;
 use tao::window::Theme;
@@ -44,7 +44,6 @@ fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
     let icon = Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
-
     Ok(icon)
 }
 
@@ -61,6 +60,7 @@ pub struct Tray {
     pub systray: TrayIcon,
     pub toggle_mute: MenuItem,
     pub toggle_camera: MenuItem,
+    pub preferences: MenuItem,
     pub quit: MenuItem,
 }
 
@@ -73,14 +73,19 @@ impl Tray {
         let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, Some(mute_shortcut));
         let camera_shortcut = Accelerator::new(Some(Modifiers::SHIFT | Modifiers::META), Code::KeyV);
         let toggle_camera = MenuItem::new("Toggle Camera", true, Some(camera_shortcut));
+        let preferences = MenuItem::new("Preferences\u{2026}", true, None);
         let quit = MenuItem::new("Exit", true, None);
 
-        tray_menu.append_items(&[
-            &toggle_mute,
-            &toggle_camera,
-            &PredefinedMenuItem::separator(),
-            &quit,
-        ]).context("Failed to append menu items")?;
+        tray_menu
+            .append_items(&[
+                &toggle_mute,
+                &toggle_camera,
+                &PredefinedMenuItem::separator(),
+                &preferences,
+                &PredefinedMenuItem::separator(),
+                &quit,
+            ])
+            .context("Failed to append menu items")?;
 
         let systray = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
@@ -95,6 +100,7 @@ impl Tray {
             systray,
             toggle_mute,
             toggle_camera,
+            preferences,
             quit,
         };
         Ok(tray)
@@ -126,6 +132,10 @@ impl Tray {
 
     pub fn toggle_camera_id(&self) -> &MenuId {
         self.toggle_camera.id()
+    }
+
+    pub fn preferences_id(&self) -> &MenuId {
+        self.preferences.id()
     }
 
     pub fn quit_id(&self) -> &MenuId {

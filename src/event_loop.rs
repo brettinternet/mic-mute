@@ -1,5 +1,7 @@
 use crate::camera::CameraController;
 use crate::mic::MicController;
+use crate::preferences::show_preferences;
+use crate::settings::Settings;
 use crate::ui::UI;
 use crate::utils::Throttle;
 use async_std::task;
@@ -12,7 +14,6 @@ use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
-// Timeout for mouse detect and device re-mute
 const THROTTLE_TIMEOUT_MILLIS: u64 = 200;
 
 #[derive(Debug)]
@@ -30,9 +31,10 @@ pub fn create() -> EventLoopMessage {
 pub struct EventIds {
     pub button_toggle_mute: MenuId,
     pub button_toggle_camera: MenuId,
+    pub button_preferences: MenuId,
     pub button_quit: MenuId,
-    pub shortcut_shift_meta_a: u32,
-    pub shortcut_shift_meta_v: u32,
+    pub shortcut_mic: u32,
+    pub shortcut_camera: u32,
 }
 
 fn update_mic(
@@ -45,8 +47,9 @@ fn update_mic(
     if toggle || controller.muted {
         let state = if toggle { None } else { Some(controller.muted) };
         controller.toggle(state).unwrap();
+        let device_name = controller.active_device_name();
         let mut ui = ui.write().unwrap();
-        ui.update_mic(controller.muted).unwrap();
+        ui.update_mic(controller.muted, device_name.as_deref()).unwrap();
     }
     if toggle && !controller.muted {
         task::spawn(async move {
@@ -83,13 +86,15 @@ pub fn start(
     ui: Arc<RwLock<UI>>,
     controller: Arc<RwLock<MicController>>,
     camera: Arc<RwLock<CameraController>>,
+    settings: Arc<RwLock<Settings>>,
 ) {
     let EventIds {
         button_toggle_mute,
         button_toggle_camera,
+        button_preferences,
         button_quit,
-        shortcut_shift_meta_a,
-        shortcut_shift_meta_v,
+        shortcut_mic,
+        shortcut_camera,
     } = event_ids;
 
     let mut throttle = Throttle::new(Duration::from_millis(THROTTLE_TIMEOUT_MILLIS));
@@ -134,14 +139,20 @@ pub fn start(
             } else if event.id == button_toggle_camera {
                 trace!("Toggle camera tray menu item selected");
                 update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
+            } else if event.id == button_preferences {
+                trace!("Preferences tray menu item selected");
+                let mut s = settings.write().unwrap();
+                if let Err(e) = show_preferences(&mut s) {
+                    log::error!("Preferences error: {}", e);
+                }
             }
         }
 
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if shortcut_shift_meta_a == event.id() {
+            if shortcut_mic == event.id() {
                 trace!("Toggle mic shortcut activated");
                 update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
-            } else if shortcut_shift_meta_v == event.id() {
+            } else if shortcut_camera == event.id() {
                 trace!("Toggle camera shortcut activated");
                 update_camera(ui.clone(), camera.clone(), proxy.clone(), true);
             }

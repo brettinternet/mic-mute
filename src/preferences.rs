@@ -2,7 +2,7 @@
 /// Shows current shortcut configuration via a native macOS NSAlert.
 use crate::settings::{Settings, ShortcutConfig};
 use anyhow::Result;
-use cocoa::base::{id, nil};
+use cocoa::base::nil;
 use cocoa::foundation::NSString;
 use objc::runtime::Object;
 

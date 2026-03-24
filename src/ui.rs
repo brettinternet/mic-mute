@@ -1,10 +1,12 @@
 use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
 use crate::popup::Popup;
+use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
 use log::trace;
+use muda::MenuId;
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -20,19 +22,26 @@ unsafe impl Send for UI {}
 unsafe impl Sync for UI {}
 
 impl UI {
-    pub fn new(mic_muted: bool, camera_muted: bool, app_vars: AppVars) -> Result<(Self, EventLoopMessage, EventIds)> {
+    pub fn new(
+        mic_muted: bool,
+        camera_muted: bool,
+        app_vars: AppVars,
+        settings: &Settings,
+    ) -> Result<(Self, EventLoopMessage, EventIds)> {
         let event_loop = create();
         let popup = Popup::new(&event_loop, mic_muted).context("Failed to setup popup window")?;
         let theme = popup.get_theme();
         let tray = Tray::new(mic_muted, theme, app_vars).context("Failed to create system tray")?;
-        let shortcuts = Shortcuts::new().context("Failed to setup shortcuts")?;
+        let shortcuts =
+            Shortcuts::new(settings).context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
             button_toggle_mute: tray.toggle_mute_id().clone(),
             button_toggle_camera: tray.toggle_camera_id().clone(),
+            button_preferences: tray.preferences_id().clone(),
             button_quit: tray.quit_id().clone(),
-            shortcut_shift_meta_a: shortcuts.shift_meta_a.id(),
-            shortcut_shift_meta_v: shortcuts.shift_meta_v.id(),
+            shortcut_mic: shortcuts.mic_hotkey.id(),
+            shortcut_camera: shortcuts.camera_hotkey.id(),
         };
 
         let ui = Self {
@@ -45,14 +54,14 @@ impl UI {
         Ok((ui, event_loop, event_ids))
     }
 
-    pub fn update_mic(&mut self, muted: bool) -> Result<&mut Self> {
+    pub fn update_mic(&mut self, muted: bool, active_device_name: Option<&str>) -> Result<&mut Self> {
         trace!("Updating UI mic state {}", muted);
         self.mic_muted = muted;
         self.tray
             .update(muted, self.popup.get_theme())
             .context("Failed to update UI tray")?;
         self.popup
-            .update_with_camera(muted, self.camera_muted)
+            .update_with_camera(muted, self.camera_muted, active_device_name)
             .context("Failed to update UI popup")?;
         Ok(self)
     }
@@ -61,14 +70,9 @@ impl UI {
         trace!("Updating UI camera state {}", muted);
         self.camera_muted = muted;
         self.popup
-            .update_with_camera(self.mic_muted, muted)
+            .update_with_camera(self.mic_muted, muted, None)
             .context("Failed to update UI popup for camera")?;
         Ok(self)
-    }
-
-    /// Legacy update method (mic only)
-    pub fn update(&mut self, muted: bool) -> Result<&mut Self> {
-        self.update_mic(muted)
     }
 
     pub fn hide_popup(&mut self) -> Result<&mut Self> {
@@ -86,5 +90,9 @@ impl UI {
                 .context("Failed to update UI popup placement")?;
         }
         Ok(self)
+    }
+
+    pub fn preferences_id(&self) -> &MenuId {
+        self.tray.preferences_id()
     }
 }
