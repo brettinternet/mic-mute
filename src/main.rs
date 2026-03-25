@@ -1,8 +1,8 @@
 mod about;
 mod camera;
-mod icons;
 mod config;
 mod event_loop;
+mod icons;
 mod launch_at_login;
 mod mic;
 mod popup;

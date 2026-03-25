@@ -9,18 +9,38 @@ pub struct IconColor {
 
 pub fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
     match theme {
-        Theme::Light if muted => IconColor { r: 239, g: 68, b: 68 },  // #ef4444
+        Theme::Light if muted => IconColor {
+            r: 239,
+            g: 68,
+            b: 68,
+        }, // #ef4444
         Theme::Light => IconColor { r: 0, g: 0, b: 0 },
-        Theme::Dark if muted => IconColor { r: 248, g: 113, b: 113 }, // #f87171
-        _ => IconColor { r: 255, g: 255, b: 255 },
+        Theme::Dark if muted => IconColor {
+            r: 248,
+            g: 113,
+            b: 113,
+        }, // #f87171
+        _ => IconColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        },
     }
 }
 
 pub fn tray_icon_color(muted: bool) -> IconColor {
     if muted {
-        IconColor { r: 239, g: 68, b: 68 } // #ef4444
+        IconColor {
+            r: 239,
+            g: 68,
+            b: 68,
+        } // #ef4444
     } else {
-        IconColor { r: 255, g: 255, b: 255 }
+        IconColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        }
     }
 }
 
@@ -35,14 +55,16 @@ pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u3
     );
 
     let options = resvg::usvg::Options::default();
-    let tree =
-        resvg::usvg::Tree::from_str(&colored, &options).context("Failed to parse SVG")?;
+    let tree = resvg::usvg::Tree::from_str(&colored, &options).context("Failed to parse SVG")?;
     let size = tree.size();
     let w = size.width() as u32;
     let h = size.height() as u32;
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(w, h).context("Failed to allocate pixmap")?;
-    resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("Failed to allocate pixmap")?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
 
     // tiny-skia produces premultiplied RGBA; un-premultiply for callers.
     let raw = pixmap.take();

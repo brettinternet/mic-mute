@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_toggle_logic() {
         // Test the toggle state logic without touching hardware
-        let mut c = MicController { muted: false };
+        let mut c = MicController { muted: false, saved_volumes: Default::default() };
         let new_state = None::<bool>.unwrap_or(!c.muted);
         assert!(new_state, "Toggle from false should give true");
 

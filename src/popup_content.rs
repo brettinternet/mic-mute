@@ -84,11 +84,8 @@ fn svg_to_png(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<(Vec<u8>, u
     let (rgba, w, h) = rasterize_svg(svg_bytes, &color)?;
     let img = image::RgbaImage::from_raw(w, h, rgba).context("Failed to create RgbaImage")?;
     let mut png = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut png),
-        image::ImageFormat::Png,
-    )
-    .context("Failed to encode PNG")?;
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .context("Failed to encode PNG")?;
     Ok((png, w, h))
 }
 
