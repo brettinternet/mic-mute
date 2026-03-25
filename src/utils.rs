@@ -1,9 +1,5 @@
 use libc::c_void;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
-};
+use std::sync::{Arc, RwLock};
 
 type CGFloat = f64;
 
@@ -33,81 +29,3 @@ pub fn arc_lock<T>(value: T) -> Arc<RwLock<T>> {
     Arc::new(rwlock)
 }
 
-// Modified from https://github.com/SOF3/throttle
-pub struct Throttle {
-    timeout: Duration,
-    deque: VecDeque<Instant>,
-}
-
-impl Throttle {
-    pub fn new(timeout: Duration) -> Throttle {
-        Throttle {
-            timeout,
-            deque: Default::default(),
-        }
-    }
-
-    fn flush(&mut self) {
-        while let Some(first) = self.deque.front() {
-            if first.elapsed() >= self.timeout {
-                self.deque.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub fn size(&mut self) -> usize {
-        self.flush();
-        self.deque.len()
-    }
-
-    pub fn available(&mut self) -> bool {
-        self.size() < 1
-    }
-
-    pub fn accept(&mut self) -> Result<(), Instant> {
-        self.flush();
-        if !self.deque.is_empty() {
-            return Err(*self.deque.front().unwrap() + self.timeout);
-        }
-
-        self.deque.push_back(Instant::now());
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_throttle_available_initially() {
-        let mut t = Throttle::new(Duration::from_millis(100));
-        assert!(t.available());
-        assert_eq!(t.size(), 0);
-    }
-
-    #[test]
-    fn test_throttle_not_available_after_accept() {
-        let mut t = Throttle::new(Duration::from_millis(1000));
-        assert!(t.available());
-        t.accept().unwrap();
-        assert!(!t.available());
-    }
-
-    #[test]
-    fn test_throttle_accept_twice_fails() {
-        let mut t = Throttle::new(Duration::from_millis(1000));
-        t.accept().unwrap();
-        assert!(t.accept().is_err());
-    }
-
-    #[test]
-    fn test_throttle_available_after_timeout() {
-        let mut t = Throttle::new(Duration::from_millis(1));
-        t.accept().unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-        assert!(t.available());
-    }
-}

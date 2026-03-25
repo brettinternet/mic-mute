@@ -4,7 +4,6 @@ use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::settings::Settings;
 use crate::ui::UI;
-use crate::utils::Throttle;
 use async_std::task;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
@@ -16,11 +15,12 @@ use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
-const THROTTLE_TIMEOUT_MILLIS: u64 = 200;
+const POLL_INTERVAL_MILLIS: u64 = 200;
 
 #[derive(Debug)]
 pub enum Message {
     HidePopup,
+    CameraStateChanged(bool),
 }
 
 pub type EventLoopMessage = EventLoop<Message>;
@@ -79,7 +79,9 @@ pub fn start(
         shortcut_mic,
     } = event_ids;
 
-    let mut throttle = Throttle::new(Duration::from_millis(THROTTLE_TIMEOUT_MILLIS));
+    let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
+    // Start in the past so the first iteration triggers the poll immediately.
+    let mut last_poll = Instant::now() - poll_interval;
 
     // Poll the settings file for changes every 2 seconds so edits to
     // settings.json take effect without restarting the app.
@@ -87,8 +89,24 @@ pub fn start(
     let mut last_settings_check = Instant::now();
     let mut last_settings_mtime = Settings::mtime();
 
-    let camera_poll_interval = Duration::from_secs(2);
-    let mut last_camera_check = Instant::now();
+    // Camera detection runs expensive Cocoa/CMIO calls; offload to a background
+    // thread so it never blocks the main event loop. Results are delivered back
+    // via a user event.
+    let proxy_camera = event_loop.create_proxy();
+    let camera_bg = camera.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let active = objc::rc::autoreleasepool(|| {
+            camera_bg
+                .read()
+                .unwrap()
+                .is_running_anywhere()
+                .unwrap_or(false)
+        });
+        proxy_camera
+            .send_event(Message::CameraStateChanged(active))
+            .ok();
+    });
 
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
@@ -100,7 +118,7 @@ pub fn start(
         ActivationPolicy::Accessory
     });
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
+        let mut exit_requested = false;
 
         match event {
             Event::UserEvent(Message::HidePopup) => {
@@ -110,14 +128,14 @@ pub fn start(
                     ui.hide_popup().unwrap();
                 }
             }
-            _ => {
-                if throttle.available() {
-                    update_mic(ui.clone(), controller.clone(), proxy.clone(), false);
-                    let mut ui = ui.write().unwrap();
-                    ui.detect().unwrap();
-                    throttle.accept().unwrap_or(());
+            Event::UserEvent(Message::CameraStateChanged(active)) => {
+                let muted = !active;
+                if muted != camera.read().unwrap().muted {
+                    camera.write().unwrap().muted = muted;
+                    ui.write().unwrap().update_camera(muted).unwrap();
                 }
             }
+            _ => {}
         };
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -126,7 +144,7 @@ pub fn start(
                 trace!("Exit tray menu item selected");
                 let mut mic = controller.write().unwrap();
                 mic.toggle(Some(false)).unwrap();
-                *control_flow = ControlFlow::Exit;
+                exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
                 update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
@@ -203,19 +221,21 @@ pub fn start(
             }
         }
 
-        if last_camera_check.elapsed() >= camera_poll_interval {
-            last_camera_check = Instant::now();
-            // muted=false means camera is active (running somewhere); muted=true means idle
-            let active = camera
-                .read()
-                .unwrap()
-                .is_running_anywhere()
-                .unwrap_or(false);
-            let muted = !active;
-            if muted != camera.read().unwrap().muted {
-                camera.write().unwrap().muted = muted;
-                ui.write().unwrap().update_camera(muted).unwrap();
-            }
+        // Poll mic state and cursor-monitor position on a 200 ms interval.
+        if last_poll.elapsed() >= poll_interval {
+            last_poll = Instant::now();
+            update_mic(ui.clone(), controller.clone(), proxy.clone(), false);
+            let mut ui_w = ui.write().unwrap();
+            ui_w.detect().unwrap();
+        }
+
+        if exit_requested {
+            *control_flow = ControlFlow::Exit;
+        } else {
+            // Sleep until the next scheduled check rather than spinning.
+            let next_poll = last_poll + poll_interval;
+            let next_settings = last_settings_check + settings_poll_interval;
+            *control_flow = ControlFlow::WaitUntil(next_poll.min(next_settings));
         }
     });
 }
