@@ -1,7 +1,7 @@
 [package]
 name = "mic-mute"
 description = "System-wide mic mute for macOS"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Brett Gardiner"]
 license = "MIT"
@@ -29,7 +29,10 @@ objc = "0.2"
 block = "0.1"
 coreaudio-rs = "0.14"
 core-foundation-sys = "0.8"
-objc2-core-audio = { version = "0.3", features = ["AudioHardware", "AudioHardwareDeprecated"] }
+objc2-core-audio = { version = "0.3", features = [
+  "AudioHardware",
+  "AudioHardwareDeprecated",
+] }
 objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes"] }
 
 [lints.rust]
@@ -49,7 +52,7 @@ icon = [
   "assets/icons/256x256.png",
   "assets/icons/256x256@2x.png",
   "assets/icons/512x512.png",
-  "assets/icons/512x512@2x.png"
+  "assets/icons/512x512@2x.png",
 ]
 copyright = "Copyright (c) Brett Gardiner 2023. All rights reserved."
 category = "public.app-category.utilities"
