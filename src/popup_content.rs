@@ -38,7 +38,7 @@ fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
     )
 }
 
-fn get_mic_mute_color(muted: bool, theme: Theme) -> id {
+fn get_text_color(muted: bool, theme: Theme) -> id {
     unsafe {
         // 239, 68, 68 (light mode red) - #ef4444 / 248, 113, 113 (dark mode red) - #f87171
         let dark_red = NSColor::colorWithRed_green_blue_alpha_(nil, 0.9372, 0.2666, 0.2666, 1.);
@@ -194,7 +194,7 @@ impl PopupContent {
 
         let mic_label = get_textfield(
             get_mic_mute_description_text(mic_muted),
-            get_mic_mute_color(mic_muted, theme),
+            get_text_color(mic_muted, theme),
             frame,
         );
         let mic_ns_image = get_mic_image(mic_muted, theme)?;
@@ -209,7 +209,7 @@ impl PopupContent {
         }
         let camera_label = get_textfield(
             get_camera_mute_description_text(camera_muted),
-            get_mic_mute_color(camera_muted, theme),
+            get_text_color(camera_muted, theme),
             frame,
         );
 
@@ -253,8 +253,7 @@ impl PopupContent {
             let mic_str = NSString::alloc(nil).init_str(get_mic_mute_description_text(mic_muted));
             self.mic_label.setStringValue_(mic_str);
             let _: () = msg_send![mic_str, release];
-            let _: () =
-                msg_send![self.mic_label, setTextColor: get_mic_mute_color(mic_muted, theme)];
+            let _: () = msg_send![self.mic_label, setTextColor: get_text_color(mic_muted, theme)];
             self.mic_image.setImage_(mic_img);
             let _: () = msg_send![mic_img, release];
             self.camera_image.setImage_(cam_img);
@@ -264,7 +263,7 @@ impl PopupContent {
             self.camera_label.setStringValue_(cam_str);
             let _: () = msg_send![cam_str, release];
             let _: () =
-                msg_send![self.camera_label, setTextColor: get_mic_mute_color(camera_muted, theme)];
+                msg_send![self.camera_label, setTextColor: get_text_color(camera_muted, theme)];
         }
         Ok(self)
     }
