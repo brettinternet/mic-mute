@@ -28,4 +28,3 @@ pub fn arc_lock<T>(value: T) -> Arc<RwLock<T>> {
     let rwlock = RwLock::new(value);
     Arc::new(rwlock)
 }
-

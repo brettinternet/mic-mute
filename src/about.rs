@@ -60,8 +60,7 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
 
     match response {
         1001 => {
-            if let Some(path) =
-                dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
+            if let Some(path) = dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
             {
                 let _ = Command::new("open").arg("-t").arg(&path).spawn();
             }

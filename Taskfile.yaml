@@ -50,6 +50,12 @@ tasks:
       - cargo clippy --locked --release -- -D warnings
       - cargo fmt -- --check
 
+  fix:
+    desc: Fix lint and formatting issues
+    cmds:
+      - cargo clippy --locked --release --fix --allow-dirty --allow-staged -- -D warnings
+      - cargo fmt
+
   test:
     cmds:
       - cargo test
