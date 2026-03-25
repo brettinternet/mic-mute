@@ -5,7 +5,7 @@ mod launch_at_login;
 mod mic;
 mod popup;
 mod popup_content;
-mod preferences;
+mod about;
 mod settings;
 mod shortcuts;
 mod tray;

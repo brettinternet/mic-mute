@@ -48,7 +48,7 @@ impl UI {
             button_toggle_mute: tray.toggle_mute_id().clone(),
             button_launch_at_login: tray.launch_at_login_id().clone(),
             button_show_in_dock: tray.show_in_dock_id().clone(),
-            button_preferences: tray.preferences_id().clone(),
+            button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
             shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
         };

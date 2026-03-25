@@ -26,10 +26,10 @@ pub fn request_permission() {
 // CMIO constants
 const K_CMIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = 0x676c6f62; // 'glob'
 const K_CMIO_OBJECT_PROPERTY_ELEMENT_MAIN: u32 = 0;
-const K_CMIO_DEVICE_PROPERTY_IS_RUNNING_SOMEWHERE: u32 = 0x69697273; // 'iirs'
+const K_CMIO_DEVICE_PROPERTY_IS_RUNNING_SOMEWHERE: u32 = 0x676F6E65; // 'gone'
 // System object holds the list of all CMIO devices
 const K_CMIO_HARDWARE_OBJECT_SYSTEM: u32 = 1;
-const K_CMIO_HARDWARE_PROPERTY_DEVICES: u32 = 0x64657620; // 'dev '
+const K_CMIO_HARDWARE_PROPERTY_DEVICES: u32 = 0x64657623; // 'dev#'
 
 type CMIOObjectID = u32;
 
@@ -139,31 +139,45 @@ impl CameraController {
 
     /// Returns true if any camera device is actively in use by any process.
     pub fn is_running_anywhere(&self) -> Result<bool> {
-        // Primary: AVFoundation isInUseByAnotherApplication — simple and reliable
-        // when TCC camera permission has been granted to this app.
-        unsafe {
+        // First: AVFoundation isInUseByAnotherApplication.
+        // Only trusted if devicesWithMediaType: returns at least one device (requires TCC permission).
+        let av_device_count: usize = unsafe {
             let media_type = NSString::alloc(nil).init_str("vide");
             let devices: id = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
-            if devices != nil {
-                let count: usize = msg_send![devices, count];
-                trace!("AVFoundation found {} camera device(s)", count);
-                for i in 0..count {
+            if devices == nil {
+                error!("AVCaptureDevice.devicesWithMediaType: returned nil — no camera permission?");
+                0
+            } else {
+                msg_send![devices, count]
+            }
+        };
+        trace!("AVFoundation camera device count: {}", av_device_count);
+        if av_device_count > 0 {
+            let active = unsafe {
+                let media_type = NSString::alloc(nil).init_str("vide");
+                let devices: id = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
+                let mut any = false;
+                for i in 0..av_device_count {
                     let device: id = msg_send![devices, objectAtIndex: i];
-                    let in_use: bool = msg_send![device, isInUseByAnotherApplication];
+                    // isInUseByAnotherApplication returns ObjC BOOL (i8)
+                    let in_use: cocoa::base::BOOL = msg_send![device, isInUseByAnotherApplication];
                     trace!("AVCaptureDevice {} isInUseByAnotherApplication={}", i, in_use);
-                    if in_use {
-                        return Ok(true);
+                    if in_use != cocoa::base::NO {
+                        any = true;
+                        break;
                     }
                 }
-                // We got a device list — return false; camera is idle.
-                return Ok(false);
-            } else {
-                error!("AVCaptureDevice.devicesWithMediaType: returned nil — camera permission not granted?");
+                any
+            };
+            if active {
+                return Ok(true);
             }
+            // AVFoundation found devices but all report not-in-use.
+            // Also check CMIO — isInUseByAnotherApplication can be unreliable on newer macOS.
         }
 
-        // Fallback: direct CMIO system-object enumeration + kCMIODevicePropertyDeviceIsRunningSomewhere.
-        // Works without TCC permission and covers cases where AVFoundation returns nil.
+        // CMIO kCMIODevicePropertyDeviceIsRunningSomewhere — lower-level check that
+        // runs regardless of AVFoundation result.
         let device_ids = self.get_cmio_device_ids_system();
         if device_ids.is_empty() {
             trace!("CMIO direct enumeration returned 0 devices");

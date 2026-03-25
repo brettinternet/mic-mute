@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use log::trace;
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
-    CheckMenuItem, Menu, MenuItem, MenuId, PredefinedMenuItem,
+    CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
 };
 use std::fmt;
 use tao::window::Theme;
@@ -22,14 +22,14 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
 }
 
 fn get_image(muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-light.png");
-    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light.png");
+    const MIC_ON: &[u8] = include_bytes!("../assets/images/mic-white.png");
+    const MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-red.png");
 
     let image = match theme {
-        Theme::Light if muted => LIGHT_MIC_OFF,
-        Theme::Light if !muted => LIGHT_MIC_ON,
-        Theme::Dark if muted => LIGHT_MIC_OFF,
-        _ => LIGHT_MIC_ON,
+        Theme::Light if muted => MIC_OFF,
+        Theme::Light if !muted => MIC_ON,
+        Theme::Dark if muted => MIC_OFF,
+        _ => MIC_ON,
     };
 
     let image_buff = image::load_from_memory(image)
@@ -43,8 +43,8 @@ fn get_image(muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
 fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     trace!("Fetching icons");
     let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
-    let icon = Icon::from_rgba(icon_rgba, icon_width, icon_height)
-        .context("Failed to open icon")?;
+    let icon =
+        Icon::from_rgba(icon_rgba, icon_width, icon_height).context("Failed to open icon")?;
     Ok(icon)
 }
 
@@ -112,7 +112,7 @@ pub struct Tray {
     pub toggle_mute: MenuItem,
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
-    pub preferences: MenuItem,
+    pub about: MenuItem,
     pub quit: MenuItem,
 }
 
@@ -135,7 +135,7 @@ impl Tray {
         );
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
-        let preferences = MenuItem::new("Preferences\u{2026}", true, None);
+        let about = MenuItem::new("About", true, None);
         let quit = MenuItem::new("Exit", true, None);
 
         tray_menu
@@ -144,7 +144,7 @@ impl Tray {
                 &PredefinedMenuItem::separator(),
                 &launch_at_login,
                 &show_in_dock,
-                &preferences,
+                &about,
                 &PredefinedMenuItem::separator(),
                 &quit,
             ])
@@ -164,7 +164,7 @@ impl Tray {
             toggle_mute,
             launch_at_login,
             show_in_dock,
-            preferences,
+            about,
             quit,
         };
         Ok(tray)
@@ -191,10 +191,7 @@ impl Tray {
     }
 
     /// Update the displayed keyboard shortcuts after settings change.
-    pub fn update_accelerators(
-        &mut self,
-        mic_shortcut: &ShortcutConfig,
-    ) -> Result<()> {
+    pub fn update_accelerators(&mut self, mic_shortcut: &ShortcutConfig) -> Result<()> {
         self.toggle_mute
             .set_accelerator(Some(accelerator_from_config(mic_shortcut)))
             .context("Failed to update mic accelerator")?;
@@ -213,8 +210,8 @@ impl Tray {
         self.show_in_dock.id()
     }
 
-    pub fn preferences_id(&self) -> &MenuId {
-        self.preferences.id()
+    pub fn about_id(&self) -> &MenuId {
+        self.about.id()
     }
 
     pub fn quit_id(&self) -> &MenuId {

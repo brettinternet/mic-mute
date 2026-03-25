@@ -1,7 +1,7 @@
 use crate::camera::CameraController;
 use crate::launch_at_login;
 use crate::mic::MicController;
-use crate::preferences::show_preferences;
+use crate::about::show_about;
 use crate::settings::Settings;
 use crate::ui::UI;
 use crate::utils::Throttle;
@@ -34,7 +34,7 @@ pub struct EventIds {
     pub button_toggle_mute: MenuId,
     pub button_launch_at_login: MenuId,
     pub button_show_in_dock: MenuId,
-    pub button_preferences: MenuId,
+    pub button_about: MenuId,
     pub button_quit: MenuId,
     pub shortcut_mic: Arc<AtomicU32>,
 }
@@ -73,7 +73,7 @@ pub fn start(
         button_toggle_mute,
         button_launch_at_login,
         button_show_in_dock,
-        button_preferences,
+        button_about,
         button_quit,
         shortcut_mic,
     } = event_ids;
@@ -151,10 +151,10 @@ pub fn start(
                 }
                 drop(s);
                 launch_at_login::set_dock_visible(visible);
-            } else if event.id == button_preferences {
-                trace!("Preferences tray menu item selected");
+            } else if event.id == button_about {
+                trace!("About tray menu item selected");
                 let mut s = settings.write().unwrap();
-                match show_preferences(&mut s) {
+                match show_about(&mut s) {
                     Ok(true) => {
                         // Reset to Default clicked — apply all settings immediately
                         let mut ui = ui.write().unwrap();
