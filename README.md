@@ -22,8 +22,8 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
   - [x] Show microphone mute status in small popup window
   - [x] Popup window shouldn't appear in screenshots or recordings and ignores mouse events
   - [x] Popup follows screens and monitors with cursor
-- [-] Support camera toggle - this appears either impossible or too difficult for the scope of this project. For now, we simply report whether the camera is in use.
-- [x] Add configurable settings (hotkey, window position)
+- [x] Report whether camera is in use (disabling cameras appears to be impossible or too difficult for the scope of this project)
+- [x] Add configurable settings (hotkey, startup)
 - [x] Open app on system startup
 
 ## Releases
