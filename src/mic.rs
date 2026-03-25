@@ -3,13 +3,14 @@ use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name
 use log::{error, trace};
 use objc2_core_audio::{
     kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
-    kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError,
-    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwareUnknownPropertyError,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, AudioDeviceID,
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
-    AudioObjectSetPropertyData,
+    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyVolumeScalar,
+    kAudioHardwareNoError, kAudioHardwarePropertyDefaultInputDevice,
+    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, AudioDeviceID, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
 };
 use objc2_core_audio_types::AudioBufferList;
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::mem;
@@ -30,6 +31,9 @@ macro_rules! try_status_or_return {
 #[derive(Default)]
 pub struct MicController {
     pub muted: bool,
+    /// Saved input volume per device for devices that don't support kAudioDevicePropertyMute.
+    /// Keyed by AudioDeviceID; value is the volume scalar (0.0–1.0) before muting.
+    saved_volumes: HashMap<AudioDeviceID, f32>,
 }
 
 impl Debug for MicController {
@@ -171,7 +175,7 @@ impl MicController {
         Ok(true)
     }
 
-    fn mute(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID> {
+    fn mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID> {
         let mut property_address = AudioObjectPropertyAddress {
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeInput,
@@ -193,8 +197,16 @@ impl MicController {
         trace!("RESULT FROM STATUS: {}", status);
 
         match status {
-            status if status == kAudioHardwareNoError => {}
-            status if status == kAudioHardwareUnknownPropertyError => {}
+            status if status == kAudioHardwareNoError as i32 => {}
+            status if status == kAudioHardwareUnknownPropertyError as i32 => {
+                // Device doesn't support kAudioDevicePropertyMute (e.g. iPhone Continuity mic).
+                // Fall back to setting the input volume scalar to 0.
+                trace!(
+                    "Device {} doesn't support mute property; falling back to volume scalar",
+                    audio_device_id
+                );
+                self.mute_via_volume(audio_device_id, state);
+            }
             result => {
                 error!("RESULT: {}", result);
             }
@@ -211,8 +223,90 @@ impl MicController {
         Ok(audio_device_id)
     }
 
+    fn mute_via_volume(&mut self, audio_device_id: AudioDeviceID, state: bool) {
+        let mut vol_address = AudioObjectPropertyAddress {
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let vol_data_size = mem::size_of::<f32>() as u32;
+
+        if state {
+            // Save current volume before muting, if not already saved.
+            if !self.saved_volumes.contains_key(&audio_device_id) {
+                let current_vol = 0_f32;
+                let mut read_size = vol_data_size;
+                let read_status = unsafe {
+                    AudioObjectGetPropertyData(
+                        audio_device_id,
+                        NonNull::new_unchecked(&mut vol_address),
+                        0,
+                        null(),
+                        NonNull::new_unchecked(&mut read_size),
+                        NonNull::new_unchecked(&current_vol as *const f32 as *mut _),
+                    )
+                };
+                if read_status == kAudioHardwareNoError as i32 {
+                    trace!(
+                        "Saving volume {:.3} for device {} before muting",
+                        current_vol,
+                        audio_device_id
+                    );
+                    self.saved_volumes.insert(audio_device_id, current_vol);
+                }
+            }
+            let zero: f32 = 0.0;
+            let set_status = unsafe {
+                AudioObjectSetPropertyData(
+                    audio_device_id,
+                    NonNull::new_unchecked(&mut vol_address),
+                    0,
+                    null(),
+                    vol_data_size,
+                    NonNull::new_unchecked(&zero as *const f32 as *mut _),
+                )
+            };
+            if set_status != kAudioHardwareNoError as i32 {
+                trace!(
+                    "Volume scalar mute failed for device {} with status {}",
+                    audio_device_id,
+                    set_status
+                );
+            }
+        } else {
+            // Restore saved volume, defaulting to 1.0 if none was saved.
+            let restore_vol = self
+                .saved_volumes
+                .remove(&audio_device_id)
+                .unwrap_or(1.0_f32);
+            trace!(
+                "Restoring volume {:.3} for device {}",
+                restore_vol,
+                audio_device_id
+            );
+            let set_status = unsafe {
+                AudioObjectSetPropertyData(
+                    audio_device_id,
+                    NonNull::new_unchecked(&mut vol_address),
+                    0,
+                    null(),
+                    vol_data_size,
+                    NonNull::new_unchecked(&restore_vol as *const f32 as *mut _),
+                )
+            };
+            if set_status != kAudioHardwareNoError as i32 {
+                trace!(
+                    "Volume scalar unmute failed for device {} with status {}",
+                    audio_device_id,
+                    set_status
+                );
+            }
+        }
+    }
+
     pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
-        for id in &self.get_input_device_ids()? {
+        let ids = self.get_input_device_ids()?;
+        for id in &ids {
             let name = get_device_name(*id).map_err(anyhow::Error::msg)?;
             trace!("Muting {}", name);
             self.mute(*id, state)?;
