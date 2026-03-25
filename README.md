@@ -64,11 +64,26 @@ Run and watch for changes.
 task start
 ```
 
-## License
+### Build
 
-Licensed under MIT license ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT).
+```sh
+task build
+```
 
-## Contribution
+<details>
+<summary>Release</summary>
+Create a certificate to self-sign.
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, shall be licensed as above, without any additional terms or conditions.
+```sh
+openssl req -x509 -newkey rsa:2048 -keyout sign.key -out sign.crt \
+    -days 3650 -nodes -subj "/CN=mic-mute"
+cat sign.key >> sign.crt
+rm sign.key
+```
+
+Build a release.
+
+```sh
+task release
+```
+</details>

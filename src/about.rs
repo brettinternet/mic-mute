@@ -5,6 +5,7 @@ use anyhow::Result;
 use cocoa::base::nil;
 use cocoa::foundation::NSString;
 use objc::runtime::Object;
+use std::process::Command;
 
 fn format_shortcut(config: &ShortcutConfig) -> String {
     let mut parts = vec![];
@@ -26,15 +27,16 @@ fn format_shortcut(config: &ShortcutConfig) -> String {
 pub fn show_about(settings: &mut Settings) -> Result<bool> {
     let mic_str = format_shortcut(&settings.mic_shortcut);
 
-    let reset_clicked = unsafe {
+    let response = unsafe {
         let alert: *mut Object = msg_send![class!(NSAlert), new];
 
         let title = NSString::alloc(nil).init_str("Mic Mute");
         let _: () = msg_send![alert, setMessageText: title];
         let _: () = msg_send![title, release];
 
+        let version = env!("CARGO_PKG_VERSION");
         let info = format!(
-            "Mute shortcut: {mic_str}\n\nSettings:\n~/Library/Application Support/mic-mute/settings.json\n\nSource:\ngithub.com/brettinternet/mic-mute"
+            "Mute shortcut: {mic_str}\n\nSettings:\n~/Library/Application Support/mic-mute/settings.json\n\nVersion: {version}\n\nSource:\ngithub.com/brettinternet/mic-mute"
         );
         let info_str = NSString::alloc(nil).init_str(&info);
         let _: () = msg_send![alert, setInformativeText: info_str];
@@ -43,20 +45,32 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
         let ok_str = NSString::alloc(nil).init_str("OK");
         let _: () = msg_send![alert, addButtonWithTitle: ok_str];
         let _: () = msg_send![ok_str, release];
-        let reset_str = NSString::alloc(nil).init_str("Reset settings");
+        let open_str = NSString::alloc(nil).init_str("Open Settings");
+        let _: () = msg_send![alert, addButtonWithTitle: open_str];
+        let _: () = msg_send![open_str, release];
+        let reset_str = NSString::alloc(nil).init_str("Reset Settings");
         let _: () = msg_send![alert, addButtonWithTitle: reset_str];
         let _: () = msg_send![reset_str, release];
 
-        // 1000 = first button (OK), 1001 = second button (Reset to Default)
+        // 1000 = OK, 1001 = Reset settings, 1002 = Open Settings
         let response: i64 = msg_send![alert, runModal];
         let _: () = msg_send![alert, release];
-        response == 1001
+        response
     };
 
-    if reset_clicked {
-        settings.mic_shortcut = ShortcutConfig::default();
-        settings.save()?;
+    match response {
+        1001 => {
+            settings.mic_shortcut = ShortcutConfig::default();
+            settings.save()?;
+            Ok(true)
+        }
+        1002 => {
+            if let Some(path) = dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
+            {
+                let _ = Command::new("open").arg("-t").arg(&path).spawn();
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
     }
-
-    Ok(reset_clicked)
 }
