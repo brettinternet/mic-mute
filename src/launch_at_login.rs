@@ -19,7 +19,8 @@ pub fn enable() -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy();
 
-    let path = plist_path().ok_or_else(|| anyhow::anyhow!("Cannot resolve LaunchAgents directory"))?;
+    let path =
+        plist_path().ok_or_else(|| anyhow::anyhow!("Cannot resolve LaunchAgents directory"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

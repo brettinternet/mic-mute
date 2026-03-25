@@ -1,3 +1,4 @@
+mod about;
 mod camera;
 mod config;
 mod event_loop;
@@ -5,7 +6,6 @@ mod launch_at_login;
 mod mic;
 mod popup;
 mod popup_content;
-mod about;
 mod settings;
 mod shortcuts;
 mod tray;

@@ -17,7 +17,7 @@ impl Default for ShortcutConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub mic_shortcut: ShortcutConfig,
@@ -25,16 +25,6 @@ pub struct Settings {
     pub show_in_dock: bool,
     #[serde(default)]
     pub launch_at_login: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            mic_shortcut: ShortcutConfig::default(),
-            show_in_dock: false,
-            launch_at_login: false,
-        }
-    }
 }
 
 impl Settings {
@@ -114,7 +104,8 @@ mod tests {
         let json = serde_json::to_string_pretty(&s).unwrap();
         fs::write(&tmp_path, &json).unwrap();
 
-        let loaded: Settings = serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
+        let loaded: Settings =
+            serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
 
         let _ = fs::remove_file(&tmp_path);

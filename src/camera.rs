@@ -12,7 +12,7 @@ extern "C" {}
 const K_CMIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = 0x676c6f62; // 'glob'
 const K_CMIO_OBJECT_PROPERTY_ELEMENT_MAIN: u32 = 0;
 const K_CMIO_DEVICE_PROPERTY_IS_RUNNING_SOMEWHERE: u32 = 0x676F6E65; // 'gone'
-// System object holds the list of all CMIO devices
+                                                                     // System object holds the list of all CMIO devices
 const K_CMIO_HARDWARE_OBJECT_SYSTEM: u32 = 1;
 const K_CMIO_HARDWARE_PROPERTY_DEVICES: u32 = 0x64657623; // 'dev#'
 
@@ -77,7 +77,11 @@ impl CameraController {
             )
         };
         if status != 0 || data_size == 0 {
-            trace!("CMIO system device size query: status={} size={}", status, data_size);
+            trace!(
+                "CMIO system device size query: status={} size={}",
+                status,
+                data_size
+            );
             return vec![];
         }
         let count = data_size as usize / mem::size_of::<CMIOObjectID>();
@@ -94,8 +98,16 @@ impl CameraController {
                 ids.as_mut_ptr() as *mut c_void,
             )
         };
-        trace!("CMIO system device enumeration: status={} count={}", status, count);
-        if status != 0 { vec![] } else { ids }
+        trace!(
+            "CMIO system device enumeration: status={} count={}",
+            status,
+            count
+        );
+        if status != 0 {
+            vec![]
+        } else {
+            ids
+        }
     }
 
     fn is_device_running_somewhere(&self, device_id: CMIOObjectID) -> Option<bool> {
@@ -118,8 +130,17 @@ impl CameraController {
                 &mut running as *mut u32 as *mut c_void,
             )
         };
-        trace!("CMIO device {} isRunningSomewhere: status={} running={}", device_id, status, running);
-        if status == 0 { Some(running != 0) } else { None }
+        trace!(
+            "CMIO device {} isRunningSomewhere: status={} running={}",
+            device_id,
+            status,
+            running
+        );
+        if status == 0 {
+            Some(running != 0)
+        } else {
+            None
+        }
     }
 
     /// Returns true if any camera device is actively in use by any process.
@@ -130,7 +151,9 @@ impl CameraController {
             let media_type = NSString::alloc(nil).init_str("vide");
             let devices: id = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
             if devices == nil {
-                error!("AVCaptureDevice.devicesWithMediaType: returned nil — no camera permission?");
+                error!(
+                    "AVCaptureDevice.devicesWithMediaType: returned nil — no camera permission?"
+                );
                 0
             } else {
                 msg_send![devices, count]
@@ -140,13 +163,18 @@ impl CameraController {
         if av_device_count > 0 {
             let active = unsafe {
                 let media_type = NSString::alloc(nil).init_str("vide");
-                let devices: id = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
+                let devices: id =
+                    msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
                 let mut any = false;
                 for i in 0..av_device_count {
                     let device: id = msg_send![devices, objectAtIndex: i];
                     // isInUseByAnotherApplication returns ObjC BOOL (i8)
                     let in_use: cocoa::base::BOOL = msg_send![device, isInUseByAnotherApplication];
-                    trace!("AVCaptureDevice {} isInUseByAnotherApplication={}", i, in_use);
+                    trace!(
+                        "AVCaptureDevice {} isInUseByAnotherApplication={}",
+                        i,
+                        in_use
+                    );
                     if in_use != cocoa::base::NO {
                         any = true;
                         break;

@@ -1,13 +1,13 @@
 use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
-use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
 use crate::popup::Popup;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
 use log::trace;
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -41,8 +41,7 @@ impl UI {
             &settings.mic_shortcut,
         )
         .context("Failed to create system tray")?;
-        let shortcuts =
-            Shortcuts::new(settings).context("Failed to setup shortcuts")?;
+        let shortcuts = Shortcuts::new(settings).context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
             button_toggle_mute: tray.toggle_mute_id().clone(),
@@ -63,7 +62,11 @@ impl UI {
         Ok((ui, event_loop, event_ids))
     }
 
-    pub fn update_mic(&mut self, muted: bool, active_device_name: Option<&str>) -> Result<&mut Self> {
+    pub fn update_mic(
+        &mut self,
+        muted: bool,
+        active_device_name: Option<&str>,
+    ) -> Result<&mut Self> {
         trace!("Updating UI mic state {}", muted);
         self.mic_muted = muted;
         self.tray
@@ -103,7 +106,9 @@ impl UI {
         crate::launch_at_login::set_dock_visible(settings.show_in_dock);
 
         // Sync launch-at-login plist and its tray checkbox
-        self.tray.launch_at_login.set_checked(settings.launch_at_login);
+        self.tray
+            .launch_at_login
+            .set_checked(settings.launch_at_login);
         if let Err(e) = crate::launch_at_login::set(settings.launch_at_login) {
             log::error!("Failed to apply launch_at_login setting: {}", e);
         }
@@ -126,5 +131,4 @@ impl UI {
         }
         Ok(self)
     }
-
 }

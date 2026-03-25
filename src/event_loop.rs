@@ -1,7 +1,7 @@
+use crate::about::show_about;
 use crate::camera::CameraController;
 use crate::launch_at_login;
 use crate::mic::MicController;
-use crate::about::show_about;
 use crate::settings::Settings;
 use crate::ui::UI;
 use crate::utils::Throttle;
@@ -51,7 +51,8 @@ fn update_mic(
         controller.toggle(state).unwrap();
         let device_name = controller.active_device_name();
         let mut ui = ui.write().unwrap();
-        ui.update_mic(controller.muted, device_name.as_deref()).unwrap();
+        ui.update_mic(controller.muted, device_name.as_deref())
+            .unwrap();
     }
     if toggle && !controller.muted {
         task::spawn(async move {
@@ -205,7 +206,11 @@ pub fn start(
         if last_camera_check.elapsed() >= camera_poll_interval {
             last_camera_check = Instant::now();
             // muted=false means camera is active (running somewhere); muted=true means idle
-            let active = camera.read().unwrap().is_running_anywhere().unwrap_or(false);
+            let active = camera
+                .read()
+                .unwrap()
+                .is_running_anywhere()
+                .unwrap_or(false);
             let muted = !active;
             if muted != camera.read().unwrap().muted {
                 camera.write().unwrap().muted = muted;

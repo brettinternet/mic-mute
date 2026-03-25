@@ -4,10 +4,10 @@ use log::{error, trace};
 use objc2_core_audio::{
     kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioHardwareNoError,
-    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
-    kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal,
-    AudioDeviceID, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
-    AudioObjectPropertyAddress, AudioObjectSetPropertyData,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwareUnknownPropertyError,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, AudioDeviceID,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress,
+    AudioObjectSetPropertyData,
 };
 use objc2_core_audio_types::AudioBufferList;
 use std::fmt;
@@ -193,8 +193,8 @@ impl MicController {
         trace!("RESULT FROM STATUS: {}", status);
 
         match status {
-            status if status == kAudioHardwareNoError as i32 => {}
-            status if status == kAudioHardwareUnknownPropertyError as i32 => {}
+            status if status == kAudioHardwareNoError => {}
+            status if status == kAudioHardwareUnknownPropertyError => {}
             result => {
                 error!("RESULT: {}", result);
             }
@@ -251,7 +251,7 @@ impl MicController {
                 NonNull::new_unchecked(&mut device_id as *mut _ as *mut _),
             )
         };
-        if status != kAudioHardwareNoError as i32 || device_id == 0 {
+        if status != kAudioHardwareNoError || device_id == 0 {
             return None;
         }
         get_device_name(device_id).ok()
