@@ -47,7 +47,6 @@ fn main() {
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
-    camera::request_permission();
     let camera = CameraController::new().unwrap();
     let camera_muted = camera.muted;
     let camera = arc_lock(camera);

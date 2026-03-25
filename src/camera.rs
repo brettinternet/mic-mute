@@ -1,5 +1,4 @@
 use anyhow::Result;
-use block::ConcreteBlock;
 use cocoa::base::{id, nil};
 use cocoa::foundation::NSString;
 use log::{error, trace};
@@ -8,20 +7,6 @@ use std::mem;
 
 #[link(name = "AVFoundation", kind = "framework")]
 extern "C" {}
-
-/// Trigger the macOS camera TCC permission prompt if not yet determined.
-/// The app must have NSCameraUsageDescription in its Info.plist for the dialog to appear.
-pub fn request_permission() {
-    let block = ConcreteBlock::new(|_granted: bool| {}).copy();
-    unsafe {
-        let media_type = NSString::alloc(nil).init_str("vide"); // AVMediaTypeVideo
-        let _: () = msg_send![
-            class!(AVCaptureDevice),
-            requestAccessForMediaType: media_type
-            completionHandler: &*block
-        ];
-    }
-}
 
 // CMIO constants
 const K_CMIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = 0x676c6f62; // 'glob'
