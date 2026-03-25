@@ -52,7 +52,7 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
         let _: () = msg_send![alert, addButtonWithTitle: reset_str];
         let _: () = msg_send![reset_str, release];
 
-        // 1000 = OK, 1001 = Reset settings, 1002 = Open Settings
+        // 1000 = OK, 1001 = Open Settings, 1002 = Reset Settings
         let response: i64 = msg_send![alert, runModal];
         let _: () = msg_send![alert, release];
         response
@@ -60,16 +60,17 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
 
     match response {
         1001 => {
-            settings.mic_shortcut = ShortcutConfig::default();
-            settings.save()?;
-            Ok(true)
-        }
-        1002 => {
-            if let Some(path) = dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
+            if let Some(path) =
+                dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
             {
                 let _ = Command::new("open").arg("-t").arg(&path).spawn();
             }
             Ok(false)
+        }
+        1002 => {
+            settings.mic_shortcut = ShortcutConfig::default();
+            settings.save()?;
+            Ok(true)
         }
         _ => Ok(false),
     }
