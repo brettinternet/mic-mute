@@ -25,6 +25,15 @@ use crate::ui::UI;
 use crate::utils::arc_lock;
 use env_logger::{Builder, Env};
 use log::{info, trace};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_signal(_: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
 
 fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
@@ -46,6 +55,30 @@ fn main() {
     let mic_muted = controller.muted;
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
+
+    // Register SIGTERM/SIGINT handlers. The signal handler only sets a flag;
+    // a background thread does the actual CoreAudio cleanup and exits.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+    }
+    let controller_sig = Arc::clone(&controller);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(100));
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            info!("Signal received — unmuting before exit");
+            if let Ok(mut c) = controller_sig.write() {
+                let _ = c.toggle(Some(false));
+            }
+            std::process::exit(0);
+        }
+    });
 
     let camera = CameraController::new().unwrap();
     let camera_muted = camera.muted;

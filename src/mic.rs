@@ -197,8 +197,8 @@ impl MicController {
         trace!("RESULT FROM STATUS: {}", status);
 
         match status {
-            status if status == kAudioHardwareNoError as i32 => {}
-            status if status == kAudioHardwareUnknownPropertyError as i32 => {
+            status if status == kAudioHardwareNoError => {}
+            status if status == kAudioHardwareUnknownPropertyError => {
                 // Device doesn't support kAudioDevicePropertyMute (e.g. iPhone Continuity mic).
                 // Fall back to setting the input volume scalar to 0.
                 trace!(
@@ -233,7 +233,9 @@ impl MicController {
 
         if state {
             // Save current volume before muting, if not already saved.
-            if !self.saved_volumes.contains_key(&audio_device_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                self.saved_volumes.entry(audio_device_id)
+            {
                 let current_vol = 0_f32;
                 let mut read_size = vol_data_size;
                 let read_status = unsafe {
@@ -246,13 +248,13 @@ impl MicController {
                         NonNull::new_unchecked(&current_vol as *const f32 as *mut _),
                     )
                 };
-                if read_status == kAudioHardwareNoError as i32 {
+                if read_status == kAudioHardwareNoError {
                     trace!(
                         "Saving volume {:.3} for device {} before muting",
                         current_vol,
                         audio_device_id
                     );
-                    self.saved_volumes.insert(audio_device_id, current_vol);
+                    e.insert(current_vol);
                 }
             }
             let zero: f32 = 0.0;
@@ -266,7 +268,7 @@ impl MicController {
                     NonNull::new_unchecked(&zero as *const f32 as *mut _),
                 )
             };
-            if set_status != kAudioHardwareNoError as i32 {
+            if set_status != kAudioHardwareNoError {
                 trace!(
                     "Volume scalar mute failed for device {} with status {}",
                     audio_device_id,
@@ -294,7 +296,7 @@ impl MicController {
                     NonNull::new_unchecked(&restore_vol as *const f32 as *mut _),
                 )
             };
-            if set_status != kAudioHardwareNoError as i32 {
+            if set_status != kAudioHardwareNoError {
                 trace!(
                     "Volume scalar unmute failed for device {} with status {}",
                     audio_device_id,
