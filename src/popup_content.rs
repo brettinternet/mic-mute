@@ -1,3 +1,4 @@
+use crate::icons::{popup_icon_color, rasterize_svg};
 use anyhow::{Context, Result};
 use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
 use cocoa::base::{id, nil, NO, YES};
@@ -76,28 +77,30 @@ fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     }
 }
 
-fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
-    const LIGHT_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-black.png");
-    const LIGHT_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-red.png");
-    const DARK_MIC_ON: &[u8] = include_bytes!("../assets/images/mic-white.png");
-    const DARK_MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-light-red.png");
-    let bytes = match theme {
-        Theme::Dark if muted => DARK_MIC_OFF,
-        Theme::Dark => DARK_MIC_ON,
-        Theme::Light if muted => LIGHT_MIC_OFF,
-        _ => LIGHT_MIC_ON,
-    };
-    let image_buff = image::load_from_memory(bytes)
-        .context("Failed to load mic icon")?
-        .into_rgba8();
-    let (width, height) = image_buff.dimensions();
+/// Rasterizes an SVG and returns PNG-encoded bytes plus source dimensions.
+/// Uses the same NSData→NSImage path as the previous PNG-based approach.
+fn svg_to_png(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
+    let color = popup_icon_color(muted, theme);
+    let (rgba, w, h) = rasterize_svg(svg_bytes, &color)?;
+    let img = image::RgbaImage::from_raw(w, h, rgba).context("Failed to create RgbaImage")?;
+    let mut png = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png),
+        image::ImageFormat::Png,
+    )
+    .context("Failed to encode PNG")?;
+    Ok((png, w, h))
+}
+
+fn svg_to_ns_image(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<id> {
+    let (png, w, h) = svg_to_png(svg_bytes, muted, theme)?;
     const ICON_HEIGHT: f64 = 16.;
-    let icon_width = (width as f64) / (height as f64 / ICON_HEIGHT);
+    let icon_width = (w as f64) / (h as f64 / ICON_HEIGHT);
     let ns_image = unsafe {
         let nsdata = NSData::dataWithBytes_length_(
             nil,
-            bytes.as_ptr() as *const std::os::raw::c_void,
-            bytes.len() as u64,
+            png.as_ptr() as *const std::os::raw::c_void,
+            png.len() as u64,
         );
         let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
         let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, ICON_HEIGHT)];
@@ -107,35 +110,16 @@ fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
     Ok(ns_image)
 }
 
+fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
+    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
+    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
+    svg_to_ns_image(if muted { MIC_OFF } else { MIC_ON }, muted, theme)
+}
+
 fn get_camera_image(muted: bool, theme: Theme) -> Result<id> {
-    const LIGHT_VIDEO_ON: &[u8] = include_bytes!("../assets/images/video-black.png");
-    const LIGHT_VIDEO_OFF: &[u8] = include_bytes!("../assets/images/video-off-red.png");
-    const DARK_VIDEO_ON: &[u8] = include_bytes!("../assets/images/video-white.png");
-    const DARK_VIDEO_OFF: &[u8] = include_bytes!("../assets/images/video-off-light-red.png");
-    let bytes = match theme {
-        Theme::Dark if muted => DARK_VIDEO_OFF,
-        Theme::Dark => DARK_VIDEO_ON,
-        Theme::Light if muted => LIGHT_VIDEO_OFF,
-        _ => LIGHT_VIDEO_ON,
-    };
-    let image_buff = image::load_from_memory(bytes)
-        .context("Failed to load mic icon")?
-        .into_rgba8();
-    let (width, height) = image_buff.dimensions();
-    const ICON_HEIGHT: f64 = 16.;
-    let icon_width = (width as f64) / (height as f64 / ICON_HEIGHT);
-    let ns_image = unsafe {
-        let nsdata = NSData::dataWithBytes_length_(
-            nil,
-            bytes.as_ptr() as *const std::os::raw::c_void,
-            bytes.len() as u64,
-        );
-        let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
-        let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, ICON_HEIGHT)];
-        let _: () = msg_send![ns_image, setTemplate: NO];
-        ns_image
-    };
-    Ok(ns_image)
+    const VIDEO_ON: &[u8] = include_bytes!("../assets/video.svg");
+    const VIDEO_OFF: &[u8] = include_bytes!("../assets/video-off.svg");
+    svg_to_ns_image(if muted { VIDEO_OFF } else { VIDEO_ON }, muted, theme)
 }
 
 fn make_image_view(image: id, frame: NSRect) -> id {

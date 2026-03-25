@@ -1,5 +1,6 @@
 mod about;
 mod camera;
+mod icons;
 mod config;
 mod event_loop;
 mod launch_at_login;

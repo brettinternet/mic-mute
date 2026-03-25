@@ -1,4 +1,5 @@
 use crate::config::AppVars;
+use crate::icons::{rasterize_svg, tray_icon_color};
 use crate::settings::ShortcutConfig;
 use anyhow::{Context, Result};
 use log::trace;
@@ -21,23 +22,11 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-fn get_image(muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    const MIC_ON: &[u8] = include_bytes!("../assets/images/mic-white.png");
-    const MIC_OFF: &[u8] = include_bytes!("../assets/images/mic-off-red.png");
-
-    let image = match theme {
-        Theme::Light if muted => MIC_OFF,
-        Theme::Light if !muted => MIC_ON,
-        Theme::Dark if muted => MIC_OFF,
-        _ => MIC_ON,
-    };
-
-    let image_buff = image::load_from_memory(image)
-        .context("Failed to open icon path")?
-        .into_rgba8();
-    let (width, height) = image_buff.dimensions();
-    let rgba = image_buff.into_raw();
-    Ok((rgba, width, height))
+fn get_image(muted: bool, _theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
+    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
+    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
+    let svg = if muted { MIC_OFF } else { MIC_ON };
+    rasterize_svg(svg, &tray_icon_color(muted))
 }
 
 fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
