@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  lint:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --locked --release -- -D warnings
+
+      - name: Format
+        run: cargo fmt -- --check
+
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --release --target aarch64-apple-darwin
