@@ -23,9 +23,9 @@ tasks:
     internal: true
     desc: Project dependencies
     cmds:
-      - cargo install cargo-watch
+      - cargo install watchexec-cli
     status:
-      - test -f $HOME/.cargo/bin/cargo-watch
+      - test -f $HOME/.cargo/bin/watchexec
 
   lefthook:
     desc: Install Lefthook

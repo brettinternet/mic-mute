@@ -28,7 +28,7 @@ tasks:
     desc: Compile, run and watch for changes
     aliases: [watch, run]
     cmds:
-      - cargo watch -x run
+      - watchexec -e rs,toml -- cargo run
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
