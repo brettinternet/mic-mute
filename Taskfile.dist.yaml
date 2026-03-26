@@ -1,4 +1,5 @@
 ---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: "3"
 
 vars:
@@ -8,6 +9,9 @@ vars:
 env:
   ROOT_DIR: "{{.PROJECT_DIR}}"
 
+includes:
+  setup: .taskfiles/setup.yaml
+
 tasks:
   default:
     silent: true
@@ -15,18 +19,10 @@ tasks:
       - task -l
 
   init:
-    desc: Install dependencies
+    desc: Install dependencies and setup project
     aliases: [setup]
-    cmds:
-      - task: dependencies
-
-  dependencies:
-    internal: true
-    desc: Project dependencies
-    cmds:
-      - cargo install cargo-watch
-    status:
-      - test -f $HOME/.cargo/bin/cargo-watch
+    deps:
+      - task: setup:init
 
   start:
     desc: Compile, run and watch for changes
@@ -49,12 +45,14 @@ tasks:
     cmds:
       - cargo clippy --locked --release -- -D warnings
       - cargo fmt -- --check
+      - dprint check
 
   fix:
     desc: Fix lint and formatting issues
     cmds:
       - cargo clippy --locked --release --fix --allow-dirty --allow-staged -- -D warnings
       - cargo fmt
+      - dprint fmt
 
   test:
     cmds:

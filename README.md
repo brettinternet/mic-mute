@@ -34,7 +34,7 @@ I have not elected to sign the app by joining the Apple Developer Program. The r
 
 ## Build
 
-[Install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
+Install dependencies with `mise`. Or you may [install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
 
 Install the build dependencies, build and bundle the app.
 
@@ -90,4 +90,5 @@ Build a release.
 ```sh
 task release
 ```
+
 </details>

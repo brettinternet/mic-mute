@@ -1,0 +1,8 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/evilmartians/lefthook/master/schema.json
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: Run checks
+      run: task check

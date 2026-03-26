@@ -1,0 +1,5 @@
+[tools]
+dprint = "latest"
+lefthook = "latest"
+rust = "latest"
+task = "latest"

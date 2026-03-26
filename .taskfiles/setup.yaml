@@ -1,0 +1,36 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+tasks:
+  init:
+    desc: Install dependencies
+    cmds:
+      - task: mise
+      - task: dependencies
+      - task: lefthook
+
+  mise:
+    desc: Install workstation dependencies
+    cmds:
+      - mise trust -q -a
+      - mise install -q
+    preconditions:
+      - sh: command -v mise
+        msg: Mise is not installed
+
+  dependencies:
+    internal: true
+    desc: Project dependencies
+    cmds:
+      - cargo install cargo-watch
+    status:
+      - test -f $HOME/.cargo/bin/cargo-watch
+
+  lefthook:
+    desc: Install Lefthook
+    cmds:
+      - lefthook install
+    preconditions:
+      - command -v lefthook
+      - test -f lefthook.yaml
