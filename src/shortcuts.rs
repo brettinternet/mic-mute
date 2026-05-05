@@ -53,6 +53,30 @@ fn code_from_str(key: &str) -> Code {
         "X" => Code::KeyX,
         "Y" => Code::KeyY,
         "Z" => Code::KeyZ,
+        "F1" => Code::F1,
+        "F2" => Code::F2,
+        "F3" => Code::F3,
+        "F4" => Code::F4,
+        "F5" => Code::F5,
+        "F6" => Code::F6,
+        "F7" => Code::F7,
+        "F8" => Code::F8,
+        "F9" => Code::F9,
+        "F10" => Code::F10,
+        "F11" => Code::F11,
+        "F12" => Code::F12,
+        "F13" => Code::F13,
+        "F14" => Code::F14,
+        "F15" => Code::F15,
+        "F16" => Code::F16,
+        "F17" => Code::F17,
+        "F18" => Code::F18,
+        "F19" => Code::F19,
+        "F20" => Code::F20,
+        "F21" => Code::F21,
+        "F22" => Code::F22,
+        "F23" => Code::F23,
+        "F24" => Code::F24,
         _ => Code::KeyA,
     }
 }
@@ -108,6 +132,23 @@ mod tests {
     fn test_code_from_str_lowercase() {
         assert!(matches!(code_from_str("a"), Code::KeyA));
         assert!(matches!(code_from_str("v"), Code::KeyV));
+    }
+
+    #[test]
+    fn test_code_from_str_function_keys() {
+        assert!(matches!(code_from_str("F1"), Code::F1));
+        assert!(matches!(code_from_str("F13"), Code::F13));
+        assert!(matches!(code_from_str("F24"), Code::F24));
+    }
+
+    #[test]
+    fn test_hotkey_from_config_no_modifiers() {
+        let config = ShortcutConfig {
+            modifiers: vec![],
+            key: "F13".to_string(),
+        };
+        let mods = modifiers_from_config(&config);
+        assert!(mods.is_empty());
     }
 
     #[test]

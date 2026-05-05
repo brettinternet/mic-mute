@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutConfig {
+    #[serde(default)]
     pub modifiers: Vec<String>, // ["shift", "meta", "ctrl", "alt"]
-    pub key: String,            // "A", "M", etc.
+    pub key: String, // "A", "M", "F13", etc.
 }
 
 impl Default for ShortcutConfig {
