@@ -84,6 +84,21 @@ mod tests {
     }
 
     #[test]
+    fn test_settings_json_missing_shortcut_modifiers() {
+        let loaded: Settings = serde_json::from_str(
+            r#"{
+                "mic_shortcut": {
+                    "key": "F13"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.mic_shortcut.key, "F13");
+        assert!(loaded.mic_shortcut.modifiers.is_empty());
+    }
+
+    #[test]
     fn test_settings_save_and_load() {
         use std::fs;
 

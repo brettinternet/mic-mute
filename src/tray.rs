@@ -3,10 +3,7 @@ use crate::icons::{rasterize_svg, tray_icon_color};
 use crate::settings::ShortcutConfig;
 use anyhow::{Context, Result};
 use log::trace;
-use muda::{
-    accelerator::{Accelerator, Code, Modifiers},
-    CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
-};
+use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use std::fmt;
 use tao::window::Theme;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -37,80 +34,22 @@ fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     Ok(icon)
 }
 
-fn muda_modifiers(config: &ShortcutConfig) -> Modifiers {
-    let mut mods = Modifiers::empty();
-    for m in &config.modifiers {
-        match m.as_str() {
-            "shift" => mods |= Modifiers::SHIFT,
-            "meta" | "cmd" | "command" => mods |= Modifiers::META,
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "alt" | "option" => mods |= Modifiers::ALT,
-            _ => {}
-        }
-    }
-    mods
-}
-
-fn muda_code(key: &str) -> Code {
-    match key.to_uppercase().as_str() {
-        "A" => Code::KeyA,
-        "B" => Code::KeyB,
-        "C" => Code::KeyC,
-        "D" => Code::KeyD,
-        "E" => Code::KeyE,
-        "F" => Code::KeyF,
-        "G" => Code::KeyG,
-        "H" => Code::KeyH,
-        "I" => Code::KeyI,
-        "J" => Code::KeyJ,
-        "K" => Code::KeyK,
-        "L" => Code::KeyL,
-        "M" => Code::KeyM,
-        "N" => Code::KeyN,
-        "O" => Code::KeyO,
-        "P" => Code::KeyP,
-        "Q" => Code::KeyQ,
-        "R" => Code::KeyR,
-        "S" => Code::KeyS,
-        "T" => Code::KeyT,
-        "U" => Code::KeyU,
-        "V" => Code::KeyV,
-        "W" => Code::KeyW,
-        "X" => Code::KeyX,
-        "Y" => Code::KeyY,
-        "Z" => Code::KeyZ,
-        "F1" => Code::F1,
-        "F2" => Code::F2,
-        "F3" => Code::F3,
-        "F4" => Code::F4,
-        "F5" => Code::F5,
-        "F6" => Code::F6,
-        "F7" => Code::F7,
-        "F8" => Code::F8,
-        "F9" => Code::F9,
-        "F10" => Code::F10,
-        "F11" => Code::F11,
-        "F12" => Code::F12,
-        "F13" => Code::F13,
-        "F14" => Code::F14,
-        "F15" => Code::F15,
-        "F16" => Code::F16,
-        "F17" => Code::F17,
-        "F18" => Code::F18,
-        "F19" => Code::F19,
-        "F20" => Code::F20,
-        "F21" => Code::F21,
-        "F22" => Code::F22,
-        "F23" => Code::F23,
-        "F24" => Code::F24,
-        _ => Code::KeyA,
-    }
-}
-
 fn accelerator_from_config(config: &ShortcutConfig) -> Accelerator {
-    let mods = muda_modifiers(config);
-    let mods = if mods.is_empty() { None } else { Some(mods) };
-    Accelerator::new(mods, muda_code(&config.key))
+    let parts = config
+        .modifiers
+        .iter()
+        .map(|modifier| match modifier.as_str() {
+            "meta" => "cmd".to_string(),
+            other => other.to_string(),
+        });
+    let accelerator = parts
+        .chain(std::iter::once(config.key.clone()))
+        .collect::<Vec<_>>()
+        .join("+");
+
+    accelerator
+        .parse::<Accelerator>()
+        .unwrap_or_else(|_| "A".parse().unwrap())
 }
 
 unsafe impl Send for Tray {}
