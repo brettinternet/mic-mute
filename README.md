@@ -14,7 +14,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
 
 - CoreAudio API mute input devices
   - [x] Mute input devices
-    - Note: Some virtual devices may be unable to mute for now
+    - Note: Devices that expose no CoreAudio mute or input-volume control, such as iPhone Continuity Microphone, cannot be muted by this app.
   - [x] Provide global hotkey muting
   - [x] Poll new devices to mute while microphones should be off
 - Visual confirmation of mute status

@@ -123,12 +123,7 @@ impl UI {
     pub fn detect(&mut self) -> Result<&mut Self> {
         self.popup
             .detect_cursor_monitor()
-            .context("Failed to detect UI cursor monitor")?;
-        if self.popup.cursor_on_separate_monitor {
-            self.popup
-                .update_placement()
-                .context("Failed to update UI popup placement")?;
-        }
+            .context("Failed to update UI popup placement")?;
         Ok(self)
     }
 }

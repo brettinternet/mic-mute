@@ -49,13 +49,18 @@ fn setup_window(window: id) {
 pub struct Popup {
     window: Window,
     content: PopupContent,
-    pub cursor_on_separate_monitor: bool,
+    current_monitor: Option<MonitorHandle>,
 }
 
 impl Popup {
     pub fn new(event_loop: &EventLoopMessage, mic_muted: bool) -> Result<Self> {
         let camera_muted = false;
-        let window = WindowBuilder::new()
+        let initial_monitor = Popup::get_initial_monitor(event_loop);
+        let scale = initial_monitor
+            .as_ref()
+            .map_or(1.0, MonitorHandle::scale_factor);
+        let size = Popup::get_size(scale);
+        let mut builder = WindowBuilder::new()
             .with_title(get_mute_title_text(mic_muted))
             .with_titlebar_hidden(true)
             .with_movable_by_window_background(true)
@@ -63,19 +68,22 @@ impl Popup {
             .with_closable(false)
             .with_content_protection(true)
             .with_decorations(false)
+            .with_inner_size(size)
             .with_maximized(false)
             .with_minimizable(false)
             .with_resizable(false)
             .with_visible_on_all_workspaces(true)
             .with_visible(false)
-            .with_has_shadow(true)
+            .with_has_shadow(true);
+        if let Some(monitor) = initial_monitor.as_ref() {
+            builder = builder.with_position(Popup::get_position(monitor, size));
+        }
+        let window = builder
             .build(event_loop)
             .context("Failed to build window")?;
+        window.set_visible(false);
         window.set_ignore_cursor_events(true)?;
-        let size = Popup::get_size(window.scale_factor());
-        window.set_inner_size(size);
 
-        let scale = window.scale_factor();
         trace!("Window scale factor {}", scale);
         let content = PopupContent::new(
             mic_muted,
@@ -94,7 +102,7 @@ impl Popup {
         let popup = Self {
             window,
             content,
-            cursor_on_separate_monitor: false,
+            current_monitor: initial_monitor,
         };
         Ok(popup)
     }
@@ -122,11 +130,7 @@ impl Popup {
             active_device_name,
         )?;
         if mic_muted {
-            self.window.set_visible(true);
-            unsafe {
-                let ns_window = self.window.ns_window() as id;
-                let _: () = msg_send![ns_window, orderFrontRegardless];
-            }
+            self.show_front();
         }
         Ok(self)
     }
@@ -138,22 +142,27 @@ impl Popup {
 
     pub fn update_placement(&mut self) -> Result<&mut Self> {
         if let Some(monitor) = self.get_current_monitor()? {
+            let monitor_changed = self.current_monitor.as_ref() != Some(&monitor);
+            let was_visible = monitor_changed && self.window.is_visible();
+            if was_visible {
+                self.window.set_visible(false);
+            }
+
             let size = Popup::get_size(monitor.scale_factor());
             self.window.set_inner_size(size);
-            self.cursor_on_separate_monitor = false;
             self.window
-                .set_outer_position(self.get_position(monitor, size));
+                .set_outer_position(Popup::get_position(&monitor, size));
+            self.current_monitor = Some(monitor);
+
+            if was_visible {
+                self.show_front();
+            }
         }
         Ok(self)
     }
 
     pub fn detect_cursor_monitor(&mut self) -> Result<&mut Self> {
-        if let Some(cursor_monitor) = self.get_current_monitor()? {
-            if let Some(window_monitor) = self.window.current_monitor() {
-                self.cursor_on_separate_monitor = window_monitor.name() != cursor_monitor.name()
-            }
-        }
-        Ok(self)
+        self.update_placement()
     }
 
     fn get_current_monitor(&self) -> Result<Option<MonitorHandle>> {
@@ -165,11 +174,21 @@ impl Popup {
         }
     }
 
-    fn get_position(
-        &self,
-        monitor: MonitorHandle,
-        window_size: WindowSize,
-    ) -> PhysicalPosition<f64> {
+    fn get_initial_monitor(event_loop: &EventLoopMessage) -> Option<MonitorHandle> {
+        get_cursor_pos()
+            .and_then(|(x, y)| event_loop.monitor_from_point(x.into(), y.into()))
+            .or_else(|| event_loop.primary_monitor())
+    }
+
+    fn show_front(&self) {
+        self.window.set_visible(true);
+        unsafe {
+            let ns_window = self.window.ns_window() as id;
+            let _: () = msg_send![ns_window, orderFrontRegardless];
+        }
+    }
+
+    fn get_position(monitor: &MonitorHandle, window_size: WindowSize) -> PhysicalPosition<f64> {
         let monitor_position: PhysicalPosition<f64> = monitor.position().cast();
         let monitor_size: PhysicalSize<f64> = monitor.size().cast();
         let x: f64 = (monitor_position.x + (monitor_size.width / 2.)) - (window_size.width / 2.);
