@@ -27,7 +27,6 @@ use crate::utils::arc_lock;
 use env_logger::{Builder, Env};
 use log::{info, trace};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -69,14 +68,10 @@ fn main() {
             handle_signal as *const () as libc::sighandler_t,
         );
     }
-    let controller_sig = Arc::clone(&controller);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(100));
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-            info!("Signal received — unmuting before exit");
-            if let Ok(mut c) = controller_sig.write() {
-                let _ = c.toggle(Some(false));
-            }
+            info!("Signal received — exiting without changing microphone state");
             std::process::exit(0);
         }
     });

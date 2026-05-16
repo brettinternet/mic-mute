@@ -46,9 +46,11 @@ fn update_mic(
     toggle: bool,
 ) {
     let mut controller = controller.write().unwrap();
-    if toggle || controller.muted {
-        let state = if toggle { None } else { Some(controller.muted) };
-        controller.toggle(state).unwrap();
+    if toggle || controller.should_enforce_mute() {
+        let state = if toggle { None } else { Some(true) };
+        if let Err(err) = controller.toggle(state) {
+            log::error!("Failed to update microphone mute state: {}", err);
+        }
         let device_name = controller.active_device_name();
         let mut ui = ui.write().unwrap();
         ui.update_mic(controller.muted, device_name.as_deref())
@@ -142,8 +144,6 @@ pub fn start(
             trace!("Tray menu event: {:?}", event);
             if event.id == button_quit {
                 trace!("Exit tray menu item selected");
-                let mut mic = controller.write().unwrap();
-                mic.toggle(Some(false)).unwrap();
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
