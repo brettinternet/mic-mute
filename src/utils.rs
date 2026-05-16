@@ -15,12 +15,16 @@ extern "C" {
     fn CGEventGetLocation(e: *const c_void) -> CGPoint;
 }
 
-pub fn get_cursor_pos() -> Option<(i32, i32)> {
+pub fn get_cursor_pos() -> Option<(f64, f64)> {
     unsafe {
-        let e = CGEventCreate(0 as _);
-        let point = CGEventGetLocation(e);
-        CFRelease(e);
-        Some((point.x as _, point.y as _))
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        Some((point.x, point.y))
     }
 }
 

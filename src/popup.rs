@@ -8,7 +8,7 @@ use cocoa::{
 };
 use log::trace;
 use tao::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::{Theme, Window, WindowBuilder},
@@ -25,6 +25,17 @@ fn get_mute_title_text(muted: bool) -> &'static str {
     } else {
         UNMUTED_TITLE
     }
+}
+
+fn monitor_contains_physical_position(
+    position: PhysicalPosition<f64>,
+    monitor_position: PhysicalPosition<f64>,
+    monitor_size: PhysicalSize<f64>,
+) -> bool {
+    position.x >= monitor_position.x
+        && position.x < monitor_position.x + monitor_size.width
+        && position.y >= monitor_position.y
+        && position.y < monitor_position.y + monitor_size.height
 }
 
 fn setup_window(window: id) {
@@ -161,6 +172,16 @@ impl Popup {
     }
 
     fn get_current_monitor(&self) -> Result<Option<MonitorHandle>> {
+        // CoreGraphics and `Window::monitor_from_point` both use the same global
+        // display coordinate space on macOS. Prefer this path over
+        // `Window::cursor_position`, which converts through the primary display's
+        // scale factor and can misclassify points near monitor boundaries.
+        if let Some((x, y)) = get_cursor_pos() {
+            if let Some(monitor) = self.window.monitor_from_point(x, y) {
+                return Ok(Some(monitor));
+            }
+        }
+
         let position = self
             .window
             .cursor_position()
@@ -168,23 +189,20 @@ impl Popup {
         if let Some(monitor) = self.window.monitor_from_point(position.x, position.y) {
             return Ok(Some(monitor));
         }
-        if let Some(monitor) = self.monitor_from_physical_position(position) {
-            return Ok(Some(monitor));
-        }
-        Ok(get_cursor_pos().and_then(|(x, y)| self.window.monitor_from_point(x.into(), y.into())))
+
+        Ok(self.monitor_from_physical_position(position))
     }
 
     fn monitor_from_physical_position(
         &self,
-        position: tao::dpi::PhysicalPosition<f64>,
+        position: PhysicalPosition<f64>,
     ) -> Option<MonitorHandle> {
         self.window.available_monitors().find(|monitor| {
-            let monitor_position = monitor.position().cast::<f64>();
-            let monitor_size = monitor.size().cast::<f64>();
-            position.x >= monitor_position.x
-                && position.x < monitor_position.x + monitor_size.width
-                && position.y >= monitor_position.y
-                && position.y < monitor_position.y + monitor_size.height
+            monitor_contains_physical_position(
+                position,
+                monitor.position().cast::<f64>(),
+                monitor.size().cast::<f64>(),
+            )
         })
     }
 
@@ -207,5 +225,44 @@ impl Popup {
         let x: f64 = (monitor_position.x + (monitor_size.width / 2.)) - (window_size.width / 2.);
         let y: f64 = (monitor_position.y + monitor_size.height) - (window_size.height * 2.);
         LogicalPosition::new(x, y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_contains_fractional_positions_on_negative_edges() {
+        let monitor_position = PhysicalPosition::new(-1920.0, 0.0);
+        let monitor_size = PhysicalSize::new(1920.0, 1080.0);
+
+        assert!(monitor_contains_physical_position(
+            PhysicalPosition::new(-0.25, 100.0),
+            monitor_position,
+            monitor_size
+        ));
+    }
+
+    #[test]
+    fn monitor_contains_positions_until_exclusive_far_edges() {
+        let monitor_position = PhysicalPosition::new(0.0, 0.0);
+        let monitor_size = PhysicalSize::new(1440.0, 900.0);
+
+        assert!(monitor_contains_physical_position(
+            PhysicalPosition::new(1439.999, 899.999),
+            monitor_position,
+            monitor_size
+        ));
+        assert!(!monitor_contains_physical_position(
+            PhysicalPosition::new(1440.0, 899.999),
+            monitor_position,
+            monitor_size
+        ));
+        assert!(!monitor_contains_physical_position(
+            PhysicalPosition::new(1439.999, 900.0),
+            monitor_position,
+            monitor_size
+        ));
     }
 }
