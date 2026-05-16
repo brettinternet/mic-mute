@@ -26,6 +26,15 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray d
 - [x] Add configurable settings (hotkey, startup)
 - [x] Open app on system startup
 
+## Limitations
+
+Mic Mute is best-effort, **not** a hardware privacy switch.
+
+- Mutes CoreAudio-controllable devices only.
+- Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
+- Polling can leave brief mute gaps.
+- Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
+
 ## Releases
 
 I have not elected to sign the app by joining the Apple Developer Program. The releases have been self-signed by me and can be installed by bypassing the typical app security on macOS. You're also welcome to build and bundle the app yourself with the simple instructions described below.
