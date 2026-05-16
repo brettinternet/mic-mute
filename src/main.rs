@@ -57,7 +57,7 @@ fn main() {
     trace!("Mic controller initialized {:?}", controller);
 
     // Register SIGTERM/SIGINT handlers. The signal handler only sets a flag;
-    // a background thread does the actual CoreAudio cleanup and exits.
+    // a background thread exits without changing the current microphone state.
     unsafe {
         libc::signal(
             libc::SIGTERM,
