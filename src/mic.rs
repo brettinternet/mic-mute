@@ -360,6 +360,7 @@ pub struct MicController<B = CoreAudioBackend> {
     /// Keyed by AudioDeviceID; value is the volume scalar (0.0–1.0) before muting.
     saved_volumes: HashMap<AudioDeviceID, f32>,
     volume_fallback_devices: HashSet<AudioDeviceID>,
+    native_muted_devices: HashSet<AudioDeviceID>,
     backend: B,
 }
 
@@ -370,6 +371,7 @@ impl<B: Default> Default for MicController<B> {
             desired_muted: false,
             saved_volumes: HashMap::new(),
             volume_fallback_devices: HashSet::new(),
+            native_muted_devices: HashSet::new(),
             backend: B::default(),
         }
     }
@@ -398,6 +400,7 @@ impl<B: AudioBackend> MicController<B> {
             desired_muted: false,
             saved_volumes: HashMap::new(),
             volume_fallback_devices: HashSet::new(),
+            native_muted_devices: HashSet::new(),
             backend,
         };
         trace!("Creating audio controller");
@@ -515,6 +518,7 @@ impl<B: AudioBackend> MicController<B> {
         audio_device_id: AudioDeviceID,
         state: bool,
     ) -> Result<Option<AudioDeviceID>> {
+        let was_muted = self.is_muted(audio_device_id)?;
         let set_result = self.backend.set_mute(audio_device_id, state)?;
         if set_result.is_none() {
             trace!(
@@ -537,6 +541,11 @@ impl<B: AudioBackend> MicController<B> {
                     state
                 ));
             }
+            if state && was_muted == Some(false) {
+                self.native_muted_devices.insert(audio_device_id);
+            } else if !state {
+                self.native_muted_devices.remove(&audio_device_id);
+            }
         }
 
         let state_text = match self.is_muted(audio_device_id)? {
@@ -554,12 +563,14 @@ impl<B: AudioBackend> MicController<B> {
                 let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
                     return Ok(false);
                 };
-                trace!(
-                    "Saving volume {:.3} for device {} before muting",
-                    current_vol,
-                    audio_device_id
-                );
-                self.saved_volumes.insert(audio_device_id, current_vol);
+                if !is_volume_muted(current_vol) {
+                    trace!(
+                        "Saving volume {:.3} for device {} before muting",
+                        current_vol,
+                        audio_device_id
+                    );
+                    self.saved_volumes.insert(audio_device_id, current_vol);
+                }
             }
             if self.backend.set_volume(audio_device_id, 0.0)?.is_none() {
                 return Ok(false);
@@ -574,7 +585,9 @@ impl<B: AudioBackend> MicController<B> {
                     volume
                 ));
             }
-            self.volume_fallback_devices.insert(audio_device_id);
+            if self.saved_volumes.contains_key(&audio_device_id) {
+                self.volume_fallback_devices.insert(audio_device_id);
+            }
         } else {
             let restore_vol = self
                 .saved_volumes
@@ -657,6 +670,47 @@ impl<B: AudioBackend> MicController<B> {
         }
         self.muted = self.is_muted_all()?;
         Ok(self)
+    }
+
+    pub fn restore_on_exit(&mut self) -> Result<()> {
+        let native_devices: Vec<_> = self.native_muted_devices.iter().copied().collect();
+        let volume_devices: Vec<_> = self.saved_volumes.keys().copied().collect();
+        let mut failures = Vec::new();
+
+        for id in native_devices {
+            match self.backend.set_mute(id, false) {
+                Ok(Some(())) => match self.wait_for_device_state(id, false) {
+                    Ok(true) => {
+                        self.native_muted_devices.remove(&id);
+                    }
+                    Ok(false) => failures.push(format!("{} (native mute remained enabled)", id)),
+                    Err(err) => failures.push(format!("{} ({})", id, err)),
+                },
+                Ok(None) => failures.push(format!("{} (native mute unavailable)", id)),
+                Err(err) => failures.push(format!("{} ({})", id, err)),
+            }
+        }
+
+        for id in volume_devices {
+            match self.mute_via_volume(id, false) {
+                Ok(true) => {}
+                Ok(false) => failures.push(format!("{} (input volume unavailable)", id)),
+                Err(err) => failures.push(format!("{} ({})", id, err)),
+            }
+        }
+
+        self.muted = self.is_muted_all().unwrap_or(false);
+        self.desired_muted = self.muted;
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "failed to restore {} input device(s) on exit: {}",
+                failures.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     pub fn toggle(&mut self, state: Option<bool>) -> Result<&Self> {
@@ -868,6 +922,32 @@ mod tests {
     }
 
     #[test]
+    fn restore_on_exit_unmutes_native_devices_muted_by_app() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::native("Built-in", false))]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+
+        controller.restore_on_exit().unwrap();
+
+        assert!(!controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert!(controller.native_muted_devices.is_empty());
+    }
+
+    #[test]
+    fn restore_on_exit_leaves_preexisting_native_mute_unchanged() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::native("Built-in", true))]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+
+        controller.restore_on_exit().unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert!(controller.native_muted_devices.is_empty());
+    }
+
+    #[test]
     fn native_mute_failure_does_not_claim_muted_but_keeps_enforcing() {
         let mut device = Device::native("Built-in", false);
         device.fail_set_mute = true;
@@ -906,6 +986,34 @@ mod tests {
         assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.0));
         assert_eq!(controller.saved_volumes.get(&1), Some(&0.65));
         assert!(controller.volume_fallback_devices.contains(&1));
+    }
+
+    #[test]
+    fn restore_on_exit_restores_volume_fallback_devices_muted_by_app() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::fallback("Continuity", 0.65))]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+
+        controller.restore_on_exit().unwrap();
+
+        assert!(!controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.65));
+        assert!(controller.saved_volumes.is_empty());
+        assert!(controller.volume_fallback_devices.is_empty());
+    }
+
+    #[test]
+    fn restore_on_exit_leaves_preexisting_volume_mute_unchanged() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::fallback("Continuity", 0.0))]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+
+        controller.restore_on_exit().unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.0));
+        assert!(controller.saved_volumes.is_empty());
+        assert!(controller.volume_fallback_devices.is_empty());
     }
 
     #[test]

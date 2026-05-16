@@ -19,7 +19,7 @@ extern crate objc;
 
 use crate::camera::CameraController;
 use crate::config::AppVars;
-use crate::event_loop::start;
+use crate::event_loop::{restore_microphone_on_exit, start};
 use crate::mic::MicController;
 use crate::settings::Settings;
 use crate::ui::UI;
@@ -57,7 +57,7 @@ fn main() {
     trace!("Mic controller initialized {:?}", controller);
 
     // Register SIGTERM/SIGINT handlers. The signal handler only sets a flag;
-    // a background thread exits without changing the current microphone state.
+    // a background thread performs microphone cleanup before exiting.
     unsafe {
         libc::signal(
             libc::SIGTERM,
@@ -68,10 +68,12 @@ fn main() {
             handle_signal as *const () as libc::sighandler_t,
         );
     }
+    let shutdown_controller = controller.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(100));
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-            info!("Signal received — exiting without changing microphone state");
+            info!("Signal received — restoring microphone state before exit");
+            restore_microphone_on_exit(&shutdown_controller);
             std::process::exit(0);
         }
     });

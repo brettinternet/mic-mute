@@ -64,6 +64,12 @@ fn update_mic(
     }
 }
 
+pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
+    if let Err(err) = controller.write().unwrap().restore_on_exit() {
+        log::error!("Failed to restore microphone state on exit: {}", err);
+    }
+}
+
 pub fn start(
     mut event_loop: EventLoop<Message>,
     event_ids: EventIds,
@@ -230,6 +236,7 @@ pub fn start(
         }
 
         if exit_requested {
+            restore_microphone_on_exit(&controller);
             *control_flow = ControlFlow::Exit;
         } else {
             // Sleep until the next scheduled check rather than spinning.
