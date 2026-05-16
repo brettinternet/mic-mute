@@ -78,8 +78,8 @@ pub trait AudioBackend {
     fn has_input_channels(&self, audio_device_id: AudioDeviceID) -> Result<bool>;
     fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>>;
     fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>>;
-    fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<f32>;
-    fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<()>;
+    fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>>;
+    fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>>;
     fn default_input_device(&self) -> Result<Option<AudioDeviceID>>;
 }
 
@@ -228,7 +228,7 @@ impl AudioBackend for CoreAudioBackend {
         Ok(Some(()))
     }
 
-    fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<f32> {
+    fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>> {
         let mut property_address = Self::volume_address();
         let mut volume = 0_f32;
         let mut data_size = mem::size_of::<f32>() as u32;
@@ -242,11 +242,14 @@ impl AudioBackend for CoreAudioBackend {
                 NonNull::new_unchecked(&mut volume as *mut f32 as *mut c_void),
             )
         };
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(None);
+        }
         status_result(status, "read input volume", audio_device_id)?;
-        Ok(volume)
+        Ok(Some(volume))
     }
 
-    fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<()> {
+    fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>> {
         let mut property_address = Self::volume_address();
         let data_size = mem::size_of::<f32>() as u32;
         let status = unsafe {
@@ -259,7 +262,11 @@ impl AudioBackend for CoreAudioBackend {
                 NonNull::new_unchecked(&volume as *const f32 as *mut c_void),
             )
         };
-        status_result(status, "set input volume", audio_device_id)
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(None);
+        }
+        status_result(status, "set input volume", audio_device_id)?;
+        Ok(Some(()))
     }
 
     fn default_input_device(&self) -> Result<Option<AudioDeviceID>> {
@@ -374,7 +381,7 @@ impl<B: AudioBackend> MicController<B> {
         Ok(input_device_ids)
     }
 
-    fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
+    fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
         let name = self.backend.device_name(audio_device_id)?;
         trace!(
             "Reading mute state for device {} - {}",
@@ -383,40 +390,50 @@ impl<B: AudioBackend> MicController<B> {
         );
 
         match self.backend.get_mute(audio_device_id)? {
-            Some(muted) => Ok(muted),
-            None => match self.backend.get_volume(audio_device_id) {
-                Ok(volume) => Ok(is_volume_muted(volume)),
-                Err(err) => {
+            Some(muted) => Ok(Some(muted)),
+            None => match self.backend.get_volume(audio_device_id)? {
+                Some(volume) => Ok(Some(is_volume_muted(volume))),
+                None => {
                     trace!(
-                        "Unable to read fallback volume for audio device {}: {}",
-                        audio_device_id,
-                        err
+                        "Audio device {} has no supported mute or input volume control",
+                        audio_device_id
                     );
-                    Ok(false)
+                    Ok(None)
                 }
             },
         }
     }
 
     fn is_muted_all(&self) -> Result<bool> {
+        let mut controllable = false;
         for id in &self.get_input_device_ids()? {
-            let state = self.is_muted(*id)?;
-            trace!(
-                "Input device {} is {}",
-                id,
-                if state { "muted" } else { "unmuted" },
-            );
-            if !state {
-                return Ok(false);
+            match self.is_muted(*id)? {
+                Some(state) => {
+                    controllable = true;
+                    trace!(
+                        "Input device {} is {}",
+                        id,
+                        if state { "muted" } else { "unmuted" },
+                    );
+                    if !state {
+                        return Ok(false);
+                    }
+                }
+                None => trace!(
+                    "Input device {} is not controllable by CoreAudio mute or volume",
+                    id
+                ),
             }
         }
-        Ok(true)
+        Ok(controllable)
     }
 
     fn all_devices_match_state(&self, ids: &[AudioDeviceID], state: bool) -> Result<bool> {
         for id in ids {
-            if self.is_muted(*id)? != state {
-                return Ok(false);
+            if let Some(actual) = self.is_muted(*id)? {
+                if actual != state {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -424,7 +441,7 @@ impl<B: AudioBackend> MicController<B> {
 
     fn wait_for_device_state(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<bool> {
         for attempt in 0..5 {
-            if self.is_muted(audio_device_id)? == state {
+            if self.is_muted(audio_device_id)? == Some(state) {
                 return Ok(true);
             }
             if attempt != 4 {
@@ -434,14 +451,24 @@ impl<B: AudioBackend> MicController<B> {
         Ok(false)
     }
 
-    fn mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<AudioDeviceID> {
+    fn mute(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        state: bool,
+    ) -> Result<Option<AudioDeviceID>> {
         let set_result = self.backend.set_mute(audio_device_id, state)?;
         if set_result.is_none() {
             trace!(
                 "Device {} doesn't support mute property; falling back to volume scalar",
                 audio_device_id
             );
-            self.mute_via_volume(audio_device_id, state)?;
+            if !self.mute_via_volume(audio_device_id, state)? {
+                trace!(
+                    "Skipping audio device {} because neither native mute nor input volume is controllable",
+                    audio_device_id
+                );
+                return Ok(None);
+            }
         } else {
             self.volume_fallback_devices.remove(&audio_device_id);
             if !self.wait_for_device_state(audio_device_id, state)? {
@@ -453,22 +480,21 @@ impl<B: AudioBackend> MicController<B> {
             }
         }
 
-        trace!(
-            "Device {} now registers as {}",
-            audio_device_id,
-            if self.is_muted(audio_device_id)? {
-                "muted"
-            } else {
-                "unmuted"
-            }
-        );
-        Ok(audio_device_id)
+        let state_text = match self.is_muted(audio_device_id)? {
+            Some(true) => "muted",
+            Some(false) => "unmuted",
+            None => "uncontrollable",
+        };
+        trace!("Device {} now registers as {}", audio_device_id, state_text);
+        Ok(Some(audio_device_id))
     }
 
-    fn mute_via_volume(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<()> {
+    fn mute_via_volume(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<bool> {
         if state {
             if !self.saved_volumes.contains_key(&audio_device_id) {
-                let current_vol = self.backend.get_volume(audio_device_id)?;
+                let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
+                    return Ok(false);
+                };
                 trace!(
                     "Saving volume {:.3} for device {} before muting",
                     current_vol,
@@ -476,8 +502,12 @@ impl<B: AudioBackend> MicController<B> {
                 );
                 self.saved_volumes.insert(audio_device_id, current_vol);
             }
-            self.backend.set_volume(audio_device_id, 0.0)?;
-            let volume = self.backend.get_volume(audio_device_id)?;
+            if self.backend.set_volume(audio_device_id, 0.0)?.is_none() {
+                return Ok(false);
+            }
+            let Some(volume) = self.backend.get_volume(audio_device_id)? else {
+                return Ok(false);
+            };
             if !is_volume_muted(volume) {
                 return Err(anyhow!(
                     "audio device {} input volume remained {:.3} after fallback mute",
@@ -497,8 +527,16 @@ impl<B: AudioBackend> MicController<B> {
                 restore_vol,
                 audio_device_id
             );
-            self.backend.set_volume(audio_device_id, restore_vol)?;
-            let volume = self.backend.get_volume(audio_device_id)?;
+            if self
+                .backend
+                .set_volume(audio_device_id, restore_vol)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            let Some(volume) = self.backend.get_volume(audio_device_id)? else {
+                return Ok(false);
+            };
             if is_volume_muted(volume) {
                 return Err(anyhow!(
                     "audio device {} input volume remained muted after fallback unmute",
@@ -507,7 +545,7 @@ impl<B: AudioBackend> MicController<B> {
             }
             self.volume_fallback_devices.remove(&audio_device_id);
         }
-        Ok(())
+        Ok(true)
     }
 
     pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
@@ -518,9 +556,14 @@ impl<B: AudioBackend> MicController<B> {
             let name = self.backend.device_name(*id)?;
             trace!("Setting mute={} for {}", state, name);
             match self.mute(*id, state) {
-                Ok(_) => trace!(
+                Ok(Some(_)) => trace!(
                     "Successfully {} audio device {}: {}",
                     if state { "muted" } else { "unmuted" },
+                    id,
+                    name
+                ),
+                Ok(None) => trace!(
+                    "Skipped audio device {}: {} because it has no supported mute control",
                     id,
                     name
                 ),
@@ -553,7 +596,7 @@ impl<B: AudioBackend> MicController<B> {
                 state
             ));
         }
-        self.muted = state || self.is_muted_all()?;
+        self.muted = self.is_muted_all()?;
         Ok(self)
     }
 
@@ -586,7 +629,7 @@ mod tests {
         name: String,
         input: bool,
         mute: Option<bool>,
-        volume: f32,
+        volume: Option<f32>,
         fail_set_mute: bool,
         fail_set_volume: bool,
         ignore_set_mute: bool,
@@ -598,7 +641,7 @@ mod tests {
                 name: name.to_string(),
                 input: true,
                 mute: Some(muted),
-                volume: 1.0,
+                volume: Some(1.0),
                 fail_set_mute: false,
                 fail_set_volume: false,
                 ignore_set_mute: false,
@@ -610,7 +653,19 @@ mod tests {
                 name: name.to_string(),
                 input: true,
                 mute: None,
-                volume,
+                volume: Some(volume),
+                fail_set_mute: false,
+                fail_set_volume: false,
+                ignore_set_mute: false,
+            }
+        }
+
+        fn no_control(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                input: true,
+                mute: None,
+                volume: None,
                 fail_set_mute: false,
                 fail_set_volume: false,
                 ignore_set_mute: false,
@@ -682,17 +737,24 @@ mod tests {
             }
         }
 
-        fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<f32> {
+        fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>> {
             Ok(self.device(audio_device_id)?.volume)
         }
 
-        fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<()> {
+        fn set_volume(
+            &mut self,
+            audio_device_id: AudioDeviceID,
+            volume: f32,
+        ) -> Result<Option<()>> {
             let device = self.device_mut(audio_device_id)?;
             if device.fail_set_volume {
                 return Err(anyhow!("fake volume failure"));
             }
-            device.volume = volume;
-            Ok(())
+            if device.volume.is_none() {
+                return Ok(None);
+            }
+            device.volume = Some(volume);
+            Ok(Some(()))
         }
 
         fn default_input_device(&self) -> Result<Option<AudioDeviceID>> {
@@ -768,7 +830,7 @@ mod tests {
         controller.mute_all(true).unwrap();
 
         assert!(controller.muted);
-        assert_eq!(controller.backend.device(1).unwrap().volume, 0.0);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.0));
         assert_eq!(controller.saved_volumes.get(&1), Some(&0.65));
         assert!(controller.volume_fallback_devices.contains(&1));
     }
@@ -805,7 +867,7 @@ mod tests {
         controller.mute_all(false).unwrap();
 
         assert!(!controller.muted);
-        assert_eq!(controller.backend.device(1).unwrap().volume, 0.65);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.65));
         assert!(controller.saved_volumes.is_empty());
         assert!(controller.volume_fallback_devices.is_empty());
     }
@@ -820,6 +882,33 @@ mod tests {
         controller.mute_all(false).unwrap();
 
         assert!(!controller.muted);
-        assert_eq!(controller.backend.device(1).unwrap().volume, 1.0);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(1.0));
+    }
+
+    #[test]
+    fn device_without_native_mute_or_volume_does_not_block_other_devices() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::no_control("B iPhone Microphone")),
+            (2, Device::native("Built-in", false)),
+        ]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert!(controller.should_enforce_mute());
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn only_uncontrollable_devices_do_not_claim_muted() {
+        let backend =
+            FakeBackend::with_devices(vec![(1, Device::no_control("B iPhone Microphone"))]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+
+        controller.mute_all(true).unwrap();
+
+        assert!(!controller.muted);
+        assert!(controller.should_enforce_mute());
     }
 }
