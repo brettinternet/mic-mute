@@ -8,7 +8,7 @@ use cocoa::{
 };
 use log::trace;
 use tao::{
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize},
     monitor::MonitorHandle,
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::{Theme, Window, WindowBuilder},
@@ -17,7 +17,7 @@ use tao::{
 const MUTED_TITLE: &str = "Muted";
 const UNMUTED_TITLE: &str = "Unmuted";
 
-pub type WindowSize<T = f64> = PhysicalSize<T>;
+pub type WindowSize<T = f64> = LogicalSize<T>;
 
 fn get_mute_title_text(muted: bool) -> &'static str {
     if muted {
@@ -56,10 +56,10 @@ impl Popup {
     pub fn new(event_loop: &EventLoopMessage, mic_muted: bool) -> Result<Self> {
         let camera_muted = false;
         let initial_monitor = Popup::get_initial_monitor(event_loop);
+        let size = Popup::get_size();
         let scale = initial_monitor
             .as_ref()
             .map_or(1.0, MonitorHandle::scale_factor);
-        let size = Popup::get_size(scale);
         let mut builder = WindowBuilder::new()
             .with_title(get_mute_title_text(mic_muted))
             .with_titlebar_hidden(true)
@@ -85,12 +85,7 @@ impl Popup {
         window.set_ignore_cursor_events(true)?;
 
         trace!("Window scale factor {}", scale);
-        let content = PopupContent::new(
-            mic_muted,
-            camera_muted,
-            size.to_logical(scale),
-            window.theme(),
-        )?;
+        let content = PopupContent::new(mic_muted, camera_muted, size, window.theme())?;
         unsafe {
             let ns_view = window.ns_view() as id;
             ns_view.addSubview_(content.view);
@@ -107,8 +102,8 @@ impl Popup {
         Ok(popup)
     }
 
-    fn get_size(scale: f64) -> WindowSize {
-        LogicalSize::new(250., 40.).to_physical(scale)
+    fn get_size() -> WindowSize {
+        LogicalSize::new(250., 40.)
     }
 
     pub fn get_theme(&self) -> Theme {
@@ -148,7 +143,7 @@ impl Popup {
                 self.window.set_visible(false);
             }
 
-            let size = Popup::get_size(monitor.scale_factor());
+            let size = Popup::get_size();
             self.window.set_inner_size(size);
             self.window
                 .set_outer_position(Popup::get_position(&monitor, size));
@@ -166,18 +161,35 @@ impl Popup {
     }
 
     fn get_current_monitor(&self) -> Result<Option<MonitorHandle>> {
-        if let Some((x, y)) = get_cursor_pos() {
-            let monitor = self.window.monitor_from_point(x.into(), y.into());
-            Ok(monitor)
-        } else {
-            Ok(None)
+        let position = self
+            .window
+            .cursor_position()
+            .context("Failed to read cursor position")?;
+        if let Some(monitor) = self.window.monitor_from_point(position.x, position.y) {
+            return Ok(Some(monitor));
         }
+        if let Some(monitor) = self.monitor_from_physical_position(position) {
+            return Ok(Some(monitor));
+        }
+        Ok(get_cursor_pos().and_then(|(x, y)| self.window.monitor_from_point(x.into(), y.into())))
+    }
+
+    fn monitor_from_physical_position(
+        &self,
+        position: tao::dpi::PhysicalPosition<f64>,
+    ) -> Option<MonitorHandle> {
+        self.window.available_monitors().find(|monitor| {
+            let monitor_position = monitor.position().cast::<f64>();
+            let monitor_size = monitor.size().cast::<f64>();
+            position.x >= monitor_position.x
+                && position.x < monitor_position.x + monitor_size.width
+                && position.y >= monitor_position.y
+                && position.y < monitor_position.y + monitor_size.height
+        })
     }
 
     fn get_initial_monitor(event_loop: &EventLoopMessage) -> Option<MonitorHandle> {
-        get_cursor_pos()
-            .and_then(|(x, y)| event_loop.monitor_from_point(x.into(), y.into()))
-            .or_else(|| event_loop.primary_monitor())
+        event_loop.primary_monitor()
     }
 
     fn show_front(&self) {
@@ -188,11 +200,12 @@ impl Popup {
         }
     }
 
-    fn get_position(monitor: &MonitorHandle, window_size: WindowSize) -> PhysicalPosition<f64> {
-        let monitor_position: PhysicalPosition<f64> = monitor.position().cast();
-        let monitor_size: PhysicalSize<f64> = monitor.size().cast();
+    fn get_position(monitor: &MonitorHandle, window_size: WindowSize) -> LogicalPosition<f64> {
+        let scale = monitor.scale_factor();
+        let monitor_position = monitor.position().to_logical::<f64>(scale);
+        let monitor_size = monitor.size().to_logical::<f64>(scale);
         let x: f64 = (monitor_position.x + (monitor_size.width / 2.)) - (window_size.width / 2.);
         let y: f64 = (monitor_position.y + monitor_size.height) - (window_size.height * 2.);
-        PhysicalPosition::new(x, y)
+        LogicalPosition::new(x, y)
     }
 }
