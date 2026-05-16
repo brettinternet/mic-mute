@@ -45,14 +45,12 @@ tasks:
     cmds:
       - cargo clippy --locked --release -- -D warnings
       - cargo fmt -- --check
-      - dprint check
 
   fix:
     desc: Fix lint and formatting issues
     cmds:
       - cargo clippy --locked --release --fix --allow-dirty --allow-staged -- -D warnings
       - cargo fmt
-      - dprint fmt
 
   test:
     cmds:
