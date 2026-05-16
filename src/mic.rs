@@ -8,7 +8,7 @@ use objc2_core_audio::{
     kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyScopeGlobal, AudioDeviceID, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectIsPropertySettable, AudioObjectPropertyAddress,
-    AudioObjectSetPropertyData,
+    AudioObjectPropertySelector, AudioObjectSetPropertyData,
 };
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
@@ -21,6 +21,8 @@ use std::ptr::{null, NonNull};
 
 const SYSTEM_OBJECT_ID: AudioDeviceID = 1;
 const VOLUME_MUTED_EPSILON: f32 = 0.000_001;
+const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
+    0x766d7663; // 'vmvc'
 
 fn is_volume_muted(volume: f32) -> bool {
     volume <= VOLUME_MUTED_EPSILON
@@ -95,12 +97,92 @@ impl CoreAudioBackend {
         }
     }
 
-    fn volume_address() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress {
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain,
+    fn volume_addresses() -> [AudioObjectPropertyAddress; 2] {
+        [
+            AudioObjectPropertyAddress {
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain,
+            },
+            AudioObjectPropertyAddress {
+                mSelector: AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain,
+            },
+        ]
+    }
+
+    fn is_property_settable(
+        audio_device_id: AudioDeviceID,
+        mut property_address: AudioObjectPropertyAddress,
+    ) -> Result<bool> {
+        let mut is_settable = 0u8;
+        let status = unsafe {
+            AudioObjectIsPropertySettable(
+                audio_device_id,
+                NonNull::new_unchecked(&mut property_address),
+                NonNull::new_unchecked(&mut is_settable),
+            )
+        };
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(false);
         }
+        status_result(status, "check input volume settable", audio_device_id)?;
+        Ok(is_settable != 0)
+    }
+
+    fn get_settable_volume(
+        audio_device_id: AudioDeviceID,
+        mut property_address: AudioObjectPropertyAddress,
+    ) -> Result<Option<f32>> {
+        if !Self::is_property_settable(audio_device_id, property_address)? {
+            return Ok(None);
+        }
+
+        let mut volume = 0_f32;
+        let mut data_size = mem::size_of::<f32>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                audio_device_id,
+                NonNull::new_unchecked(&mut property_address),
+                0,
+                null(),
+                NonNull::new_unchecked(&mut data_size),
+                NonNull::new_unchecked(&mut volume as *mut f32 as *mut c_void),
+            )
+        };
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(None);
+        }
+        status_result(status, "read input volume", audio_device_id)?;
+        Ok(Some(volume))
+    }
+
+    fn set_settable_volume(
+        audio_device_id: AudioDeviceID,
+        mut property_address: AudioObjectPropertyAddress,
+        volume: f32,
+    ) -> Result<Option<()>> {
+        if !Self::is_property_settable(audio_device_id, property_address)? {
+            return Ok(None);
+        }
+
+        let data_size = mem::size_of::<f32>() as u32;
+        let status = unsafe {
+            AudioObjectSetPropertyData(
+                audio_device_id,
+                NonNull::new_unchecked(&mut property_address),
+                0,
+                null(),
+                data_size,
+                NonNull::new_unchecked(&volume as *const f32 as *mut c_void),
+            )
+        };
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(None);
+        }
+        status_result(status, "set input volume", audio_device_id)?;
+        Ok(Some(()))
     }
 }
 
@@ -229,44 +311,21 @@ impl AudioBackend for CoreAudioBackend {
     }
 
     fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>> {
-        let mut property_address = Self::volume_address();
-        let mut volume = 0_f32;
-        let mut data_size = mem::size_of::<f32>() as u32;
-        let status = unsafe {
-            AudioObjectGetPropertyData(
-                audio_device_id,
-                NonNull::new_unchecked(&mut property_address),
-                0,
-                null(),
-                NonNull::new_unchecked(&mut data_size),
-                NonNull::new_unchecked(&mut volume as *mut f32 as *mut c_void),
-            )
-        };
-        if status == kAudioHardwareUnknownPropertyError {
-            return Ok(None);
+        for property_address in Self::volume_addresses() {
+            if let Some(volume) = Self::get_settable_volume(audio_device_id, property_address)? {
+                return Ok(Some(volume));
+            }
         }
-        status_result(status, "read input volume", audio_device_id)?;
-        Ok(Some(volume))
+        Ok(None)
     }
 
     fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>> {
-        let mut property_address = Self::volume_address();
-        let data_size = mem::size_of::<f32>() as u32;
-        let status = unsafe {
-            AudioObjectSetPropertyData(
-                audio_device_id,
-                NonNull::new_unchecked(&mut property_address),
-                0,
-                null(),
-                data_size,
-                NonNull::new_unchecked(&volume as *const f32 as *mut c_void),
-            )
-        };
-        if status == kAudioHardwareUnknownPropertyError {
-            return Ok(None);
+        for property_address in Self::volume_addresses() {
+            if Self::set_settable_volume(audio_device_id, property_address, volume)?.is_some() {
+                return Ok(Some(()));
+            }
         }
-        status_result(status, "set input volume", audio_device_id)?;
-        Ok(Some(()))
+        Ok(None)
     }
 
     fn default_input_device(&self) -> Result<Option<AudioDeviceID>> {
@@ -459,7 +518,7 @@ impl<B: AudioBackend> MicController<B> {
         let set_result = self.backend.set_mute(audio_device_id, state)?;
         if set_result.is_none() {
             trace!(
-                "Device {} doesn't support mute property; falling back to volume scalar",
+                "Device {} doesn't support mute property; falling back to input volume",
                 audio_device_id
             );
             if !self.mute_via_volume(audio_device_id, state)? {
@@ -781,6 +840,20 @@ mod tests {
         assert!(target_state(None, false));
         assert!(!target_state(None, true));
         assert!(!target_state(Some(false), true));
+    }
+
+    #[test]
+    fn core_audio_volume_fallback_checks_virtual_main_volume() {
+        let addresses = CoreAudioBackend::volume_addresses();
+
+        assert_eq!(addresses.len(), 2);
+        assert_eq!(addresses[0].mSelector, kAudioDevicePropertyVolumeScalar);
+        assert_eq!(
+            addresses[1].mSelector,
+            AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME
+        );
+        assert_eq!(addresses[1].mScope, kAudioDevicePropertyScopeInput);
+        assert_eq!(addresses[1].mElement, kAudioObjectPropertyElementMain);
     }
 
     #[test]
