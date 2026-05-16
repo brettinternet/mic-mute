@@ -7,7 +7,8 @@ use objc2_core_audio::{
     kAudioHardwareNoError, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyScopeGlobal, AudioDeviceID, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectIsPropertySettable, AudioObjectPropertyAddress,
+    AudioObjectSetPropertyData,
 };
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
@@ -193,6 +194,21 @@ impl AudioBackend for CoreAudioBackend {
 
     fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>> {
         let mut property_address = Self::mute_address();
+        let mut is_settable = 0u8;
+        let status = unsafe {
+            AudioObjectIsPropertySettable(
+                audio_device_id,
+                NonNull::new_unchecked(&mut property_address),
+                NonNull::new_unchecked(&mut is_settable),
+            )
+        };
+        if status == kAudioHardwareUnknownPropertyError {
+            return Ok(None);
+        }
+        status_result(status, "check mute settable", audio_device_id)?;
+        if is_settable == 0 {
+            return Ok(None);
+        }
         let data = state as u32;
         let data_size = mem::size_of::<u32>() as u32;
         let status = unsafe {
