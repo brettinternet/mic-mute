@@ -68,9 +68,10 @@ pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u3
 
     // tiny-skia produces premultiplied RGBA; un-premultiply for callers.
     let raw = pixmap.take();
-    let straight: Vec<u8> = raw
-        .chunks_exact(4)
-        .flat_map(|p| {
+    let (chunks, _) = raw.as_chunks::<4>();
+    let straight: Vec<u8> = chunks
+        .iter()
+        .flat_map(|p: &[u8; 4]| {
             let a = p[3];
             if a == 0 {
                 [0u8, 0, 0, 0]

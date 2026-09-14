@@ -32,6 +32,22 @@ fn target_state(state: Option<bool>, desired_muted: bool) -> bool {
     state.unwrap_or(!desired_muted)
 }
 
+fn state_name(state: bool) -> &'static str {
+    if state {
+        "muted"
+    } else {
+        "unmuted"
+    }
+}
+
+fn action_name(state: bool) -> &'static str {
+    if state {
+        "mute"
+    } else {
+        "unmute"
+    }
+}
+
 fn status_result(status: i32, operation: &str, audio_device_id: AudioDeviceID) -> Result<()> {
     if status == kAudioHardwareNoError {
         Ok(())
@@ -472,11 +488,7 @@ impl<B: AudioBackend> MicController<B> {
             match self.is_muted(*id)? {
                 Some(state) => {
                     controllable = true;
-                    trace!(
-                        "Input device {} is {}",
-                        id,
-                        if state { "muted" } else { "unmuted" },
-                    );
+                    trace!("Input device {} is {}", id, state_name(state));
                     if !state {
                         return Ok(false);
                     }
@@ -623,17 +635,14 @@ impl<B: AudioBackend> MicController<B> {
     pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
         self.desired_muted = state;
         let ids = self.get_input_device_ids()?;
+        let action = action_name(state);
+        let end_state = state_name(state);
         let mut failures = Vec::new();
         for id in &ids {
             let name = self.backend.device_name(*id)?;
             trace!("Setting mute={} for {}", state, name);
             match self.mute(*id, state) {
-                Ok(Some(_)) => trace!(
-                    "Successfully {} audio device {}: {}",
-                    if state { "muted" } else { "unmuted" },
-                    id,
-                    name
-                ),
+                Ok(Some(_)) => trace!("Successfully {} audio device {}: {}", end_state, id, name),
                 Ok(None) => trace!(
                     "Skipped audio device {}: {} because it has no supported mute control",
                     id,
@@ -642,10 +651,7 @@ impl<B: AudioBackend> MicController<B> {
                 Err(err) => {
                     error!(
                         "Failed to {} audio device {}: {}: {}",
-                        if state { "mute" } else { "unmute" },
-                        id,
-                        name,
-                        err
+                        action, id, name, err
                     );
                     failures.push(format!("{} ({})", name, err));
                 }
@@ -656,7 +662,7 @@ impl<B: AudioBackend> MicController<B> {
         if !failures.is_empty() {
             return Err(anyhow!(
                 "failed to {} {} input device(s): {}",
-                if state { "mute" } else { "unmute" },
+                action,
                 failures.len(),
                 failures.join("; ")
             ));
@@ -894,6 +900,14 @@ mod tests {
         assert!(target_state(None, false));
         assert!(!target_state(None, true));
         assert!(!target_state(Some(false), true));
+    }
+
+    #[test]
+    fn state_and_action_names_are_consistent() {
+        assert_eq!(state_name(true), "muted");
+        assert_eq!(state_name(false), "unmuted");
+        assert_eq!(action_name(true), "mute");
+        assert_eq!(action_name(false), "unmute");
     }
 
     #[test]
