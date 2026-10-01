@@ -33,16 +33,8 @@ impl UI {
         let popup = Popup::new(&event_loop, mic_muted, settings.show_popup)
             .context("Failed to setup popup window")?;
         let theme = popup.get_theme();
-        let tray = Tray::new(
-            mic_muted,
-            theme,
-            app_vars,
-            settings.launch_at_login,
-            settings.show_in_dock,
-            settings.show_popup,
-            &settings.mic_shortcut,
-        )
-        .context("Failed to create system tray")?;
+        let tray = Tray::new(mic_muted, theme, app_vars, settings)
+            .context("Failed to create system tray")?;
         let shortcuts = Shortcuts::new(settings).context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
@@ -50,6 +42,7 @@ impl UI {
             button_launch_at_login: tray.launch_at_login_id().clone(),
             button_show_in_dock: tray.show_in_dock_id().clone(),
             button_show_popup: tray.show_popup_id().clone(),
+            button_skip_unresponsive: tray.skip_unresponsive_id().clone(),
             button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
             shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
@@ -115,6 +108,10 @@ impl UI {
         // Sync popup visibility with the persisted setting
         self.set_popup_enabled(settings.show_popup)?;
 
+        self.tray
+            .skip_unresponsive
+            .set_checked(settings.skip_unresponsive_devices);
+
         // Sync dock visibility and its tray checkbox
         self.tray.show_in_dock.set_checked(settings.show_in_dock);
         crate::launch_at_login::set_dock_visible(settings.show_in_dock);
@@ -128,6 +125,14 @@ impl UI {
         }
 
         Ok(())
+    }
+
+    pub fn update_skip_mics(&mut self, devices: &[String], settings: &Settings) -> Result<()> {
+        self.tray.update_skip_mics(devices, settings)
+    }
+
+    pub fn skip_mic_for(&self, id: &muda::MenuId) -> Option<String> {
+        self.tray.skip_mic_for(id)
     }
 
     pub fn mic_shortcut_id(&self) -> u32 {

@@ -44,9 +44,24 @@ pub fn tray_icon_color(muted: bool) -> IconColor {
     }
 }
 
+/// Pixels per SVG unit. Callers size the image in points from its aspect ratio,
+/// so rendering at 3x keeps icons sharp on Retina displays.
+const RENDER_SCALE: f32 = 3.0;
+
 /// Rasterizes an SVG with the given stroke color.
-/// Returns un-premultiplied RGBA bytes plus the source dimensions.
+/// Returns un-premultiplied RGBA bytes plus the pixel dimensions, which are
+/// `RENDER_SCALE` times the SVG's own size.
 pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u32, u32)> {
+    rasterize_svg_scaled(svg_bytes, color, 1.0)
+}
+
+/// Like `rasterize_svg`, but draws the artwork at `scale` of its size, centred
+/// on a canvas of the original dimensions.
+pub fn rasterize_svg_scaled(
+    svg_bytes: &[u8],
+    color: &IconColor,
+    scale: f32,
+) -> Result<(Vec<u8>, u32, u32)> {
     let svg_str = std::str::from_utf8(svg_bytes).context("SVG is not valid UTF-8")?;
     let colored = svg_str.replacen(
         "<svg ",
@@ -57,14 +72,17 @@ pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u3
     let options = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_str(&colored, &options).context("Failed to parse SVG")?;
     let size = tree.size();
-    let w = size.width() as u32;
-    let h = size.height() as u32;
+    let width = size.width() * RENDER_SCALE;
+    let height = size.height() * RENDER_SCALE;
+    let w = width.round() as u32;
+    let h = height.round() as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("Failed to allocate pixmap")?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap.as_mut(),
-    );
+    let transform = resvg::tiny_skia::Transform::from_translate(
+        width * (1.0 - scale) / 2.0,
+        height * (1.0 - scale) / 2.0,
+    )
+    .pre_scale(RENDER_SCALE * scale, RENDER_SCALE * scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
 
     // tiny-skia produces premultiplied RGBA; un-premultiply for callers.
     let raw = pixmap.take();
@@ -88,4 +106,20 @@ pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u3
         .collect();
 
     Ok((straight, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rasterizes_at_render_scale() {
+        let svg = include_bytes!("../assets/mic.svg");
+        let color = IconColor { r: 0, g: 0, b: 0 };
+
+        let (rgba, w, h) = rasterize_svg_scaled(svg, &color, 0.9).unwrap();
+
+        assert_eq!((w, h), (72, 72));
+        assert_eq!(rgba.len(), 72 * 72 * 4);
+    }
 }

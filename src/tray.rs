@@ -1,15 +1,50 @@
 use crate::config::AppVars;
-use crate::icons::{rasterize_svg, tray_icon_color};
-use crate::settings::ShortcutConfig;
+use crate::icons::{rasterize_svg_scaled, tray_icon_color};
+use crate::settings::{device_name_key, Settings, ShortcutConfig};
 use anyhow::{Context, Result};
 use log::trace;
-use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use muda::{
+    accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use std::fmt;
 use tao::window::Theme;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
+/// Draw the menu bar glyph at 90% of the SVG's size.
+const ICON_SCALE: f32 = 0.9;
+const NO_MICS_TEXT: &str = "No Input Devices";
+
+/// One row of the Skip Mics submenu: a device name and whether it's connected.
+#[derive(Clone, PartialEq)]
+struct SkipMicEntry {
+    name: String,
+    connected: bool,
+}
+
+/// Connected devices first, then excluded devices that aren't connected so
+/// they can still be unticked.
+fn skip_mic_entries(devices: &[String], settings: &Settings) -> Vec<SkipMicEntry> {
+    let mut entries: Vec<SkipMicEntry> = devices
+        .iter()
+        .map(|name| SkipMicEntry {
+            name: name.clone(),
+            connected: true,
+        })
+        .collect();
+    for excluded in &settings.excluded_devices {
+        let key = device_name_key(excluded);
+        if key.is_empty() || entries.iter().any(|e| device_name_key(&e.name) == key) {
+            continue;
+        }
+        entries.push(SkipMicEntry {
+            name: excluded.trim().to_string(),
+            connected: false,
+        });
+    }
+    entries
+}
 
 pub fn get_mute_menu_text(muted: bool) -> &'static str {
     if muted {
@@ -23,7 +58,7 @@ fn get_image(muted: bool, _theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
     const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
     const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
     let svg = if muted { MIC_OFF } else { MIC_ON };
-    rasterize_svg(svg, &tray_icon_color(muted))
+    rasterize_svg_scaled(svg, &tray_icon_color(muted), ICON_SCALE)
 }
 
 fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
@@ -67,31 +102,38 @@ pub struct Tray {
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
     pub show_popup: CheckMenuItem,
+    pub skip_unresponsive: CheckMenuItem,
+    skip_mics: Submenu,
+    skip_mic_entries: Vec<SkipMicEntry>,
+    skip_mic_items: Vec<(CheckMenuItem, String)>,
     pub about: MenuItem,
     pub quit: MenuItem,
 }
 
 impl Tray {
-    pub fn new(
-        muted: bool,
-        theme: Theme,
-        app_vars: AppVars,
-        login_enabled: bool,
-        dock_visible: bool,
-        popup_visible: bool,
-        mic_shortcut: &ShortcutConfig,
-    ) -> Result<Self> {
+    pub fn new(muted: bool, theme: Theme, app_vars: AppVars, settings: &Settings) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
         let toggle_mute = MenuItem::new(
             get_mute_menu_text(muted),
             true,
-            Some(accelerator_from_config(mic_shortcut)),
+            Some(accelerator_from_config(&settings.mic_shortcut)),
         );
-        let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
-        let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
-        let show_popup = CheckMenuItem::new("Show Popup", true, popup_visible, None);
+        let launch_at_login =
+            CheckMenuItem::new("Launch at Login", true, settings.launch_at_login, None);
+        let show_in_dock = CheckMenuItem::new("Show in Dock", true, settings.show_in_dock, None);
+        let show_popup = CheckMenuItem::new("Show Popup", true, settings.show_popup, None);
+        let skip_unresponsive = CheckMenuItem::new(
+            "Skip Unresponsive Mics",
+            true,
+            settings.skip_unresponsive_devices,
+            None,
+        );
+        let skip_mics = Submenu::new("Skip Mics", true);
+        skip_mics
+            .append(&MenuItem::new(NO_MICS_TEXT, false, None))
+            .context("Failed to append skip mics placeholder")?;
         let about = MenuItem::new("About", true, None);
         let quit = MenuItem::new("Exit", true, None);
 
@@ -102,6 +144,8 @@ impl Tray {
                 &launch_at_login,
                 &show_in_dock,
                 &show_popup,
+                &skip_unresponsive,
+                &skip_mics,
                 &about,
                 &PredefinedMenuItem::separator(),
                 &quit,
@@ -123,6 +167,10 @@ impl Tray {
             launch_at_login,
             show_in_dock,
             show_popup,
+            skip_unresponsive,
+            skip_mics,
+            skip_mic_entries: Vec::new(),
+            skip_mic_items: Vec::new(),
             about,
             quit,
         };
@@ -149,6 +197,47 @@ impl Tray {
         Ok(())
     }
 
+    /// Rebuild the Skip Mics submenu when the device list changes, and sync its
+    /// checkboxes with `excluded_devices`.
+    pub fn update_skip_mics(&mut self, devices: &[String], settings: &Settings) -> Result<()> {
+        let entries = skip_mic_entries(devices, settings);
+        if entries != self.skip_mic_entries {
+            while self.skip_mics.remove_at(0).is_some() {}
+            self.skip_mic_items.clear();
+            if entries.is_empty() {
+                self.skip_mics
+                    .append(&MenuItem::new(NO_MICS_TEXT, false, None))
+                    .context("Failed to append skip mics placeholder")?;
+            }
+            for entry in &entries {
+                let text = if entry.connected {
+                    entry.name.clone()
+                } else {
+                    format!("{} (Not Connected)", entry.name)
+                };
+                let item = CheckMenuItem::new(text, true, false, None);
+                self.skip_mics
+                    .append(&item)
+                    .context("Failed to append skip mic item")?;
+                self.skip_mic_items.push((item, entry.name.clone()));
+            }
+            self.skip_mic_entries = entries;
+            trace!("Rebuilt skip mics menu");
+        }
+        for (item, name) in &self.skip_mic_items {
+            item.set_checked(settings.is_device_excluded(name));
+        }
+        Ok(())
+    }
+
+    /// The device name for a Skip Mics menu item, if `id` is one.
+    pub fn skip_mic_for(&self, id: &MenuId) -> Option<String> {
+        self.skip_mic_items
+            .iter()
+            .find(|(item, _)| item.id() == id)
+            .map(|(_, name)| name.clone())
+    }
+
     /// Update the displayed keyboard shortcuts after settings change.
     pub fn update_accelerators(&mut self, mic_shortcut: &ShortcutConfig) -> Result<()> {
         self.toggle_mute
@@ -173,6 +262,10 @@ impl Tray {
         self.show_popup.id()
     }
 
+    pub fn skip_unresponsive_id(&self) -> &MenuId {
+        self.skip_unresponsive.id()
+    }
+
     pub fn about_id(&self) -> &MenuId {
         self.about.id()
     }
@@ -194,5 +287,35 @@ mod tests {
     #[test]
     fn test_get_mute_menu_text_unmuted() {
         assert_eq!(get_mute_menu_text(false), "Mute");
+    }
+
+    #[test]
+    fn test_skip_mic_entries_keeps_disconnected_exclusions() {
+        let settings = Settings {
+            excluded_devices: vec![
+                "microsoft teams audio".to_string(),
+                "Old Headset".to_string(),
+            ],
+            ..Settings::default()
+        };
+        let devices = vec![
+            "MacBook Pro Microphone".to_string(),
+            "Microsoft Teams Audio".to_string(),
+        ];
+
+        let entries = skip_mic_entries(&devices, &settings);
+
+        let rows: Vec<_> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.connected))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("MacBook Pro Microphone", true),
+                ("Microsoft Teams Audio", true),
+                ("Old Headset", false),
+            ]
+        );
     }
 }
