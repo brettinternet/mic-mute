@@ -1,6 +1,7 @@
 use crate::config::AppVars;
-use crate::icons::{rasterize_svg_scaled, tray_icon_color};
-use crate::settings::{device_name_key, Settings, ShortcutConfig};
+use crate::icons::{rasterize_svg, tray_icon_color};
+use crate::mic::InputDevice;
+use crate::settings::{Settings, ShortcutConfig};
 use anyhow::{Context, Result};
 use log::trace;
 use muda::{
@@ -12,34 +13,34 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
-/// Draw the menu bar glyph at 90% of the SVG's size.
-const ICON_SCALE: f32 = 0.9;
 const NO_MICS_TEXT: &str = "No Input Devices";
 
-/// One row of the Skip Mics submenu: a device name and whether it's connected.
+/// One row of the Excluded Mics submenu.
 #[derive(Clone, PartialEq)]
 struct SkipMicEntry {
-    name: String,
+    device: InputDevice,
     connected: bool,
 }
 
 /// Connected devices first, then excluded devices that aren't connected so
 /// they can still be unticked.
-fn skip_mic_entries(devices: &[String], settings: &Settings) -> Vec<SkipMicEntry> {
+fn skip_mic_entries(devices: &[InputDevice], settings: &Settings) -> Vec<SkipMicEntry> {
     let mut entries: Vec<SkipMicEntry> = devices
         .iter()
-        .map(|name| SkipMicEntry {
-            name: name.clone(),
+        .map(|device| SkipMicEntry {
+            device: device.clone(),
             connected: true,
         })
         .collect();
-    for excluded in &settings.excluded_devices {
-        let key = device_name_key(excluded);
-        if key.is_empty() || entries.iter().any(|e| device_name_key(&e.name) == key) {
+    for uid in &settings.excluded_devices {
+        if entries.iter().any(|e| e.device.uid == *uid) {
             continue;
         }
         entries.push(SkipMicEntry {
-            name: excluded.trim().to_string(),
+            device: InputDevice {
+                uid: uid.clone(),
+                name: uid.clone(),
+            },
             connected: false,
         });
     }
@@ -58,7 +59,7 @@ fn get_image(muted: bool, _theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
     const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
     const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
     let svg = if muted { MIC_OFF } else { MIC_ON };
-    rasterize_svg_scaled(svg, &tray_icon_color(muted), ICON_SCALE)
+    rasterize_svg(svg, &tray_icon_color(muted))
 }
 
 fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
@@ -102,10 +103,9 @@ pub struct Tray {
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
     pub show_popup: CheckMenuItem,
-    pub skip_unresponsive: CheckMenuItem,
     skip_mics: Submenu,
     skip_mic_entries: Vec<SkipMicEntry>,
-    skip_mic_items: Vec<(CheckMenuItem, String)>,
+    skip_mic_items: Vec<(CheckMenuItem, InputDevice)>,
     pub about: MenuItem,
     pub quit: MenuItem,
 }
@@ -124,13 +124,7 @@ impl Tray {
             CheckMenuItem::new("Launch at Login", true, settings.launch_at_login, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, settings.show_in_dock, None);
         let show_popup = CheckMenuItem::new("Show Popup", true, settings.show_popup, None);
-        let skip_unresponsive = CheckMenuItem::new(
-            "Skip Unresponsive Mics",
-            true,
-            settings.skip_unresponsive_devices,
-            None,
-        );
-        let skip_mics = Submenu::new("Skip Mics", true);
+        let skip_mics = Submenu::new("Excluded Mics", true);
         skip_mics
             .append(&MenuItem::new(NO_MICS_TEXT, false, None))
             .context("Failed to append skip mics placeholder")?;
@@ -144,7 +138,6 @@ impl Tray {
                 &launch_at_login,
                 &show_in_dock,
                 &show_popup,
-                &skip_unresponsive,
                 &skip_mics,
                 &about,
                 &PredefinedMenuItem::separator(),
@@ -167,7 +160,6 @@ impl Tray {
             launch_at_login,
             show_in_dock,
             show_popup,
-            skip_unresponsive,
             skip_mics,
             skip_mic_entries: Vec::new(),
             skip_mic_items: Vec::new(),
@@ -197,9 +189,8 @@ impl Tray {
         Ok(())
     }
 
-    /// Rebuild the Skip Mics submenu when the device list changes, and sync its
-    /// checkboxes with `excluded_devices`.
-    pub fn update_skip_mics(&mut self, devices: &[String], settings: &Settings) -> Result<()> {
+    /// Rebuild the Excluded Mics submenu when devices change and sync its checkboxes.
+    pub fn update_skip_mics(&mut self, devices: &[InputDevice], settings: &Settings) -> Result<()> {
         let entries = skip_mic_entries(devices, settings);
         if entries != self.skip_mic_entries {
             while self.skip_mics.remove_at(0).is_some() {}
@@ -210,32 +201,39 @@ impl Tray {
                     .context("Failed to append skip mics placeholder")?;
             }
             for entry in &entries {
-                let text = if entry.connected {
-                    entry.name.clone()
+                let text = if !entry.connected {
+                    format!("{} (Not Connected)", entry.device.uid)
+                } else if entries
+                    .iter()
+                    .filter(|e| e.device.name == entry.device.name)
+                    .count()
+                    > 1
+                {
+                    format!("{} ({})", entry.device.name, entry.device.uid)
                 } else {
-                    format!("{} (Not Connected)", entry.name)
+                    entry.device.name.clone()
                 };
                 let item = CheckMenuItem::new(text, true, false, None);
                 self.skip_mics
                     .append(&item)
                     .context("Failed to append skip mic item")?;
-                self.skip_mic_items.push((item, entry.name.clone()));
+                self.skip_mic_items.push((item, entry.device.clone()));
             }
             self.skip_mic_entries = entries;
             trace!("Rebuilt skip mics menu");
         }
-        for (item, name) in &self.skip_mic_items {
-            item.set_checked(settings.is_device_excluded(name));
+        for (item, device) in &self.skip_mic_items {
+            item.set_checked(settings.is_device_excluded(&device.uid));
         }
         Ok(())
     }
 
-    /// The device name for a Skip Mics menu item, if `id` is one.
-    pub fn skip_mic_for(&self, id: &MenuId) -> Option<String> {
+    /// The device for an Excluded Mics menu item, if `id` is one.
+    pub fn skip_mic_for(&self, id: &MenuId) -> Option<InputDevice> {
         self.skip_mic_items
             .iter()
             .find(|(item, _)| item.id() == id)
-            .map(|(_, name)| name.clone())
+            .map(|(_, device)| device.clone())
     }
 
     /// Update the displayed keyboard shortcuts after settings change.
@@ -260,10 +258,6 @@ impl Tray {
 
     pub fn show_popup_id(&self) -> &MenuId {
         self.show_popup.id()
-    }
-
-    pub fn skip_unresponsive_id(&self) -> &MenuId {
-        self.skip_unresponsive.id()
     }
 
     pub fn about_id(&self) -> &MenuId {
@@ -292,29 +286,38 @@ mod tests {
     #[test]
     fn test_skip_mic_entries_keeps_disconnected_exclusions() {
         let settings = Settings {
-            excluded_devices: vec![
-                "microsoft teams audio".to_string(),
-                "Old Headset".to_string(),
-            ],
+            excluded_devices: vec!["uid-2".to_string(), "uid-3".to_string()],
             ..Settings::default()
         };
         let devices = vec![
-            "MacBook Pro Microphone".to_string(),
-            "Microsoft Teams Audio".to_string(),
+            InputDevice {
+                uid: "uid-1".into(),
+                name: "USB Microphone".into(),
+            },
+            InputDevice {
+                uid: "uid-2".into(),
+                name: "USB Microphone".into(),
+            },
         ];
 
         let entries = skip_mic_entries(&devices, &settings);
 
         let rows: Vec<_> = entries
             .iter()
-            .map(|e| (e.name.as_str(), e.connected))
+            .map(|e| {
+                (
+                    e.device.uid.as_str(),
+                    e.connected,
+                    settings.is_device_excluded(&e.device.uid),
+                )
+            })
             .collect();
         assert_eq!(
             rows,
             vec![
-                ("MacBook Pro Microphone", true),
-                ("Microsoft Teams Audio", true),
-                ("Old Headset", false),
+                ("uid-1", true, false),
+                ("uid-2", true, true),
+                ("uid-3", false, true),
             ]
         );
     }

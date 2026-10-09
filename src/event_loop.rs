@@ -38,7 +38,6 @@ pub struct EventIds {
     pub button_launch_at_login: MenuId,
     pub button_show_in_dock: MenuId,
     pub button_show_popup: MenuId,
-    pub button_skip_unresponsive: MenuId,
     pub button_about: MenuId,
     pub button_quit: MenuId,
     pub shortcut_mic: Arc<AtomicU32>,
@@ -74,7 +73,7 @@ fn refresh_skip_mics(
     controller: &Arc<RwLock<MicController>>,
     settings: &Arc<RwLock<Settings>>,
 ) {
-    let devices = match controller.read().input_device_names() {
+    let devices = match controller.read().input_devices() {
         Ok(devices) => devices,
         Err(err) => {
             log::error!("Failed to list input devices: {}", err);
@@ -84,6 +83,23 @@ fn refresh_skip_mics(
     let settings = settings.read();
     if let Err(err) = ui.write().update_skip_mics(&devices, &settings) {
         log::error!("Failed to update skip mics menu: {}", err);
+    }
+}
+
+fn apply_excluded_devices(
+    ui: &Arc<RwLock<UI>>,
+    controller: &Arc<RwLock<MicController>>,
+    excluded_devices: &[String],
+) {
+    let mut controller = controller.write();
+    controller.set_excluded_devices(excluded_devices);
+    // Settings can change the aggregate status even when mute enforcement is off.
+    let device_name = controller.active_device_name();
+    if let Err(err) = ui
+        .write()
+        .update_mic(controller.muted, device_name.as_deref())
+    {
+        log::error!("Failed to refresh microphone status: {}", err);
     }
 }
 
@@ -106,7 +122,6 @@ pub fn start(
         button_launch_at_login,
         button_show_in_dock,
         button_show_popup,
-        button_skip_unresponsive,
         button_about,
         button_quit,
         shortcut_mic,
@@ -211,26 +226,20 @@ pub fn start(
                 if let Err(e) = ui.write().set_popup_enabled(visible) {
                     log::error!("Failed to apply popup setting: {}", e);
                 }
-            } else if event.id == button_skip_unresponsive {
-                trace!("Skip unresponsive mics toggled");
-                let mut s = settings.write();
-                s.skip_unresponsive_devices = !s.skip_unresponsive_devices;
-                let skip = s.skip_unresponsive_devices;
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
+            } else if let Some(device) = skip_mic {
+                let already_excluded = settings.read().is_device_excluded(&device.uid);
+                if already_excluded || UI::confirm_exclude_device(&device) {
+                    let mut updated = settings.read().clone();
+                    updated.toggle_excluded_device(&device.uid);
+                    match updated.save() {
+                        Ok(()) => {
+                            *settings.write() = updated.clone();
+                            apply_excluded_devices(&ui, &controller, &updated.excluded_devices);
+                        }
+                        Err(err) => log::error!("Failed to save device exclusion: {}", err),
+                    }
                 }
-                drop(s);
-                controller.write().set_skip_unresponsive(skip);
-            } else if let Some(name) = skip_mic {
-                trace!("Skip mic toggled for {}", name);
-                let mut s = settings.write();
-                s.toggle_excluded_device(&name);
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
-                }
-                let excluded = s.excluded_devices.clone();
-                drop(s);
-                controller.write().set_excluded_devices(&excluded);
+                // Undo the native checkbox toggle on cancellation or save failure.
                 refresh_skip_mics(&ui, &controller, &settings);
             } else if event.id == button_about {
                 trace!("About tray menu item selected");
@@ -238,10 +247,7 @@ pub fn start(
                 match show_about(&mut s) {
                     Ok(true) => {
                         // Reset to Default clicked — apply all settings immediately
-                        let mut mic_controller = controller.write();
-                        mic_controller.set_excluded_devices(&s.excluded_devices);
-                        mic_controller.set_skip_unresponsive(s.skip_unresponsive_devices);
-                        drop(mic_controller);
+                        apply_excluded_devices(&ui, &controller, &s.excluded_devices);
                         let mut ui = ui.write();
                         if let Err(e) = ui.apply_settings(&s) {
                             log::error!("Failed to apply settings: {}", e);
@@ -277,10 +283,7 @@ pub fn start(
                 let mut s = settings.write();
                 *s = new_settings.clone();
                 drop(s);
-                let mut mic_controller = controller.write();
-                mic_controller.set_excluded_devices(&new_settings.excluded_devices);
-                mic_controller.set_skip_unresponsive(new_settings.skip_unresponsive_devices);
-                drop(mic_controller);
+                apply_excluded_devices(&ui, &controller, &new_settings.excluded_devices);
                 let mut ui_w = ui.write();
                 if let Err(e) = ui_w.apply_settings(&new_settings) {
                     log::error!("Failed to apply reloaded settings: {}", e);

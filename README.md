@@ -32,7 +32,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 
 - Mutes CoreAudio-controllable devices only.
 - Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
-- Leaves devices that accept a mute but don't apply it, such as Microsoft Teams Audio, out of the mute status. Turn this off with **Skip Unresponsive Mics** in the tray menu, or add such devices to [`excluded_devices`](./docs/settings.md#excluded_devices) to stop Mic Mute trying to mute them.
+- Explicitly excluded devices are not controlled or included in mute status and may remain live. Use **Excluded Mics** in the tray menu for virtual inputs such as Microsoft Teams Audio; see [`excluded_devices`](./docs/settings.md#excluded_devices). Devices that ignore mute are never automatically excluded.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 

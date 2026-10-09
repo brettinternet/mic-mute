@@ -17,8 +17,7 @@ The file is JSON. The complete default configuration is:
   "show_in_dock": false,
   "launch_at_login": false,
   "show_popup": true,
-  "excluded_devices": [],
-  "skip_unresponsive_devices": true
+  "excluded_devices": []
 }
 ```
 
@@ -62,31 +61,29 @@ The tray menu can also toggle this setting.
 
 ### `excluded_devices`
 
-Lists input device names that Mic Mute never mutes and leaves out of the mute status shown in the tray and popup. Names match case-insensitively and must match the whole device name, as shown in Audio MIDI Setup.
+Lists exact CoreAudio device UIDs that Mic Mute excludes from mute control and from the status shown in the tray and popup.
 
-- `[]` (default): every controllable input device is muted.
+- `[]` (default): all controllable input devices are managed.
+- UIDs are case-sensitive and are not device names or numeric runtime device IDs. A selection survives device renaming and reconnecting without excluding other devices with the same name.
 
-Use it for virtual inputs that aren't microphones, such as `"Microsoft Teams Audio"`:
+Use the tray menu's **Excluded Mics** submenu to select a virtual input such as Microsoft Teams Audio. The menu saves its UID automatically; you do not need to look it up. Connected devices are displayed by name, with UIDs added when names collide. Disconnected exclusions are displayed by UID so they can still be removed.
+
+**Excluding a device may make it live.** The tray asks for confirmation before adding an exclusion, with Cancel as the default. If Mic Mute muted the device, it attempts to unmute it or restore its saved input volume. Devices already muted before Mic Mute took control are left unchanged. Excluded inputs may record even while the tray and popup show “Mic off”; that status only covers the remaining managed inputs. If none remain controllable, the app does not report muted.
+
+For manual editing, the format is:
 
 ```json
 {
-  "excluded_devices": ["Microsoft Teams Audio"]
+  "excluded_devices": ["<exact CoreAudio device UID>"]
 }
 ```
 
-The tray menu's **Skip Mics** submenu lists connected input devices, plus any excluded device that isn't connected. Ticking a device adds it to this list and unticking removes it. If Mic Mute muted a device, excluding it unmutes it.
+Editing the file applies exclusions without a confirmation dialog, including the same unmute behavior. To include an input again, untick it in the submenu or remove its UID. While mute is requested, it will be muted on the next enforcement poll.
 
-### `skip_unresponsive_devices`
-
-Controls how Mic Mute treats an input device that accepts a mute request but stays unmuted, such as some virtual devices.
-
-- `true` (default): leave the device out of the mute status, so the tray and popup show muted when every other device muted. Mic Mute keeps retrying the device and logs each failure.
-- `false`: report the microphone as unmuted while any such device stays live.
-
-The tray menu can also toggle this setting with **Skip Unresponsive Mics**.
+Devices that ignore mute requests are never automatically excluded. Unless explicitly excluded, a device that remains live keeps the reported status unmuted and Mic Mute continues retrying.
 
 ## Editing settings
 
 Mic Mute checks the file every two seconds and reloads it when its modification time changes. Valid changes apply without a restart. The tray menu writes its setting changes to this file.
 
-Fields omitted from the settings file use the documented defaults, including `show_popup: true` and `skip_unresponsive_devices: true`. Loading settings does not rewrite the file. The file is created or updated when settings are explicitly saved, such as through a tray-menu setting change. Normal saves serialize the documented settings fields.
+Fields omitted from the settings file use the documented defaults, including `show_popup: true` and `excluded_devices: []`. Loading settings does not rewrite the file. The file is created or updated when settings are explicitly saved, such as through a tray-menu setting change. Normal saves serialize the documented settings fields.

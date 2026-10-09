@@ -28,12 +28,9 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
-    /// Input device names (case-insensitive) that Mic Mute never mutes or checks.
+    /// Exact CoreAudio device UIDs excluded from mute control and status.
     #[serde(default)]
     pub excluded_devices: Vec<String>,
-    /// Leave devices that accept a mute but don't apply it out of the mute status.
-    #[serde(default = "default_skip_unresponsive_devices")]
-    pub skip_unresponsive_devices: bool,
 }
 
 impl Default for Settings {
@@ -44,40 +41,25 @@ impl Default for Settings {
             launch_at_login: false,
             show_popup: true,
             excluded_devices: Vec::new(),
-            skip_unresponsive_devices: true,
         }
     }
-}
-
-/// Key used to compare device names: trimmed and case-insensitive.
-pub fn device_name_key(name: &str) -> String {
-    name.trim().to_lowercase()
 }
 
 fn default_show_popup() -> bool {
     true
 }
 
-fn default_skip_unresponsive_devices() -> bool {
-    true
-}
-
 impl Settings {
-    pub fn is_device_excluded(&self, name: &str) -> bool {
-        let key = device_name_key(name);
-        self.excluded_devices
-            .iter()
-            .any(|excluded| device_name_key(excluded) == key)
+    pub fn is_device_excluded(&self, uid: &str) -> bool {
+        self.excluded_devices.iter().any(|excluded| excluded == uid)
     }
 
-    /// Add the device to `excluded_devices`, or remove it if already there.
-    pub fn toggle_excluded_device(&mut self, name: &str) {
-        if self.is_device_excluded(name) {
-            let key = device_name_key(name);
-            self.excluded_devices
-                .retain(|excluded| device_name_key(excluded) != key);
+    /// Add the device UID to `excluded_devices`, or remove it if already there.
+    pub fn toggle_excluded_device(&mut self, uid: &str) {
+        if self.is_device_excluded(uid) {
+            self.excluded_devices.retain(|excluded| excluded != uid);
         } else {
-            self.excluded_devices.push(name.trim().to_string());
+            self.excluded_devices.push(uid.to_string());
         }
     }
 
@@ -143,18 +125,21 @@ mod tests {
 
         assert!(loaded.show_popup);
         assert!(loaded.excluded_devices.is_empty());
-        assert!(loaded.skip_unresponsive_devices);
     }
 
     #[test]
     fn test_toggle_excluded_device() {
         let mut s = Settings::default();
 
-        s.toggle_excluded_device("Microsoft Teams Audio");
-        assert!(s.is_device_excluded("microsoft teams audio "));
+        s.toggle_excluded_device("Device-UID");
+        assert!(s.is_device_excluded("Device-UID"));
+        assert!(!s.is_device_excluded("device-uid"));
 
-        s.toggle_excluded_device("MICROSOFT TEAMS AUDIO");
-        assert!(s.excluded_devices.is_empty());
+        let json = serde_json::to_string(&s).unwrap();
+        let mut loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.is_device_excluded("Device-UID"));
+        loaded.toggle_excluded_device("Device-UID");
+        assert!(loaded.excluded_devices.is_empty());
     }
 
     #[test]
@@ -200,8 +185,7 @@ mod tests {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: false,
-            excluded_devices: vec!["Microsoft Teams Audio".to_string()],
-            skip_unresponsive_devices: false,
+            excluded_devices: vec!["teams-audio-uid".to_string()],
         };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
@@ -211,8 +195,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(!loaded.show_popup);
-        assert_eq!(loaded.excluded_devices, vec!["Microsoft Teams Audio"]);
-        assert!(!loaded.skip_unresponsive_devices);
+        assert_eq!(loaded.excluded_devices, vec!["teams-audio-uid"]);
 
         let _ = fs::remove_file(&tmp_path);
     }

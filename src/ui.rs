@@ -1,11 +1,15 @@
 use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
+use crate::mic::InputDevice;
 use crate::popup::Popup;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
+use cocoa::base::nil;
+use cocoa::foundation::NSString;
 use log::trace;
+use objc::runtime::Object;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
@@ -42,7 +46,6 @@ impl UI {
             button_launch_at_login: tray.launch_at_login_id().clone(),
             button_show_in_dock: tray.show_in_dock_id().clone(),
             button_show_popup: tray.show_popup_id().clone(),
-            button_skip_unresponsive: tray.skip_unresponsive_id().clone(),
             button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
             shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
@@ -108,10 +111,6 @@ impl UI {
         // Sync popup visibility with the persisted setting
         self.set_popup_enabled(settings.show_popup)?;
 
-        self.tray
-            .skip_unresponsive
-            .set_checked(settings.skip_unresponsive_devices);
-
         // Sync dock visibility and its tray checkbox
         self.tray.show_in_dock.set_checked(settings.show_in_dock);
         crate::launch_at_login::set_dock_visible(settings.show_in_dock);
@@ -127,12 +126,38 @@ impl UI {
         Ok(())
     }
 
-    pub fn update_skip_mics(&mut self, devices: &[String], settings: &Settings) -> Result<()> {
+    pub fn update_skip_mics(&mut self, devices: &[InputDevice], settings: &Settings) -> Result<()> {
         self.tray.update_skip_mics(devices, settings)
     }
 
-    pub fn skip_mic_for(&self, id: &muda::MenuId) -> Option<String> {
+    pub fn skip_mic_for(&self, id: &muda::MenuId) -> Option<InputDevice> {
         self.tray.skip_mic_for(id)
+    }
+
+    /// Called on the main thread, without holding UI/controller/settings locks.
+    pub fn confirm_exclude_device(device: &InputDevice) -> bool {
+        unsafe {
+            let alert: *mut Object = msg_send![class!(NSAlert), new];
+            let title = NSString::alloc(nil).init_str("Exclude microphone?");
+            let _: () = msg_send![alert, setMessageText: title];
+            let _: () = msg_send![title, release];
+            let message = format!(
+                "{}\n{}\n\nMic Mute will stop controlling this input and leave it out of mute status. If Mic Mute muted it, it will be unmuted now.\n\nThis input may record even while Mic Mute shows ‘Mic off’.",
+                device.name, device.uid
+            );
+            let info = NSString::alloc(nil).init_str(&message);
+            let _: () = msg_send![alert, setInformativeText: info];
+            let _: () = msg_send![info, release];
+            // Cancel is the default action; excluding requires explicit consent.
+            for label in ["Cancel", "Exclude"] {
+                let title = NSString::alloc(nil).init_str(label);
+                let _: () = msg_send![alert, addButtonWithTitle: title];
+                let _: () = msg_send![title, release];
+            }
+            let response: i64 = msg_send![alert, runModal];
+            let _: () = msg_send![alert, release];
+            response == 1001
+        }
     }
 
     pub fn mic_shortcut_id(&self) -> u32 {

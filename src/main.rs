@@ -51,8 +51,7 @@ fn main() {
 
     let app_vars = AppVars::new();
 
-    let mut controller = MicController::new(&settings.excluded_devices).unwrap();
-    controller.set_skip_unresponsive(settings.skip_unresponsive_devices);
+    let controller = MicController::new(&settings.excluded_devices).unwrap();
     let mic_muted = controller.muted;
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
