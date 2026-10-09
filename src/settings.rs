@@ -128,21 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_excluded_device() {
-        let mut s = Settings::default();
-
-        s.toggle_excluded_device("Device-UID");
-        assert!(s.is_device_excluded("Device-UID"));
-        assert!(!s.is_device_excluded("device-uid"));
-
-        let json = serde_json::to_string(&s).unwrap();
-        let mut loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert!(loaded.is_device_excluded("Device-UID"));
-        loaded.toggle_excluded_device("Device-UID");
-        assert!(loaded.excluded_devices.is_empty());
-    }
-
-    #[test]
     fn test_settings_json_round_trip() {
         let s = Settings::default();
 

@@ -68,7 +68,7 @@ fn update_mic(
     }
 }
 
-fn refresh_skip_mics(
+fn refresh_excluded_mics(
     ui: &Arc<RwLock<UI>>,
     controller: &Arc<RwLock<MicController>>,
     settings: &Arc<RwLock<Settings>>,
@@ -81,8 +81,8 @@ fn refresh_skip_mics(
         }
     };
     let settings = settings.read();
-    if let Err(err) = ui.write().update_skip_mics(&devices, &settings) {
-        log::error!("Failed to update skip mics menu: {}", err);
+    if let Err(err) = ui.write().update_excluded_mics(&devices, &settings) {
+        log::error!("Failed to update excluded mics menu: {}", err);
     }
 }
 
@@ -151,7 +151,7 @@ pub fn start(
             .ok();
     });
 
-    refresh_skip_mics(&ui, &controller, &settings);
+    refresh_excluded_mics(&ui, &controller, &settings);
 
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
@@ -185,7 +185,7 @@ pub fn start(
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             trace!("Tray menu event: {:?}", event);
-            let skip_mic = ui.read().skip_mic_for(&event.id);
+            let excluded_mic = ui.read().excluded_mic_for(&event.id);
             if event.id == button_quit {
                 trace!("Exit tray menu item selected");
                 exit_requested = true;
@@ -226,7 +226,7 @@ pub fn start(
                 if let Err(e) = ui.write().set_popup_enabled(visible) {
                     log::error!("Failed to apply popup setting: {}", e);
                 }
-            } else if let Some(device) = skip_mic {
+            } else if let Some(device) = excluded_mic {
                 let already_excluded = settings.read().is_device_excluded(&device.uid);
                 if already_excluded || UI::confirm_exclude_device(&device) {
                     let mut updated = settings.read().clone();
@@ -240,7 +240,7 @@ pub fn start(
                     }
                 }
                 // Undo the native checkbox toggle on cancellation or save failure.
-                refresh_skip_mics(&ui, &controller, &settings);
+                refresh_excluded_mics(&ui, &controller, &settings);
             } else if event.id == button_about {
                 trace!("About tray menu item selected");
                 let mut s = settings.write();
@@ -293,7 +293,7 @@ pub fn start(
                 }
             }
             // Pick up plugged/unplugged devices on the same cadence.
-            refresh_skip_mics(&ui, &controller, &settings);
+            refresh_excluded_mics(&ui, &controller, &settings);
         }
 
         // Poll mic state and cursor-monitor position on a 200 ms interval.

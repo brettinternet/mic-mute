@@ -13,6 +13,8 @@ use objc::runtime::Object;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
+const NS_ALERT_SECOND_BUTTON_RETURN: i64 = 1001;
+
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
 pub struct UI {
@@ -126,12 +128,16 @@ impl UI {
         Ok(())
     }
 
-    pub fn update_skip_mics(&mut self, devices: &[InputDevice], settings: &Settings) -> Result<()> {
-        self.tray.update_skip_mics(devices, settings)
+    pub fn update_excluded_mics(
+        &mut self,
+        devices: &[InputDevice],
+        settings: &Settings,
+    ) -> Result<()> {
+        self.tray.update_excluded_mics(devices, settings)
     }
 
-    pub fn skip_mic_for(&self, id: &muda::MenuId) -> Option<InputDevice> {
-        self.tray.skip_mic_for(id)
+    pub fn excluded_mic_for(&self, id: &muda::MenuId) -> Option<InputDevice> {
+        self.tray.excluded_mic_for(id)
     }
 
     /// Called on the main thread, without holding UI/controller/settings locks.
@@ -142,7 +148,7 @@ impl UI {
             let _: () = msg_send![alert, setMessageText: title];
             let _: () = msg_send![title, release];
             let message = format!(
-                "{}\n{}\n\nMic Mute will stop controlling this input and leave it out of mute status. If Mic Mute muted it, it will be unmuted now.\n\nThis input may record even while Mic Mute shows ‘Mic off’.",
+                "{}\n{}\n\nMic Mute will stop muting this input and unmute it if Mic Mute muted it. It may record while Mic Mute shows “Mic off”.",
                 device.name, device.uid
             );
             let info = NSString::alloc(nil).init_str(&message);
@@ -156,7 +162,7 @@ impl UI {
             }
             let response: i64 = msg_send![alert, runModal];
             let _: () = msg_send![alert, release];
-            response == 1001
+            response == NS_ALERT_SECOND_BUTTON_RETURN
         }
     }
 
