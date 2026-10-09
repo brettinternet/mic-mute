@@ -1,13 +1,19 @@
 use crate::config::AppVars;
 use crate::event_loop::{create, EventIds, EventLoopMessage};
+use crate::mic::InputDevice;
 use crate::popup::Popup;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
+use cocoa::base::nil;
+use cocoa::foundation::NSString;
 use log::trace;
+use objc::runtime::Object;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+
+const NS_ALERT_SECOND_BUTTON_RETURN: i64 = 1001;
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -33,16 +39,8 @@ impl UI {
         let popup = Popup::new(&event_loop, mic_muted, settings.show_popup)
             .context("Failed to setup popup window")?;
         let theme = popup.get_theme();
-        let tray = Tray::new(
-            mic_muted,
-            theme,
-            app_vars,
-            settings.launch_at_login,
-            settings.show_in_dock,
-            settings.show_popup,
-            &settings.mic_shortcut,
-        )
-        .context("Failed to create system tray")?;
+        let tray = Tray::new(mic_muted, theme, app_vars, settings)
+            .context("Failed to create system tray")?;
         let shortcuts = Shortcuts::new(settings).context("Failed to setup shortcuts")?;
 
         let event_ids = EventIds {
@@ -128,6 +126,44 @@ impl UI {
         }
 
         Ok(())
+    }
+
+    pub fn update_excluded_mics(
+        &mut self,
+        devices: &[InputDevice],
+        settings: &Settings,
+    ) -> Result<()> {
+        self.tray.update_excluded_mics(devices, settings)
+    }
+
+    pub fn excluded_mic_for(&self, id: &muda::MenuId) -> Option<InputDevice> {
+        self.tray.excluded_mic_for(id)
+    }
+
+    /// Called on the main thread, without holding UI/controller/settings locks.
+    pub fn confirm_exclude_device(device: &InputDevice) -> bool {
+        unsafe {
+            let alert: *mut Object = msg_send![class!(NSAlert), new];
+            let title = NSString::alloc(nil).init_str("Exclude microphone?");
+            let _: () = msg_send![alert, setMessageText: title];
+            let _: () = msg_send![title, release];
+            let message = format!(
+                "{}\n{}\n\nMic Mute will stop muting this input and unmute it if Mic Mute muted it. It may record while Mic Mute shows “Mic off”.",
+                device.name, device.uid
+            );
+            let info = NSString::alloc(nil).init_str(&message);
+            let _: () = msg_send![alert, setInformativeText: info];
+            let _: () = msg_send![info, release];
+            // Cancel is the default action; excluding requires explicit consent.
+            for label in ["Cancel", "Exclude"] {
+                let title = NSString::alloc(nil).init_str(label);
+                let _: () = msg_send![alert, addButtonWithTitle: title];
+                let _: () = msg_send![title, release];
+            }
+            let response: i64 = msg_send![alert, runModal];
+            let _: () = msg_send![alert, release];
+            response == NS_ALERT_SECOND_BUTTON_RETURN
+        }
     }
 
     pub fn mic_shortcut_id(&self) -> u32 {

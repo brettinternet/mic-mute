@@ -28,6 +28,9 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
+    /// Exact CoreAudio device UIDs excluded from mute control and status.
+    #[serde(default)]
+    pub excluded_devices: Vec<String>,
 }
 
 impl Default for Settings {
@@ -37,6 +40,7 @@ impl Default for Settings {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: true,
+            excluded_devices: Vec::new(),
         }
     }
 }
@@ -46,6 +50,19 @@ fn default_show_popup() -> bool {
 }
 
 impl Settings {
+    pub fn is_device_excluded(&self, uid: &str) -> bool {
+        self.excluded_devices.iter().any(|excluded| excluded == uid)
+    }
+
+    /// Add the device UID to `excluded_devices`, or remove it if already there.
+    pub fn toggle_excluded_device(&mut self, uid: &str) {
+        if self.is_device_excluded(uid) {
+            self.excluded_devices.retain(|excluded| excluded != uid);
+        } else {
+            self.excluded_devices.push(uid.to_string());
+        }
+    }
+
     pub fn load() -> Self {
         Self::load_from_file().unwrap_or_default()
     }
@@ -107,6 +124,7 @@ mod tests {
         .unwrap();
 
         assert!(loaded.show_popup);
+        assert!(loaded.excluded_devices.is_empty());
     }
 
     #[test]
@@ -152,6 +170,7 @@ mod tests {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: false,
+            excluded_devices: vec!["teams-audio-uid".to_string()],
         };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
@@ -161,6 +180,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(!loaded.show_popup);
+        assert_eq!(loaded.excluded_devices, vec!["teams-audio-uid"]);
 
         let _ = fs::remove_file(&tmp_path);
     }
