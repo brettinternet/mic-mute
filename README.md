@@ -79,7 +79,7 @@ Build the app, install it to `/Applications`, and launch it:
 task install
 ```
 
-[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login agent at it, and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
+[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login LaunchAgent at it (on macOS 13 and later, the app replaces that with a login item when it starts), and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
 
 Pass flags after `--`, for example `task install -- --user`:
 
@@ -94,11 +94,11 @@ Pass flags after `--`, for example `task install -- --user`:
 ### Uninstall
 
 ```sh
-task uninstall              # stop the app; remove it and its Launch at Login agent
+task uninstall              # stop the app; remove it and its LaunchAgent
 task uninstall -- --purge   # also delete the settings
 ```
 
-[`scripts/uninstall.sh`](./scripts/uninstall.sh) stops Mic Mute with SIGTERM, then deletes `Mic Mute.app` from `/Applications` and `~/Applications` (only copies whose bundle identifier is `com.brettinternet.mic-mute`) and `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. It keeps `~/Library/Application Support/mic-mute` unless you pass `--purge`; `--dry-run` prints the commands instead of running them.
+[`scripts/uninstall.sh`](./scripts/uninstall.sh) stops Mic Mute with SIGTERM, then deletes `Mic Mute.app` from `/Applications` and `~/Applications` (only copies whose bundle identifier is `com.brettinternet.mic-mute`) and `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. It keeps `~/Library/Application Support/mic-mute` unless you pass `--purge`; `--dry-run` prints the commands instead of running them. A script can't remove a macOS 13+ login item, so turn Launch at Login off in the tray before uninstalling, or remove Mic Mute in System Settings → General → Login Items afterwards; the script reminds you.
 
 ### Bundle only
 

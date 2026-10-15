@@ -62,6 +62,15 @@ require_macos_user() {
   [[ "$EUID" -ne 0 ]] || die "run this as your own user, not root"
 }
 
+# Whether Mic Mute keeps Launch at Login as an SMAppService login item (macOS 13
+# and later, listed in System Settings > General > Login Items). macOS 11 and 12
+# use the LaunchAgent, which is also the 13+ fallback when registering fails.
+uses_login_item() {
+  local version
+  version="$(sw_vers -productVersion)"
+  [[ "${version%%.*}" =~ ^[0-9]+$ ]] && ((${version%%.*} >= 13))
+}
+
 # Prints the value at plist key path $2 (e.g. "ProgramArguments:0") of file $1, or nothing.
 plist_value() {
   "$PLIST_BUDDY" -c "Print :$2" "$1" 2>/dev/null || true
