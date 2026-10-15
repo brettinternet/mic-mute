@@ -74,8 +74,7 @@ tasks:
   build-target:
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }}
-      - /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Mic Mute uses camera access to detect and control camera mute status.'" ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app/Contents/Info.plist || true
+      - cargo bundle --release --target {{ .TARGET }} --format osx
       - open ./target/{{ .TARGET }}/release/bundle/osx
 
   release:
@@ -102,8 +101,7 @@ tasks:
     internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }}
-      - /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Mic Mute uses camera access to detect and control camera mute status.'" ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app/Contents/Info.plist || true
+      - cargo bundle --release --target {{ .TARGET }} --format osx
       - rcodesign sign --pem-source {{ .PEM_FILE }} ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app
       - hdiutil create -volname {{ .TITLE }} -srcfolder ./target/{{ .TARGET }}/release/bundle/osx -ov -format UDZO {{ .TITLE }}.dmg
       # - rcodesign sign --pem-source {{ .PEM_FILE }} {{ .TITLE }}.dmg

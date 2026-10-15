@@ -62,6 +62,11 @@ short_description = "System-wide mic mute for macOS"
 long_description = """
 A system-wide mute for macOS microphones with a global shortcut and visual confirmation of mute status. Inspired by VCM for Windows.
 """
-# osx_frameworks = ["Cocoa", "CoreAudio", "AppKit", "Foundation"]
-osx_url_schemes = ["com.brettinternet.mic-mute"]
-osx_minimum_system_version = "10"
+
+# cargo-bundle 0.12 rejects unknown keys; its macOS keys live in this table.
+[package.metadata.bundle.osx]
+minimum_system_version = "11.0"
+url_schemes = ["com.brettinternet.mic-mute"]
+# Appended verbatim inside Info.plist's <dict>. The path is relative to the
+# working directory, so run `cargo bundle` from the repository root.
+info_plist_exts = ["assets/Info.plist.ext"]

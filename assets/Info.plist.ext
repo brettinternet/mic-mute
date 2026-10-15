@@ -1,0 +1,2 @@
+  <key>NSCameraUsageDescription</key>
+  <string>Mic Mute only detects whether a camera is in use, to show it in the status popup. It never records or controls the camera.</string>
