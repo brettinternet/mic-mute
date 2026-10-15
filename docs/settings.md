@@ -6,6 +6,8 @@ Mic Mute stores its settings at:
 ~/Library/Application Support/mic-mute/settings.json
 ```
 
+The settings file shares its folder with two files Mic Mute manages itself, neither of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (the next launch restores them after a crash), and `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume.
+
 The file is JSON. The complete default configuration is:
 
 ```json

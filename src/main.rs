@@ -1,6 +1,7 @@
 mod about;
 mod camera;
 mod config;
+mod device_records;
 mod event_loop;
 mod icons;
 mod launch_at_login;
@@ -9,6 +10,7 @@ mod popup;
 mod popup_content;
 mod settings;
 mod shortcuts;
+mod store;
 mod tray;
 mod ui;
 mod utils;
@@ -31,8 +33,28 @@ use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Signals that end the app; the watcher thread restores the microphones before exiting.
+const SHUTDOWN_SIGNALS: [libc::c_int; 4] =
+    [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
+
 extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Restores the microphones from restore.json when a panic is about to end the app, then
+/// runs the previous hook, which prints the panic.
+fn install_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Only a main-thread panic ends the app: tao stops the event loop and re-raises it,
+        // and AppKit callbacks abort. A panic on a background thread (the camera poller, the
+        // signal watcher) leaves the loop running and still enforcing mute, so restoring
+        // there would unmute a user who is muted.
+        if unsafe { libc::pthread_main_np() } == 1 {
+            mic::restore_from_journal_file();
+        }
+        previous_hook(info);
+    }));
 }
 
 fn main() {
@@ -44,6 +66,8 @@ fn main() {
     };
     Builder::from_env(Env::default().default_filter_or(default_filter)).init();
     info!("Starting app");
+    // Before anything can mute a device, so any later panic still restores them.
+    install_panic_hook();
 
     // An invalid settings.json is never written over: run on the defaults until it's fixed.
     let (mut settings, is_settings_file_valid) = match Settings::load() {
@@ -79,17 +103,18 @@ fn main() {
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
-    // Register SIGTERM/SIGINT handlers. The signal handler only sets a flag;
+    // Register the shutdown signal handlers. The signal handler only sets a flag;
     // a background thread performs microphone cleanup before exiting.
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            handle_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGINT,
-            handle_signal as *const () as libc::sighandler_t,
-        );
+    for signal in SHUTDOWN_SIGNALS {
+        let previous =
+            unsafe { libc::signal(signal, handle_signal as *const () as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            log::error!(
+                "Failed to handle signal {}: {}",
+                signal,
+                std::io::Error::last_os_error()
+            );
+        }
     }
     let shutdown_controller = controller.clone();
     std::thread::spawn(move || loop {

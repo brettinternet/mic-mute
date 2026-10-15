@@ -2,6 +2,7 @@ use libc::c_void;
 use parking_lot::RwLock;
 use std::fs;
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,8 +37,7 @@ pub fn get_cursor_pos() -> Option<(f64, f64)> {
 /// flushes it to disk, then renames it over `path`, so readers never see a partial file.
 ///
 /// A symlinked `path` keeps its link: the file it points to is replaced. Missing parent
-/// directories are created. The flush is a full fsync (`F_FULLFSYNC`, several ms), so keep
-/// this off hot paths.
+/// directories are created. Used for settings.json and the state files in `store.rs`.
 pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     // Replace the link's target rather than the link (e.g. a settings file kept in a dotfiles
     // repository). A missing file has nothing to resolve.
@@ -66,7 +66,13 @@ pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
 fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(contents)?;
-    file.sync_all()
+    // Plain fsync, not `File::sync_all`: on macOS that issues F_FULLFSYNC, which blocks the
+    // event loop for ~7 ms (up to ~50 ms) on every mute toggle that writes restore.json.
+    // fsync is enough to keep a crash from leaving a renamed but empty file.
+    if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub fn arc_lock<T>(value: T) -> Arc<RwLock<T>> {

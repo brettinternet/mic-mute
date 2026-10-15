@@ -18,7 +18,6 @@ muda = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 resvg = { version = "0.47", default-features = false }
 global-hotkey = "0.8"
-async-std = "1"
 libc = "0.2"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +33,10 @@ objc2-core-audio = { version = "0.3", features = [
   "AudioHardwareDeprecated",
 ] }
 objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "CFString",
+] }
 
 [lints.rust]
 # objc 0.2.x macros use the old cfg(cargo-clippy) pattern which triggers this lint

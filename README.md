@@ -34,6 +34,8 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
+- Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.
+- Microphones without native mute are muted by setting their input volume to 0. Unmuting restores the level they had; a microphone Mic Mute has never seen audible comes back at 50%.
 
 ## Releases
 
