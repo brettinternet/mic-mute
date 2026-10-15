@@ -59,9 +59,15 @@ Controls whether Mic Mute opens when the user logs in.
 - `false` (default)
 - `true`
 
-The tray menu can also toggle this setting.
+The tray menu can also toggle this setting. macOS keeps the login item itself, so each launch sets `launch_at_login` to match it: removing Mic Mute from System Settings → General → Login Items turns the setting off.
 
-Mic Mute implements this with the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. When the setting is on, each launch of the app bundle points that file at the bundle's current location, so moving the app doesn't break the login item. A copy that isn't inside an app bundle, such as a development build started with `cargo run`, never repoints a login item that starts an app bundle.
+- **macOS 13 and later:** Mic Mute registers itself as a login item (`SMAppService`), listed in System Settings → General → Login Items under Open at Login. macOS finds the app wherever it's moved. If macOS waits for your approval, the setting stays on, the log warns, and the tray item reads "Launch at Login (Approve in System Settings)"; turning the setting on from the tray then opens Login Items. If the login item can't be registered, Mic Mute logs a warning and uses the LaunchAgent below instead.
+- **macOS 11 and 12:** Mic Mute writes the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. Each launch of the app bundle points it at the bundle's current location, so moving the app doesn't break it.
+- **After upgrading** on macOS 13 and later, the first launch replaces a LaunchAgent from an earlier version with a login item, then deletes the plist so Mic Mute doesn't open twice. While the login item can't be registered or waits for your approval, the LaunchAgent stays and keeps opening Mic Mute.
+
+A copy that isn't inside an app bundle, such as a development build started with `cargo run`, never registers or removes a login item and never writes or deletes the LaunchAgent; it logs instead. On macOS 13 and later it can't see the installed app's login item, so it leaves the setting as it is.
+
+See the README's [Launch at Login](../README.md#launch-at-login) section for how macOS treats the login item of a locally built app.
 
 ### `show_popup`
 

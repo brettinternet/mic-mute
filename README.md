@@ -24,7 +24,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] Popup follows screens and monitors with cursor
 - [x] Report whether a camera is in use: a dot on the tray icon (its tooltip says "Camera in use") and a label in the popup (disabling cameras appears to be impossible or too difficult for the scope of this project)
 - [x] Add configurable settings (hotkey, startup, popup visibility)
-- [x] Open app on system startup
+- [x] Open app at login: a login item on macOS 13 and later, a LaunchAgent on macOS 11 and 12 (see [Launch at Login](#launch-at-login))
 
 ## Limitations
 
@@ -37,6 +37,23 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 - Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.
 - Microphones without native mute are muted by setting their input volume to 0. Unmuting restores the level they had; a microphone Mic Mute has never seen audible comes back at 50%.
+
+## Launch at Login
+
+Turn it on from the tray menu, or with the [`launch_at_login`](./docs/settings.md#launch_at_login) setting.
+
+- **macOS 13 and later:** Mic Mute registers itself as a login item with `SMAppService`. It's listed in System Settings → General → Login Items under Open at Login, where you can also remove it, and macOS finds the app wherever you move it. If the login item can't be registered, Mic Mute logs a warning and uses a LaunchAgent instead.
+- **macOS 11 and 12:** Mic Mute writes the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist` and points it at the app's current location at each launch.
+- **Upgrading** on macOS 13 and later: the first launch replaces the LaunchAgent an earlier version wrote with a login item, then deletes the plist. While the login item can't be registered or waits for approval, the LaunchAgent stays.
+
+macOS (Background Task Management) records a login item against the app's code signature, and these builds are signed ad hoc, not with a Developer ID:
+
+- macOS may notify you that a login item was added, and Login Items may list entries for earlier builds until macOS cleans up its records.
+- Every `task install` signs a new build, and macOS may stop opening a re-signed build at login while Login Items still shows it. If Mic Mute doesn't open at your next login after a reinstall, turn Launch at Login off and on in the tray: that registers the new build.
+- If macOS waits for your approval, the tray item reads "Launch at Login (Approve in System Settings)": allow Mic Mute in System Settings → General → Login Items.
+- Only an app bundle in a stable place, such as `/Applications`, changes the login item. A copy opened from a download without moving it (App Translocation) and a development build from `cargo run` leave it alone.
+- Deleting the app doesn't remove its login item: turn Launch at Login off first, or remove Mic Mute in Login Items afterwards.
+- `sudo sfltool dumpbtm` prints the records macOS keeps (search for `com.brettinternet.mic-mute`); without `sudo` it waits for an administrator to authorize it.
 
 ## Releases
 
@@ -63,7 +80,7 @@ Build the app, install it to `/Applications`, and launch it:
 task install
 ```
 
-[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login agent at it, and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
+[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login LaunchAgent at it (on macOS 13 and later, the app replaces that with a login item when it starts), and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
 
 Pass flags after `--`, for example `task install -- --user`:
 
@@ -78,11 +95,11 @@ Pass flags after `--`, for example `task install -- --user`:
 ### Uninstall
 
 ```sh
-task uninstall              # stop the app; remove it and its Launch at Login agent
+task uninstall              # stop the app; remove it and its LaunchAgent
 task uninstall -- --purge   # also delete the settings
 ```
 
-[`scripts/uninstall.sh`](./scripts/uninstall.sh) stops Mic Mute with SIGTERM, then deletes `Mic Mute.app` from `/Applications` and `~/Applications` (only copies whose bundle identifier is `com.brettinternet.mic-mute`) and `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. It keeps `~/Library/Application Support/mic-mute` unless you pass `--purge`; `--dry-run` prints the commands instead of running them.
+[`scripts/uninstall.sh`](./scripts/uninstall.sh) stops Mic Mute with SIGTERM, then deletes `Mic Mute.app` from `/Applications` and `~/Applications` (only copies whose bundle identifier is `com.brettinternet.mic-mute`) and `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. It keeps `~/Library/Application Support/mic-mute` unless you pass `--purge`; `--dry-run` prints the commands instead of running them. A script can't remove a macOS 13+ login item, so turn Launch at Login off in the tray before uninstalling, or remove Mic Mute in System Settings → General → Login Items afterwards; the script reminds you.
 
 ### Bundle only
 

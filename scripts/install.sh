@@ -268,13 +268,22 @@ plist_buddy_quote() {
 }
 
 # The app writes the LaunchAgent only when Launch at Login is toggled, so point
-# an existing one at the installed binary.
+# an existing one at the installed binary. On macOS 13 and later the app keeps
+# a login item instead, which follows the app by itself, and replaces this
+# LaunchAgent with it when it starts.
 update_launch_agent() {
   local exe="$DEST/Contents/MacOS/$EXECUTABLE" current
   step "Launch at Login"
   if [[ ! -f "$LAUNCH_AGENT" ]]; then
-    info "Off: $LAUNCH_AGENT doesn't exist"
+    if uses_login_item; then
+      info "No LaunchAgent to update; on macOS 13 and later, Mic Mute keeps its own login item"
+    else
+      info "Off: $LAUNCH_AGENT doesn't exist"
+    fi
     return 0
+  fi
+  if uses_login_item; then
+    info "Mic Mute replaces this LaunchAgent with a login item when it starts"
   fi
   current="$(plist_value "$LAUNCH_AGENT" ProgramArguments:0)"
   if [[ "$current" == "$exe" ]]; then

@@ -12,7 +12,9 @@ Usage: scripts/uninstall.sh [options]    (or: task uninstall -- [options])
 
 Stops Mic Mute, then removes "Mic Mute.app" from /Applications and
 ~/Applications and the LaunchAgent
-~/Library/LaunchAgents/com.brettinternet.mic-mute.plist.
+~/Library/LaunchAgents/com.brettinternet.mic-mute.plist. On macOS 13 and
+later, turn Launch at Login off in the tray first, or remove Mic Mute in
+System Settings > General > Login Items afterwards; a script can't.
 
 Options:
   --purge    also delete the settings in ~/Library/Application Support/mic-mute
@@ -81,7 +83,13 @@ remove_launch_agent() {
   if [[ -e "$LAUNCH_AGENT" ]]; then
     run rm -f "$LAUNCH_AGENT"
   else
-    info "Off: $LAUNCH_AGENT doesn't exist"
+    info "No LaunchAgent: $LAUNCH_AGENT doesn't exist"
+  fi
+  # SMAppService has no command-line tool, and macOS keeps a login item after
+  # its app is deleted until it cleans up its records.
+  if uses_login_item; then
+    info "macOS keeps the login item: if Launch at Login was on, remove Mic Mute in"
+    info "System Settings > General > Login Items (a script can't)."
   fi
 }
 

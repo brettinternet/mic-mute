@@ -66,6 +66,7 @@ impl UI {
             mic_muted,
             camera_muted,
         };
+        ui.show_launch_at_login(settings.launch_at_login);
         ui.sync_shortcut();
         Ok((ui, event_ids))
     }
@@ -125,15 +126,27 @@ impl UI {
         self.tray.show_in_dock.set_checked(settings.show_in_dock);
         crate::launch_at_login::set_dock_visible(settings.show_in_dock);
 
-        // Sync launch-at-login plist and its tray checkbox
-        self.tray
-            .launch_at_login
-            .set_checked(settings.launch_at_login);
-        if let Err(e) = crate::launch_at_login::set(settings.launch_at_login) {
-            log::error!("Failed to apply launch_at_login setting: {}", e);
-        }
+        self.set_launch_at_login(settings.launch_at_login);
 
         Ok(())
+    }
+
+    /// Registers or removes the login item (a LaunchAgent on macOS 11 and 12), then shows the
+    /// result on the tray's Launch at Login item.
+    pub fn set_launch_at_login(&mut self, enabled: bool) {
+        if let Err(e) = crate::launch_at_login::set(enabled) {
+            log::error!("Failed to apply launch_at_login setting: {:#}", e);
+        }
+        self.show_launch_at_login(enabled);
+    }
+
+    /// Checks the tray item for `enabled` and, while macOS waits for the user to approve the
+    /// login item, says where to approve it.
+    fn show_launch_at_login(&self, enabled: bool) {
+        let needs_approval = enabled && crate::launch_at_login::needs_approval();
+        let item = &self.tray.launch_at_login;
+        item.set_checked(enabled);
+        item.set_text(crate::launch_at_login::menu_title(needs_approval));
     }
 
     /// Hands the registered hotkey's id to the event loop and shows the shortcut in the

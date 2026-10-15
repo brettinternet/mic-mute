@@ -37,6 +37,19 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "std",
   "CFString",
 ] }
+# SMAppService.mainApp (macOS 13+) for Launch at Login; NSError describes its failures.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSError",
+  "NSString",
+] }
+objc2-service-management = { version = "0.3", default-features = false, features = [
+  "std",
+  "SMAppService",
+  "objc2",
+  "objc2-foundation",
+] }
 
 [lints.rust]
 # objc 0.2.x macros use the old cfg(cargo-clippy) pattern which triggers this lint
