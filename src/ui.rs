@@ -1,11 +1,13 @@
 use crate::config::AppVars;
 use crate::event_loop::{EventIds, EventLoopTarget};
+use crate::mic::DeviceState;
 use crate::popup::Popup;
-use crate::settings::Settings;
+use crate::settings::{ExcludedDevice, Settings};
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
 use log::trace;
+use muda::MenuId;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -55,6 +57,7 @@ impl UI {
             button_show_popup: tray.show_popup_id().clone(),
             button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
+            button_open_sound_settings: tray.open_sound_settings_id().clone(),
             shortcut_mic: shortcut_mic.clone(),
         };
 
@@ -179,5 +182,22 @@ impl UI {
         self.tray
             .set_settings_notice(notice)
             .context("Failed to update settings notice")
+    }
+
+    /// Shows each input device's state, and the `excluded` devices that aren't connected, in
+    /// the tray's Microphones menu; only rows that change are touched.
+    pub fn update_devices(
+        &mut self,
+        states: &[DeviceState],
+        excluded: &[ExcludedDevice],
+    ) -> Result<()> {
+        self.tray
+            .update_devices(states, excluded)
+            .context("Failed to update the Microphones menu")
+    }
+
+    /// The device a click on the Microphones menu item `id` excludes or includes, if any.
+    pub fn clicked_device(&self, id: &MenuId) -> Option<ExcludedDevice> {
+        self.tray.clicked_device(id)
     }
 }

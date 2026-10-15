@@ -1,10 +1,14 @@
 use crate::config::AppVars;
 use crate::icons::{self, IconVariant, TrayImage};
+use crate::mic::{DeviceState, DeviceStatus};
+use crate::settings::ExcludedDevice;
 use crate::shortcuts::Shortcut;
 use anyhow::{Context, Result};
 use log::trace;
 use muda::accelerator::{Key, KeyAccelerator};
-use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use muda::{
+    accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use std::fmt;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -12,6 +16,209 @@ const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
 /// The tooltip's last line while a camera is in use, which explains the icon's badge.
 const CAMERA_IN_USE_TEXT: &str = "Camera in use";
+/// The submenu with a row per input device.
+const DEVICES_MENU_TEXT: &str = "Microphones";
+/// Its disabled only row while no device is connected or excluded.
+const NO_DEVICES_TEXT: &str = "No input devices";
+const OPEN_SOUND_SETTINGS_TEXT: &str = "Open Sound Settings…";
+/// The state of an excluded device that isn't connected.
+const NOT_CONNECTED_TEXT: &str = "Excluded, not connected";
+
+/// The words after a device's name in the Microphones menu.
+fn status_text(status: DeviceStatus) -> &'static str {
+    match status {
+        DeviceStatus::Muted => "Muted",
+        DeviceStatus::MutedByVolume => "Muted by input volume",
+        DeviceStatus::Unmuted => "Unmuted",
+        DeviceStatus::IgnoresWrites => "Skipped: ignores mute",
+        DeviceStatus::NoControl => "Skipped: no mute control",
+        DeviceStatus::Failed => "Failed",
+        DeviceStatus::Excluded => "Excluded",
+    }
+}
+
+/// `text` for a muda item, which drops a single `&` as a Windows mnemonic marker.
+fn menu_text(text: &str) -> String {
+    text.replace('&', "&&")
+}
+
+/// One row of the Microphones menu: a check item, checked while Mic Mute controls the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceRow {
+    /// The UID a click excludes or includes; `None` for a device whose UID can't be read.
+    /// Such a device can't be excluded, so its row is disabled.
+    uid: Option<String>,
+    /// The name saved with an exclusion, so the row can show it while the device is away.
+    name: String,
+    text: String,
+    /// Checked: the device isn't excluded.
+    is_controlled: bool,
+}
+
+/// The Microphones menu's rows: the connected input devices in `states`, then the excluded
+/// devices that aren't connected, so they can be included again. A connected device that
+/// shares its name with another shows its UID too.
+fn device_rows(states: &[DeviceState], excluded: &[ExcludedDevice]) -> Vec<DeviceRow> {
+    let mut rows: Vec<DeviceRow> = states
+        .iter()
+        .map(|state| {
+            let shares_name = states
+                .iter()
+                .filter(|other| other.name == state.name)
+                .count()
+                > 1;
+            let label = match &state.uid {
+                Some(uid) if shares_name => format!("{} ({})", state.name, uid),
+                _ => state.name.clone(),
+            };
+            DeviceRow {
+                uid: state.uid.clone(),
+                name: state.name.clone(),
+                text: format!("{} — {}", label, status_text(state.status)),
+                is_controlled: state.status != DeviceStatus::Excluded,
+            }
+        })
+        .collect();
+    for device in excluded {
+        let is_listed = rows
+            .iter()
+            .any(|row| row.uid.as_deref() == Some(device.uid.as_str()));
+        if device.uid.is_empty() || is_listed {
+            continue;
+        }
+        let label = if device.name.is_empty() {
+            &device.uid
+        } else {
+            &device.name
+        };
+        rows.push(DeviceRow {
+            uid: Some(device.uid.clone()),
+            name: device.name.clone(),
+            text: format!("{label} — {NOT_CONNECTED_TEXT}"),
+            is_controlled: false,
+        });
+    }
+    rows
+}
+
+/// Whether `rows` fit the items that show `shown`: the same devices in the same order, so
+/// only texts and check marks may need an update.
+fn has_same_devices(shown: &[DeviceRow], rows: &[DeviceRow]) -> bool {
+    shown.len() == rows.len()
+        && shown
+            .iter()
+            .zip(rows)
+            .all(|(shown, row)| shown.uid == row.uid)
+}
+
+/// The Microphones submenu: a check item per device row, or a disabled placeholder while there
+/// are none, then a separator and Open Sound Settings, which stay put.
+struct DevicesMenu {
+    submenu: Submenu,
+    /// The device rows' items, first in the submenu, in order.
+    items: Vec<CheckMenuItem>,
+    /// In the submenu in place of `items` while there are no rows.
+    placeholder: Option<MenuItem>,
+    /// What `items` show; `update` leaves matching items alone. `None` while a failed rebuild
+    /// left the submenu half built, so the next update rebuilds it.
+    shown: Option<Vec<DeviceRow>>,
+    open_sound_settings: MenuItem,
+}
+
+impl DevicesMenu {
+    fn new() -> Result<Self> {
+        let submenu = Submenu::new(DEVICES_MENU_TEXT, true);
+        let placeholder = MenuItem::new(NO_DEVICES_TEXT, false, None);
+        let open_sound_settings = MenuItem::new(OPEN_SOUND_SETTINGS_TEXT, true, None);
+        submenu
+            .append_items(&[
+                &placeholder,
+                &PredefinedMenuItem::separator(),
+                &open_sound_settings,
+            ])
+            .context("Failed to build the Microphones menu")?;
+        Ok(Self {
+            submenu,
+            items: Vec::new(),
+            placeholder: Some(placeholder),
+            shown: Some(Vec::new()),
+            open_sound_settings,
+        })
+    }
+
+    /// Shows `rows`, rebuilding the device rows only when the devices change. A click flips its
+    /// item's check mark before the event loop sees it, so check marks are compared with the
+    /// items themselves.
+    fn update(&mut self, rows: &[DeviceRow]) -> Result<()> {
+        let Some(shown) = self
+            .shown
+            .as_mut()
+            .filter(|shown| has_same_devices(shown, rows))
+        else {
+            return self.rebuild(rows);
+        };
+        for ((item, shown), row) in self.items.iter().zip(shown).zip(rows) {
+            if shown.text != row.text {
+                item.set_text(menu_text(&row.text));
+            }
+            if item.is_checked() != row.is_controlled {
+                item.set_checked(row.is_controlled);
+            }
+            shown.clone_from(row);
+        }
+        Ok(())
+    }
+
+    /// Replaces the device rows, or the placeholder, with items for `rows`. Every item that
+    /// stays in the submenu stays in `items` or `placeholder`, so a failure can't orphan one.
+    fn rebuild(&mut self, rows: &[DeviceRow]) -> Result<()> {
+        self.shown = None;
+        while let Some(item) = self.items.pop() {
+            if let Err(err) = self.submenu.remove(&item) {
+                self.items.push(item);
+                return Err(err).context("Failed to remove a Microphones menu row");
+            }
+        }
+        if let Some(placeholder) = self.placeholder.take() {
+            if let Err(err) = self.submenu.remove(&placeholder) {
+                self.placeholder = Some(placeholder);
+                return Err(err).context("Failed to remove the Microphones menu placeholder");
+            }
+        }
+        if rows.is_empty() {
+            let placeholder = MenuItem::new(NO_DEVICES_TEXT, false, None);
+            self.submenu
+                .prepend(&placeholder)
+                .context("Failed to add the Microphones menu placeholder")?;
+            self.placeholder = Some(placeholder);
+        }
+        for (position, row) in rows.iter().enumerate() {
+            let item = CheckMenuItem::new(
+                menu_text(&row.text),
+                row.uid.is_some(),
+                row.is_controlled,
+                None,
+            );
+            self.submenu
+                .insert(&item, position)
+                .context("Failed to add a Microphones menu row")?;
+            self.items.push(item);
+        }
+        self.shown = Some(rows.to_vec());
+        trace!("Rebuilt the Microphones menu with {} row(s)", rows.len());
+        Ok(())
+    }
+
+    /// The device of the row whose item has `id`; `None` for any other item.
+    fn device_for(&self, id: &MenuId) -> Option<ExcludedDevice> {
+        let index = self.items.iter().position(|item| item.id() == id)?;
+        let row = self.shown.as_ref()?.get(index)?;
+        Some(ExcludedDevice {
+            uid: row.uid.clone()?,
+            name: row.name.clone(),
+        })
+    }
+}
 
 pub fn get_mute_menu_text(muted: bool) -> &'static str {
     if muted {
@@ -79,6 +286,8 @@ pub struct Tray {
     pub show_popup: CheckMenuItem,
     pub about: MenuItem,
     pub quit: MenuItem,
+    /// The Microphones submenu, below the Mute item.
+    devices: DevicesMenu,
     /// The menu `systray` shows; kept to insert and remove the settings notice.
     menu: Menu,
     /// The tooltip's first line while settings.json is usable.
@@ -111,10 +320,13 @@ impl Tray {
         let show_popup = CheckMenuItem::new("Show Popup", true, popup_visible, None);
         let about = MenuItem::new("About", true, None);
         let quit = MenuItem::new("Exit", true, None);
+        // Lists no device until the first poll's `update_devices`.
+        let devices = DevicesMenu::new()?;
 
         tray_menu
             .append_items(&[
                 &toggle_mute,
+                &devices.submenu,
                 &PredefinedMenuItem::separator(),
                 &launch_at_login,
                 &show_in_dock,
@@ -144,6 +356,7 @@ impl Tray {
             show_popup,
             about,
             quit,
+            devices,
             menu: tray_menu,
             tooltip,
             settings_notice: None,
@@ -255,6 +468,27 @@ impl Tray {
 
     pub fn quit_id(&self) -> &MenuId {
         self.quit.id()
+    }
+
+    pub fn open_sound_settings_id(&self) -> &MenuId {
+        self.devices.open_sound_settings.id()
+    }
+
+    /// Shows `states`, the connected input devices, and then the `excluded` devices that aren't
+    /// connected, in the Microphones menu. Touches only the rows that change, so a repeated
+    /// call with the same rows costs nothing.
+    pub fn update_devices(
+        &mut self,
+        states: &[DeviceState],
+        excluded: &[ExcludedDevice],
+    ) -> Result<()> {
+        self.devices.update(&device_rows(states, excluded))
+    }
+
+    /// The device a click on the Microphones menu item `id` excludes or includes, with the name
+    /// to save; `None` when `id` isn't one of its device rows.
+    pub fn clicked_device(&self, id: &MenuId) -> Option<ExcludedDevice> {
+        self.devices.device_for(id)
     }
 
     /// Shows `notice` as a disabled first menu item and as the tooltip's first line; `None`
@@ -372,5 +606,155 @@ mod tests {
     #[test]
     fn test_get_mute_menu_text_unmuted() {
         assert_eq!(get_mute_menu_text(false), "Mute");
+    }
+
+    fn state(name: &str, status: DeviceStatus) -> DeviceState {
+        DeviceState {
+            uid: Some(format!("{name} UID")),
+            name: name.to_string(),
+            status,
+        }
+    }
+
+    fn excluded(uid: &str, name: &str) -> ExcludedDevice {
+        ExcludedDevice {
+            uid: uid.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn texts(rows: &[DeviceRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.text.as_str()).collect()
+    }
+
+    #[test]
+    fn device_rows_name_each_device_and_its_state() {
+        use DeviceStatus::*;
+        let states = [
+            state("MacBook Pro Microphone", Muted),
+            state("USB Mic", MutedByVolume),
+            state("Steam Streaming Microphone", Unmuted),
+            state("Microsoft Teams Audio", IgnoresWrites),
+            state("iPhone Microphone", NoControl),
+            state("Broken Mic", Failed),
+            state("Steam Streaming Speakers", Excluded),
+        ];
+
+        let rows = device_rows(&states, &[]);
+
+        assert_eq!(
+            texts(&rows),
+            [
+                "MacBook Pro Microphone — Muted",
+                "USB Mic — Muted by input volume",
+                "Steam Streaming Microphone — Unmuted",
+                "Microsoft Teams Audio — Skipped: ignores mute",
+                "iPhone Microphone — Skipped: no mute control",
+                "Broken Mic — Failed",
+                "Steam Streaming Speakers — Excluded",
+            ]
+        );
+        let controlled: Vec<bool> = rows.iter().map(|row| row.is_controlled).collect();
+        assert_eq!(controlled, [true, true, true, true, true, true, false]);
+        assert_eq!(rows[0].uid.as_deref(), Some("MacBook Pro Microphone UID"));
+    }
+
+    #[test]
+    fn device_rows_list_excluded_devices_that_are_not_connected_once() {
+        let states = [
+            state("Built-in", DeviceStatus::Muted),
+            state("Teams", DeviceStatus::Excluded),
+        ];
+        let excluded = [
+            excluded("Teams UID", "Teams"),
+            excluded("Headset UID", "Headset"),
+            excluded("Bare UID", ""),
+            excluded("Headset UID", "Headset"),
+            excluded("", "No UID"),
+        ];
+
+        let rows = device_rows(&states, &excluded);
+
+        assert_eq!(
+            texts(&rows),
+            [
+                "Built-in — Muted",
+                "Teams — Excluded",
+                "Headset — Excluded, not connected",
+                "Bare UID — Excluded, not connected",
+            ]
+        );
+        assert_eq!(rows[2].uid.as_deref(), Some("Headset UID"));
+        assert_eq!(rows[2].name, "Headset");
+        assert!(!rows[2].is_controlled);
+        assert!(!rows[3].is_controlled);
+    }
+
+    #[test]
+    fn device_rows_tell_devices_with_the_same_name_apart_by_uid() {
+        let usb = |uid: &str| DeviceState {
+            uid: Some(uid.to_string()),
+            name: "USB Microphone".to_string(),
+            status: DeviceStatus::Muted,
+        };
+        let states = [
+            usb("USB-1"),
+            usb("USB-2"),
+            state("Built-in", DeviceStatus::Muted),
+        ];
+
+        assert_eq!(
+            texts(&device_rows(&states, &[])),
+            [
+                "USB Microphone (USB-1) — Muted",
+                "USB Microphone (USB-2) — Muted",
+                "Built-in — Muted",
+            ]
+        );
+    }
+
+    #[test]
+    fn device_row_without_a_uid_stays_controlled_and_cannot_be_excluded() {
+        let states = [DeviceState {
+            uid: None,
+            name: "No UID".to_string(),
+            status: DeviceStatus::Unmuted,
+        }];
+
+        let rows = device_rows(&states, &[]);
+
+        assert_eq!(rows[0].uid, None);
+        assert!(rows[0].is_controlled);
+    }
+
+    #[test]
+    fn menu_text_keeps_ampersands_in_device_names() {
+        assert_eq!(
+            menu_text("Rock & Roll Mic — Muted"),
+            "Rock && Roll Mic — Muted"
+        );
+    }
+
+    #[test]
+    fn rows_for_the_same_devices_need_no_rebuild() {
+        let rows = |states: &[DeviceState]| device_rows(states, &[]);
+        let muted = rows(&[
+            state("Built-in", DeviceStatus::Muted),
+            state("USB", DeviceStatus::Muted),
+        ]);
+        let changed = rows(&[
+            state("Built-in", DeviceStatus::Unmuted),
+            state("USB", DeviceStatus::Excluded),
+        ]);
+        let unplugged = rows(&[state("Built-in", DeviceStatus::Muted)]);
+        let reordered = rows(&[
+            state("USB", DeviceStatus::Muted),
+            state("Built-in", DeviceStatus::Muted),
+        ]);
+
+        assert!(has_same_devices(&muted, &changed));
+        assert!(!has_same_devices(&muted, &unplugged));
+        assert!(!has_same_devices(&muted, &reordered));
+        assert!(has_same_devices(&[], &[]));
     }
 }

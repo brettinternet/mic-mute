@@ -40,16 +40,17 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// The settings after About → Reset: `mic_shortcut`, `show_in_dock`, and `show_popup` at
-/// their defaults. Every other field is kept: `launch_at_login` mirrors the system login
-/// item, and fields this build doesn't manage must survive. List a new setting here if
-/// Reset should cover it.
+/// The settings after About → Reset: `mic_shortcut`, `show_in_dock`, `show_popup`, and
+/// `excluded_devices` at their defaults, so Mic Mute mutes every microphone again. Every other
+/// field is kept: `launch_at_login` mirrors the system login item, and fields this build
+/// doesn't manage must survive. List a new setting here if Reset should cover it.
 fn reset_settings(current: &Settings) -> Settings {
     let defaults = Settings::default();
     Settings {
         mic_shortcut: defaults.mic_shortcut,
         show_in_dock: defaults.show_in_dock,
         show_popup: defaults.show_popup,
+        excluded_devices: defaults.excluded_devices,
         ..current.clone()
     }
 }
@@ -348,24 +349,31 @@ mod tests {
                 "show_in_dock": true,
                 "launch_at_login": {launch_at_login},
                 "show_popup": false,
-                "excluded_devices": ["Teams Audio"]
+                "excluded_devices": [{{ "uid": "Teams UID", "name": "Teams Audio" }}],
+                "future_setting": {{ "nested": [1, "two"] }}
             }}"#
         ))
         .unwrap()
     }
 
     #[test]
-    fn reset_restores_shortcut_dock_and_popup_defaults() {
+    fn reset_restores_shortcut_dock_popup_and_exclusion_defaults() {
         let reset = reset_settings(&customized_settings(true));
         let defaults = Settings::default();
         assert_eq!(reset.mic_shortcut, defaults.mic_shortcut);
         assert_eq!(reset.show_in_dock, defaults.show_in_dock);
         assert_eq!(reset.show_popup, defaults.show_popup);
+        assert_eq!(reset.excluded_devices, defaults.excluded_devices);
     }
 
     #[test]
     fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
-        let reset_fields = ["mic_shortcut", "show_in_dock", "show_popup"];
+        let reset_fields = [
+            "mic_shortcut",
+            "show_in_dock",
+            "show_popup",
+            "excluded_devices",
+        ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);
             let reset = serde_json::to_value(reset_settings(&current)).unwrap();

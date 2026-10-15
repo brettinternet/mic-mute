@@ -1,3 +1,6 @@
+use anyhow::bail;
+use cocoa::base::{id, nil, BOOL, NO};
+use cocoa::foundation::NSString;
 use libc::c_void;
 use parking_lot::RwLock;
 use std::fs;
@@ -5,6 +8,53 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Sound settings at its Input tab, then the Sound pane alone. System Settings (macOS 13 and
+/// later) maps this legacy pane id to its Sound extension (`legacyBundleIdentifier` in the
+/// extension's Info.plist) and selects its `input` anchor; System Preferences (macOS 11–12)
+/// knows both. NSWorkspace reports only whether an app took the URL, not whether it found the
+/// anchor, so the second URL helps only if the first is refused outright.
+const SOUND_INPUT_SETTINGS_URLS: [&str; 2] = [
+    "x-apple.systempreferences:com.apple.preference.sound?input",
+    "x-apple.systempreferences:com.apple.preference.sound",
+];
+
+/// Opens System Settings at Sound → Input. NSWorkspace opens it without a child process to
+/// reap. Main thread only, like every AppKit call.
+pub fn open_sound_input_settings() -> anyhow::Result<()> {
+    for url in SOUND_INPUT_SETTINGS_URLS {
+        if open_url(url)? {
+            return Ok(());
+        }
+        log::warn!("No app opened {}", url);
+    }
+    bail!("No app opened the Sound settings")
+}
+
+/// Asks NSWorkspace to open `url`; returns whether an app took it.
+fn open_url(url: &str) -> anyhow::Result<bool> {
+    objc::rc::autoreleasepool(|| unsafe {
+        let ns_url = ns_url(url)?;
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let is_opened: BOOL = msg_send![workspace, openURL: ns_url];
+        Ok(is_opened != NO)
+    })
+}
+
+/// `url` as an autoreleased `NSURL`.
+///
+/// # Safety
+///
+/// Call it inside an autorelease pool, which owns the result.
+unsafe fn ns_url(url: &str) -> anyhow::Result<id> {
+    let string = NSString::alloc(nil).init_str(url);
+    let ns_url: id = msg_send![class!(NSURL), URLWithString: string];
+    let _: () = msg_send![string, release];
+    if ns_url.is_null() {
+        bail!("{} isn't a valid URL", url);
+    }
+    Ok(ns_url)
+}
 
 type CGFloat = f64;
 
@@ -78,4 +128,28 @@ fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
 pub fn arc_lock<T>(value: T) -> Arc<RwLock<T>> {
     let rwlock = RwLock::new(value);
     Arc::new(rwlock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sound_settings_open_at_the_input_tab_then_fall_back_to_the_pane() {
+        let [input_tab, pane] = SOUND_INPUT_SETTINGS_URLS;
+        assert_eq!(
+            input_tab,
+            "x-apple.systempreferences:com.apple.preference.sound?input"
+        );
+        assert_eq!(input_tab.strip_suffix("?input"), Some(pane));
+    }
+
+    #[test]
+    fn sound_settings_urls_are_valid_urls() {
+        // Only builds the NSURLs; nothing is opened.
+        for url in SOUND_INPUT_SETTINGS_URLS {
+            let is_valid = objc::rc::autoreleasepool(|| unsafe { ns_url(url).is_ok() });
+            assert!(is_valid, "{url}");
+        }
+    }
 }

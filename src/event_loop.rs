@@ -2,9 +2,10 @@ use crate::about::{self, AboutWindow};
 use crate::camera::CameraController;
 use crate::config::AppVars;
 use crate::launch_at_login;
-use crate::mic::MicController;
+use crate::mic::{FailureLog, MicController};
 use crate::settings::Settings;
 use crate::ui::UI;
+use crate::utils;
 use anyhow::Result;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
@@ -72,6 +73,7 @@ pub struct EventIds {
     pub button_show_popup: MenuId,
     pub button_about: MenuId,
     pub button_quit: MenuId,
+    pub button_open_sound_settings: MenuId,
     pub shortcut_mic: Arc<AtomicU32>,
 }
 
@@ -94,6 +96,33 @@ fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool)
     }
     controller.save_input_levels_if_due();
     toggle && !controller.muted
+}
+
+/// Hands the devices settings.json excludes to the controller. A tray click, a hand edit, and
+/// About → Reset Settings all change them in `settings`, so the poll applies each of them here.
+/// Returns whether they changed.
+fn apply_exclusions(controller: &RwLock<MicController>, settings: &RwLock<Settings>) -> bool {
+    let excluded = settings.read().excluded_uids();
+    controller.write().set_excluded(excluded)
+}
+
+/// Shows each input device's state in the tray's Microphones menu. The tray touches only the
+/// rows that change, so this runs on every poll.
+fn show_devices(
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    settings: &RwLock<Settings>,
+    failures: &mut FailureLog,
+) {
+    let excluded = settings.read().excluded_devices.clone();
+    let controller = controller.read();
+    match ui
+        .write()
+        .update_devices(controller.device_states(), &excluded)
+    {
+        Ok(()) => failures.clear(),
+        Err(err) => failures.report(&err, Instant::now()),
+    }
 }
 
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
@@ -119,6 +148,10 @@ pub fn start(
     let mut last_poll = Instant::now() - poll_interval;
     let mut hide_popup_at: Option<Instant> = None;
     let mut is_exiting = false;
+    let mut devices_menu_failures = FailureLog::new(
+        "Failed to update the Microphones menu",
+        "The Microphones menu updates again",
+    );
 
     // Poll the settings file for changes every 2 seconds so edits to
     // settings.json take effect without restarting the app.
@@ -198,9 +231,12 @@ pub fn start(
             button_show_popup,
             button_about,
             button_quit,
+            button_open_sound_settings,
             shortcut_mic,
         } = event_ids;
         let mut exit_requested = false;
+        // Set to run the poll in this pass rather than at its next deadline.
+        let mut is_poll_requested = false;
 
         if let Event::UserEvent(Message::CameraStateChanged(active)) = event {
             let muted = !active;
@@ -214,6 +250,8 @@ pub fn start(
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             trace!("Tray menu event: {:?}", event);
+            // Its own statement: an `if let` would hold the UI lock through every branch.
+            let clicked_device = ui.read().clicked_device(&event.id);
             if event.id == button_quit {
                 trace!("Exit tray menu item selected");
                 exit_requested = true;
@@ -258,6 +296,21 @@ pub fn start(
                 trace!("About tray menu item selected");
                 if let Err(e) = about_window.show() {
                     log::error!("Failed to show the About window: {:#}", e);
+                }
+            } else if let Some(device) = clicked_device {
+                trace!("Microphones menu: {} ({}) toggled", device.name, device.uid);
+                let mut s = settings.write();
+                s.toggle_device_exclusion(&device.uid, &device.name);
+                if let Err(e) = s.save() {
+                    log::error!("Failed to save settings: {}", e);
+                }
+                drop(s);
+                // The poll hands the change to the controller and shows it; run it now.
+                is_poll_requested = true;
+            } else if event.id == button_open_sound_settings {
+                trace!("Open Sound Settings tray menu item selected");
+                if let Err(e) = utils::open_sound_input_settings() {
+                    log::error!("Failed to open Sound settings: {:#}", e);
                 }
             }
         }
@@ -350,9 +403,19 @@ pub fn start(
         }
 
         // Poll mic state and cursor-monitor position on a 200 ms interval.
-        if last_poll.elapsed() >= poll_interval {
+        if is_poll_requested || last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
+            let exclusions_changed = apply_exclusions(&controller, &settings);
             update_mic(ui, &controller, false);
+            if exclusions_changed {
+                // Exclusions change the mute state while unmuted too, which `update_mic`
+                // leaves off the UI.
+                let muted = controller.read().muted;
+                if let Err(err) = ui.write().update_mic(muted) {
+                    log::error!("Failed to update microphone UI: {:#}", err);
+                }
+            }
+            show_devices(ui, &controller, &settings, &mut devices_menu_failures);
             if let Err(err) = ui.write().detect() {
                 log::error!("Failed to update popup placement: {:#}", err);
             }

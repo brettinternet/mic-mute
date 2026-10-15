@@ -90,7 +90,7 @@ fn main() {
         }
     }
 
-    let controller = MicController::new().unwrap();
+    let controller = MicController::new(settings.excluded_uids()).unwrap();
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 

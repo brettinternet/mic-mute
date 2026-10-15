@@ -2,6 +2,7 @@ use crate::utils::write_atomically;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,12 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
+
+    /// Input devices Mic Mute leaves alone: it never mutes, unmutes, or enforces them, and
+    /// they don't count toward the mute state. Empty by default, so every device is muted.
+    #[serde(default)]
+    pub excluded_devices: Vec<ExcludedDevice>,
+
     /// Fields this version doesn't know (written by a newer version or a fork), saved back
     /// unchanged. Empty when the file has none, as in `impl Default`.
     #[serde(flatten)]
@@ -47,6 +54,7 @@ impl Default for Settings {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: true,
+            excluded_devices: Vec::new(),
             extra: serde_json::Map::new(),
         }
     }
@@ -54,6 +62,82 @@ impl Default for Settings {
 
 fn default_show_popup() -> bool {
     true
+}
+
+/// An input device excluded from muting, identified by its CoreAudio device UID, which stays
+/// the same across reconnects, restarts, and renames. `name` is only for showing the device
+/// while it isn't connected.
+///
+/// In the file, an entry is `{ "uid": …, "name": … }`, or a bare UID string, as upstream's
+/// `excluded_devices` writes it; an entry without a name is saved back as a bare string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExcludedDeviceEntry", into = "ExcludedDeviceEntry")]
+pub struct ExcludedDevice {
+    pub uid: String,
+    pub name: String,
+}
+
+/// How an `excluded_devices` entry is written in settings.json.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ExcludedDeviceEntry {
+    Uid(String),
+    Device {
+        uid: String,
+        #[serde(default)]
+        name: String,
+    },
+}
+
+impl From<ExcludedDeviceEntry> for ExcludedDevice {
+    fn from(entry: ExcludedDeviceEntry) -> Self {
+        match entry {
+            ExcludedDeviceEntry::Uid(uid) => Self {
+                uid,
+                name: String::new(),
+            },
+            ExcludedDeviceEntry::Device { uid, name } => Self { uid, name },
+        }
+    }
+}
+
+impl From<ExcludedDevice> for ExcludedDeviceEntry {
+    fn from(device: ExcludedDevice) -> Self {
+        if device.name.is_empty() {
+            Self::Uid(device.uid)
+        } else {
+            Self::Device {
+                uid: device.uid,
+                name: device.name,
+            }
+        }
+    }
+}
+
+impl Settings {
+    /// The UIDs of the excluded devices. An empty UID matches no device, so it's left out.
+    pub fn excluded_uids(&self) -> BTreeSet<String> {
+        self.excluded_devices
+            .iter()
+            .filter(|device| !device.uid.is_empty())
+            .map(|device| device.uid.clone())
+            .collect()
+    }
+
+    /// Excludes the device with `uid`, saving `name` with it, or includes it again when it is
+    /// excluded. Returns whether it is excluded now.
+    pub fn toggle_device_exclusion(&mut self, uid: &str, name: &str) -> bool {
+        let count = self.excluded_devices.len();
+        self.excluded_devices.retain(|device| device.uid != uid);
+        if self.excluded_devices.len() < count {
+            return false;
+        }
+        self.excluded_devices.push(ExcludedDevice {
+            uid: uid.to_string(),
+            name: name.to_string(),
+        });
+        true
+    }
 }
 
 /// Why settings.json can't be used.
@@ -328,6 +412,10 @@ mod tests {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: false,
+            excluded_devices: vec![ExcludedDevice {
+                uid: "MSLoopbackDriverDevice_UID".to_string(),
+                name: "Microsoft Teams Audio".to_string(),
+            }],
             extra: serde_json::Map::new(),
         };
 
@@ -338,6 +426,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(!loaded.show_popup);
+        assert_eq!(loaded.excluded_devices, s.excluded_devices);
 
         let _ = fs::remove_file(&tmp_path);
     }
@@ -377,7 +466,8 @@ mod tests {
     const FILE_WITH_UNKNOWN_FIELDS: &str = r#"{
         "mic_shortcut": { "modifiers": ["meta"], "key": "F13" },
         "show_popup": false,
-        "excluded_devices": ["Teams Audio"],
+        "excluded_devices": ["Teams Audio UID"],
+        "skipped_devices": ["Teams Audio"],
         "future": { "nested": [1, 2.5, null, "text"], "flag": true }
     }"#;
 
@@ -390,9 +480,10 @@ mod tests {
 
         let saved: serde_json::Value = serde_json::to_value(&loaded).unwrap();
         let original: serde_json::Value = serde_json::from_str(FILE_WITH_UNKNOWN_FIELDS).unwrap();
-        assert_eq!(saved["excluded_devices"], original["excluded_devices"]);
+        assert_eq!(saved["skipped_devices"], original["skipped_devices"]);
         assert_eq!(saved["future"], original["future"]);
         assert_eq!(saved["show_popup"], serde_json::json!(false));
+        assert_eq!(saved["excluded_devices"], original["excluded_devices"]);
     }
 
     #[test]
@@ -403,6 +494,7 @@ mod tests {
             "show_in_dock",
             "launch_at_login",
             "show_popup",
+            "excluded_devices",
         ] {
             assert!(
                 !loaded.extra.contains_key(known),
@@ -423,6 +515,7 @@ mod tests {
         assert_eq!(loaded.show_in_dock, defaults.show_in_dock);
         assert_eq!(loaded.launch_at_login, defaults.launch_at_login);
         assert_eq!(loaded.show_popup, defaults.show_popup);
+        assert_eq!(loaded.excluded_devices, defaults.excluded_devices);
         assert!(loaded.extra.is_empty());
     }
 
@@ -434,6 +527,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "excluded_devices",
                 "launch_at_login",
                 "mic_shortcut",
                 "show_in_dock",
@@ -474,10 +568,7 @@ mod tests {
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved["excluded_devices"],
-            serde_json::json!(["Teams Audio"])
-        );
+        assert_eq!(saved["skipped_devices"], serde_json::json!(["Teams Audio"]));
         assert_eq!(saved["future"]["nested"][1], serde_json::json!(2.5));
         assert_eq!(saved["show_in_dock"], serde_json::json!(true));
     }
@@ -736,5 +827,119 @@ mod tests {
             !Settings::take_own_save(Some(t)),
             "a mismatch is forgotten too"
         );
+    }
+
+    // excluded_devices
+
+    fn teams_audio() -> ExcludedDevice {
+        ExcludedDevice {
+            uid: "MSLoopbackDriverDevice_UID".to_string(),
+            name: "Microsoft Teams Audio".to_string(),
+        }
+    }
+
+    #[test]
+    fn default_settings_exclude_no_devices() {
+        assert!(Settings::default().excluded_devices.is_empty());
+        assert!(Settings::default().excluded_uids().is_empty());
+    }
+
+    #[test]
+    fn settings_json_missing_excluded_devices_excludes_none() {
+        let loaded: Settings =
+            serde_json::from_str(r#"{ "mic_shortcut": { "key": "F13" }, "show_popup": false }"#)
+                .unwrap();
+
+        assert!(loaded.excluded_devices.is_empty());
+        assert!(loaded.extra.is_empty());
+    }
+
+    #[test]
+    fn excluded_devices_round_trip_with_their_uid_and_name() {
+        let settings = Settings {
+            excluded_devices: vec![teams_audio()],
+            ..Settings::default()
+        };
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value["excluded_devices"],
+            serde_json::json!([
+                { "uid": "MSLoopbackDriverDevice_UID", "name": "Microsoft Teams Audio" }
+            ])
+        );
+        let loaded: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.excluded_devices, vec![teams_audio()]);
+    }
+
+    #[test]
+    fn excluded_devices_accept_bare_uids_and_save_them_bare() {
+        // Upstream's excluded_devices lists bare UIDs; an entry may also omit its name.
+        let loaded: Settings = serde_json::from_str(
+            r#"{ "excluded_devices": ["Steam UID", { "uid": "Teams UID" }] }"#,
+        )
+        .unwrap();
+
+        let uids: Vec<_> = loaded
+            .excluded_devices
+            .iter()
+            .map(|device| (device.uid.as_str(), device.name.as_str()))
+            .collect();
+        assert_eq!(uids, [("Steam UID", ""), ("Teams UID", "")]);
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["excluded_devices"],
+            serde_json::json!(["Steam UID", "Teams UID"])
+        );
+    }
+
+    #[test]
+    fn excluded_uids_leave_out_empty_uids() {
+        let settings: Settings =
+            serde_json::from_str(r#"{ "excluded_devices": ["", "Teams UID", "Teams UID"] }"#)
+                .unwrap();
+
+        assert_eq!(
+            settings.excluded_uids().into_iter().collect::<Vec<_>>(),
+            ["Teams UID"]
+        );
+    }
+
+    #[test]
+    fn toggling_a_device_excludes_it_then_includes_it_again() {
+        let mut settings = Settings::default();
+
+        assert!(
+            settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Microsoft Teams Audio")
+        );
+        assert_eq!(settings.excluded_devices, vec![teams_audio()]);
+
+        assert!(!settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Renamed"));
+        assert!(settings.excluded_devices.is_empty());
+    }
+
+    #[test]
+    fn including_a_device_removes_every_entry_with_its_uid() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{ "excluded_devices": ["Teams UID", "Steam UID", { "uid": "Teams UID", "name": "Teams" }] }"#,
+        )
+        .unwrap();
+
+        assert!(!settings.toggle_device_exclusion("Teams UID", "Teams"));
+
+        assert_eq!(
+            settings.excluded_uids().into_iter().collect::<Vec<_>>(),
+            ["Steam UID"]
+        );
+    }
+
+    #[test]
+    fn an_excluded_device_entry_of_the_wrong_type_makes_the_file_invalid() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{\n  \"excluded_devices\": [42]\n}\n");
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+        assert_eq!(err.position().map(|(line, _)| line), Some(2));
     }
 }
