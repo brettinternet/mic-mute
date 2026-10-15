@@ -12,6 +12,14 @@ const UNMUTED_DESCRIPTION: &str = "Mic on";
 const CAMERA_MUTED_DESCRIPTION: &str = "Camera off";
 const CAMERA_UNMUTED_DESCRIPTION: &str = "Camera on";
 
+/// `NSTextAlignmentCenter`, an `NSInteger` (AppKit `NSText.h`). The header picks the value with
+/// `TARGET_ABI_USES_IOS_VALUES`, which `TargetConditionals.h` defines as `!TARGET_CPU_X86_64 || …`:
+/// Apple silicon Macs use the iOS value 1 (`NSTextAlignmentRight` = 2), Intel Macs use 2
+/// (`NSTextAlignmentRight` = 1).
+const NS_TEXT_ALIGNMENT_CENTER: i64 = if cfg!(target_arch = "x86_64") { 2 } else { 1 };
+/// `NSStackViewGravityCenter = 2`, an `NSInteger` (AppKit `NSStackView.h`).
+const NS_STACK_VIEW_GRAVITY_CENTER: i64 = 2;
+
 pub fn get_mic_mute_description_text(muted: bool) -> &'static str {
     if muted {
         MUTED_DESCRIPTION
@@ -67,8 +75,7 @@ fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
         let _: () = msg_send![label, setEditable: NO];
         let _: () = msg_send![label, setDrawsBackground: NO];
         let _: () = msg_send![label, setSelectable: NO];
-        const NSALIGNMENT_CENTER: i32 = 1;
-        let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
+        let _: () = msg_send![label, setAlignment: NS_TEXT_ALIGNMENT_CENTER];
         let ns_font = class!(NSFont);
         let default_size: f64 = msg_send![ns_font, systemFontSize];
         let custom_font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size + 3.0_f64];
@@ -197,17 +204,17 @@ impl PopupContent {
         let view = unsafe {
             let stack: *mut Object = msg_send![class!(NSStackView), alloc];
             let _: () = msg_send![stack, initWithFrame: frame];
-            const GRAVITY_CENTER: i32 = 2;
-            let _: () = msg_send![stack, addView: mic_image inGravity: GRAVITY_CENTER];
+            let gravity = NS_STACK_VIEW_GRAVITY_CENTER;
+            let _: () = msg_send![stack, addView: mic_image inGravity: gravity];
             let _: () = msg_send![mic_image, release];
-            let _: () = msg_send![stack, addView: mic_label inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: mic_label inGravity: gravity];
             let _: () = msg_send![mic_label, release];
             let sep = make_separator_view(frame.size.height);
-            let _: () = msg_send![stack, addView: sep inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: sep inGravity: gravity];
             let _: () = msg_send![sep, release];
-            let _: () = msg_send![stack, addView: camera_image inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: camera_image inGravity: gravity];
             let _: () = msg_send![camera_image, release];
-            let _: () = msg_send![stack, addView: camera_label inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: camera_label inGravity: gravity];
             let _: () = msg_send![camera_label, release];
             stack
         };
