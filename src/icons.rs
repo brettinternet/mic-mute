@@ -89,3 +89,63 @@ pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u3
 
     Ok((straight, w, h))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Icons the app embeds with `include_bytes!` (`tray.rs`, `popup_content.rs`).
+    const EMBEDDED_ICONS: [&str; 4] = ["mic.svg", "mic-off.svg", "video.svg", "video-off.svg"];
+
+    fn asset_svg_paths() -> Vec<PathBuf> {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&assets)
+            .expect("assets/ should be readable")
+            .map(|entry| entry.expect("assets/ entry should be readable").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "svg"))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn every_asset_svg_rasterizes_to_visible_pixels() {
+        let paths = asset_svg_paths();
+        for icon in EMBEDDED_ICONS {
+            assert!(
+                paths.iter().any(|path| path.ends_with(icon)),
+                "assets/{icon} not found in {paths:?}"
+            );
+        }
+
+        let color = tray_icon_color(true);
+        for path in &paths {
+            let name = path.display();
+            let svg = std::fs::read(path).expect("SVG should be readable");
+            let (rgba, w, h) = rasterize_svg(&svg, &color)
+                .unwrap_or_else(|e| panic!("{name} failed to rasterize: {e:#}"));
+            assert!(w > 0 && h > 0, "{name} rasterized to {w}x{h}");
+            assert_eq!(rgba.len(), w as usize * h as usize * 4, "{name}");
+            assert!(
+                rgba.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{name} rendered no visible pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn rasterize_svg_strokes_opaque_pixels_in_the_requested_color() {
+        let color = popup_icon_color(true, Theme::Light);
+        let (rgba, _, _) =
+            rasterize_svg(include_bytes!("../assets/mic.svg"), &color).expect("mic.svg rasterizes");
+        let opaque: Vec<&[u8]> = rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] == u8::MAX)
+            .collect();
+        assert!(!opaque.is_empty(), "mic.svg has no fully covered pixels");
+        for pixel in opaque {
+            assert_eq!(pixel[..3], [color.r, color.g, color.b]);
+        }
+    }
+}

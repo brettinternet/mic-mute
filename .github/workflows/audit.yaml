@@ -1,17 +1,40 @@
 name: Audit
+
 on:
   push:
+    branches: [main]
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - deny.toml
+      - .github/workflows/audit.yaml
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - deny.toml
+      - .github/workflows/audit.yaml
+  schedule:
+    # Weekly: new advisories are published without any change to this repo.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   audit:
+    # deny.toml limits the graph to aarch64-apple-darwin, so a Linux runner
+    # checks the same crates as the macOS build.
     runs-on: ubuntu-latest
     steps:
-      - name: Check out
-        uses: actions/checkout@v3
-
-      - uses: actions-rs/audit-check@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Check advisories
+        run: cargo deny --locked check advisories
