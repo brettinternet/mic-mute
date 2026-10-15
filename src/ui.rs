@@ -6,7 +6,7 @@ use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
 use log::trace;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// Event loop must remain on the main thread and doesn't implement Copy
@@ -15,6 +15,9 @@ pub struct UI {
     tray: Tray,
     popup: Popup,
     shortcuts: Shortcuts,
+    /// The registered mute hotkey's id, shared with the event loop as
+    /// `EventIds::shortcut_mic`.
+    shortcut_mic: Arc<AtomicU32>,
     mic_muted: bool,
     camera_muted: bool,
 }
@@ -33,6 +36,8 @@ impl UI {
         let popup = Popup::new(&event_loop, mic_muted, settings.show_popup)
             .context("Failed to setup popup window")?;
         let theme = popup.get_theme();
+        let shortcuts =
+            Shortcuts::new(&settings.mic_shortcut).context("Failed to setup shortcuts")?;
         let tray = Tray::new(
             mic_muted,
             theme,
@@ -40,10 +45,9 @@ impl UI {
             settings.launch_at_login,
             settings.show_in_dock,
             settings.show_popup,
-            &settings.mic_shortcut,
         )
         .context("Failed to create system tray")?;
-        let shortcuts = Shortcuts::new(settings).context("Failed to setup shortcuts")?;
+        let shortcut_mic = Arc::new(AtomicU32::new(shortcuts.registered_id()));
 
         let event_ids = EventIds {
             button_toggle_mute: tray.toggle_mute_id().clone(),
@@ -52,16 +56,18 @@ impl UI {
             button_show_popup: tray.show_popup_id().clone(),
             button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
-            shortcut_mic: Arc::new(AtomicU32::new(shortcuts.mic_hotkey.id())),
+            shortcut_mic: shortcut_mic.clone(),
         };
 
-        let ui = Self {
+        let mut ui = Self {
             tray,
             popup,
             shortcuts,
+            shortcut_mic,
             mic_muted,
             camera_muted,
         };
+        ui.sync_shortcut();
         Ok((ui, event_loop, event_ids))
     }
 
@@ -106,11 +112,12 @@ impl UI {
     /// Apply all settings to the live app state.
     /// Safe to call whenever settings change — all operations are idempotent.
     pub fn apply_settings(&mut self, settings: &Settings) -> Result<()> {
-        // Re-register hotkeys and update tray accelerator labels
-        self.shortcuts.reload(settings)?;
-        self.tray
-            .update_accelerators(&settings.mic_shortcut)
-            .context("Failed to update tray accelerators")?;
+        // An invalid or unregistrable shortcut keeps the registered one; log it and
+        // still apply the other settings.
+        if let Err(e) = self.shortcuts.reload(&settings.mic_shortcut) {
+            log::error!("Failed to apply mic_shortcut setting: {:#}", e);
+        }
+        self.sync_shortcut();
 
         // Sync popup visibility with the persisted setting
         self.set_popup_enabled(settings.show_popup)?;
@@ -130,8 +137,21 @@ impl UI {
         Ok(())
     }
 
+    /// Hands the registered hotkey's id to the event loop and shows the shortcut in the
+    /// tray menu. Publishing the id here, not through the caller, keeps the hotkey
+    /// working even when a later step of `apply_settings` fails.
+    fn sync_shortcut(&mut self) {
+        let registered = self.shortcuts.registered();
+        self.shortcut_mic
+            .store(self.shortcuts.registered_id(), Ordering::Relaxed);
+        if let Err(e) = self.tray.update_accelerators(registered) {
+            log::warn!("Failed to update the tray menu's mute shortcut: {:#}", e);
+        }
+    }
+
+    /// The registered mute hotkey's id; 0 when no hotkey is registered.
     pub fn mic_shortcut_id(&self) -> u32 {
-        self.shortcuts.mic_hotkey.id()
+        self.shortcuts.registered_id()
     }
 
     pub fn detect(&mut self) -> Result<&mut Self> {

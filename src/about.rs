@@ -1,31 +1,37 @@
 /// About window for the app.
 /// Shows version info, shortcut configuration, and a link to the GitHub repo via a native macOS NSAlert.
 use crate::settings::{Settings, ShortcutConfig};
+use crate::shortcuts::{current_status, ShortcutStatus};
 use anyhow::Result;
 use cocoa::base::nil;
 use cocoa::foundation::NSString;
 use objc::runtime::Object;
 use std::process::Command;
 
-fn format_shortcut(config: &ShortcutConfig) -> String {
-    let mut parts = vec![];
-    for modifier in &config.modifiers {
-        match modifier.as_str() {
-            "shift" => parts.push("⇧"),
-            "meta" | "cmd" | "command" => parts.push("⌘"),
-            "ctrl" | "control" => parts.push("⌃"),
-            "alt" | "option" => parts.push("⌥"),
-            _ => {}
-        }
+/// The alert's text: the registered shortcut (and why it isn't the configured one, if it
+/// isn't), the settings path, and the version.
+fn about_text(status: &ShortcutStatus, version: &str) -> String {
+    let shortcut = status
+        .registered
+        .map_or_else(|| "none".to_string(), |shortcut| shortcut.to_string());
+    let mut text = format!("Mute shortcut: {shortcut}");
+    if let Some(problem) = &status.problem {
+        let fallback = match status.registered {
+            Some(registered) => format!("{registered} is used instead."),
+            None => "Mute from the tray menu.".to_string(),
+        };
+        text.push_str(&format!("\n\n{problem}. {fallback}"));
     }
-    parts.push(config.key.as_str());
-    parts.join("")
+    text.push_str(&format!(
+        "\n\nSettings:\n~/Library/Application Support/mic-mute/settings.json\n\nVersion: {version}\n\nSource:\ngithub.com/brettinternet/mic-mute"
+    ));
+    text
 }
 
 /// Show the About window as an NSAlert dialog.
 /// Returns Ok(true) if settings were reset to defaults, Ok(false) if dismissed.
 pub fn show_about(settings: &mut Settings) -> Result<bool> {
-    let mic_str = format_shortcut(&settings.mic_shortcut);
+    let info = about_text(&current_status(), env!("CARGO_PKG_VERSION"));
 
     let response = unsafe {
         let alert: *mut Object = msg_send![class!(NSAlert), new];
@@ -34,10 +40,6 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
         let _: () = msg_send![alert, setMessageText: title];
         let _: () = msg_send![title, release];
 
-        let version = env!("CARGO_PKG_VERSION");
-        let info = format!(
-            "Mute shortcut: {mic_str}\n\nSettings:\n~/Library/Application Support/mic-mute/settings.json\n\nVersion: {version}\n\nSource:\ngithub.com/brettinternet/mic-mute"
-        );
         let info_str = NSString::alloc(nil).init_str(&info);
         let _: () = msg_send![alert, setInformativeText: info_str];
         let _: () = msg_send![info_str, release];
@@ -72,5 +74,58 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shortcuts::{parse_shortcut, Shortcut, ShortcutProblem};
+
+    fn default_shortcut() -> Shortcut {
+        parse_shortcut(&ShortcutConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn about_text_shows_the_registered_shortcut() {
+        let status = ShortcutStatus {
+            registered: Some(default_shortcut()),
+            problem: None,
+        };
+        let text = about_text(&status, "1.2.3");
+        assert!(
+            text.starts_with("Mute shortcut: ⇧⌘M\n\nSettings:\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n\nVersion: 1.2.3\n\n"), "{text}");
+    }
+
+    #[test]
+    fn about_text_notes_an_invalid_configured_shortcut() {
+        let status = ShortcutStatus {
+            registered: Some(default_shortcut()),
+            problem: Some(ShortcutProblem::Invalid {
+                reason: "unknown modifier \"cmnd\"".to_string(),
+            }),
+        };
+        let text = about_text(&status, "1.2.3");
+        let note = "Mute shortcut: ⇧⌘M\n\nThe mic_shortcut setting is invalid: unknown \
+                    modifier \"cmnd\". ⇧⌘M is used instead.\n\nSettings:";
+        assert!(text.starts_with(note), "{text}");
+    }
+
+    #[test]
+    fn about_text_without_a_hotkey_points_to_the_tray_menu() {
+        let status = ShortcutStatus {
+            registered: None,
+            problem: Some(ShortcutProblem::NotRegistered {
+                shortcut: default_shortcut(),
+                reason: "taken".to_string(),
+            }),
+        };
+        let text = about_text(&status, "1.2.3");
+        let note = "Mute shortcut: none\n\n⇧⌘M could not be registered: taken. Mute from the \
+                    tray menu.\n\nSettings:";
+        assert!(text.starts_with(note), "{text}");
     }
 }
