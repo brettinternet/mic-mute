@@ -8,7 +8,7 @@ A system-wide mute for macOS microphones with a global shortcut and visual confi
 
 ![popup window screenshot indicating the microphone is off](./screenshot.png)
 
-Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>A</kbd> or from the system tray dropdown. See the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
+Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray dropdown. See the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
 
 ## Features
 

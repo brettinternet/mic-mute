@@ -12,7 +12,7 @@ The file is JSON. The complete default configuration is:
 {
   "mic_shortcut": {
     "modifiers": ["shift", "meta"],
-    "key": "A"
+    "key": "M"
   },
   "show_in_dock": false,
   "launch_at_login": false,
@@ -29,7 +29,9 @@ Controls the global microphone mute shortcut.
 - `modifiers`: zero or more of `shift`, `meta`/`cmd`/`command`, `ctrl`/`control`, and `alt`/`option`.
 - `key`: a key such as `A`, `M`, or `F13`.
 
-The default is `Cmd` + `Shift` + `A`.
+The default is `Cmd` + `Shift` + `M`. A settings file that already sets `mic_shortcut` keeps its shortcut.
+
+While Mic Mute runs, its shortcut works in every app, and other apps no longer receive it: `Cmd` + `Shift` + `M`, for example, no longer opens VS Code's Problems panel.
 
 ### `show_in_dock`
 

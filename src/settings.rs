@@ -10,10 +10,11 @@ pub struct ShortcutConfig {
 }
 
 impl Default for ShortcutConfig {
+    /// ⌘⇧M. Not ⌘M: that is the system-wide Minimize shortcut.
     fn default() -> Self {
         Self {
             modifiers: vec!["shift".to_string(), "meta".to_string()],
-            key: "A".to_string(),
+            key: "M".to_string(),
         }
     }
 }
@@ -86,7 +87,7 @@ mod tests {
     #[test]
     fn test_default_shortcut() {
         let sc = ShortcutConfig::default();
-        assert_eq!(sc.key, "A");
+        assert_eq!(sc.key, "M");
         assert!(sc.modifiers.contains(&"shift".to_string()));
         assert!(sc.modifiers.contains(&"meta".to_string()));
     }
@@ -115,8 +116,15 @@ mod tests {
 
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.mic_shortcut.key, "A");
+        assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(loaded.show_popup);
+
+        // A file saved while the default was ⌘⇧A keeps its shortcut.
+        let saved_before: Settings = serde_json::from_str(
+            r#"{ "mic_shortcut": { "modifiers": ["shift", "meta"], "key": "A" } }"#,
+        )
+        .unwrap();
+        assert_eq!(saved_before.mic_shortcut.key, "A");
     }
 
     #[test]
