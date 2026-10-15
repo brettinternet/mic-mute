@@ -854,8 +854,8 @@ impl<B: AudioBackend> MicController<B> {
         Ok(Some(audio_device_id))
     }
 
-    /// Sets native mute and confirms it by readback. Returns false when native mute turns out
-    /// not to be settable.
+    /// Sets native mute unless it already reads `state`, and confirms a write by readback.
+    /// Returns false when native mute turns out not to be settable.
     fn mute_native(
         &mut self,
         audio_device_id: AudioDeviceID,
@@ -863,9 +863,16 @@ impl<B: AudioBackend> MicController<B> {
         key: &DeviceKey,
         state: bool,
     ) -> Result<bool> {
-        let is_recorded = state
-            && self.backend.get_mute(audio_device_id)? == Some(false)
-            && self.journal.record_native_mute(key, name);
+        let current = self.backend.get_mute(audio_device_id)?;
+        if current == Some(state) {
+            // Nothing to write; an unmuted device has no mute of the app's left to undo.
+            if !state {
+                self.journal.clear_native_mute(key);
+            }
+            return Ok(true);
+        }
+        let is_recorded =
+            state && current == Some(false) && self.journal.record_native_mute(key, name);
         if is_recorded {
             // Journal the change before making it, so a crash can't leave it unrecorded.
             self.journal.save_logged();
@@ -889,8 +896,8 @@ impl<B: AudioBackend> MicController<B> {
         Ok(true)
     }
 
-    /// Mutes by setting input volume to 0, or unmutes by restoring a level. Returns false when
-    /// the device has no settable input volume.
+    /// Mutes by setting input volume to 0 unless it already reads 0, or unmutes by restoring a
+    /// level. Returns false when the device has no settable input volume.
     fn mute_via_volume(
         &mut self,
         audio_device_id: AudioDeviceID,
@@ -904,17 +911,19 @@ impl<B: AudioBackend> MicController<B> {
         let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
             return Ok(false);
         };
-        if !is_volume_muted(current_vol) {
-            self.levels.record(key, name, current_vol);
-            if self.journal.record_saved_volume(key, name, current_vol) {
-                trace!(
-                    "Saving volume {:.3} for device {} before muting",
-                    current_vol,
-                    audio_device_id
-                );
-                // Journal the level before changing it, so a crash can't lose it.
-                self.journal.save_logged();
-            }
+        if is_volume_muted(current_vol) {
+            // Muted already, by the app or before it ran: nothing to save or write.
+            return Ok(true);
+        }
+        self.levels.record(key, name, current_vol);
+        if self.journal.record_saved_volume(key, name, current_vol) {
+            trace!(
+                "Saving volume {:.3} for device {} before muting",
+                current_vol,
+                audio_device_id
+            );
+            // Journal the level before changing it, so a crash can't lose it.
+            self.journal.save_logged();
         }
         if self.backend.set_volume(audio_device_id, 0.0)?.is_none() {
             return Ok(false);
@@ -1246,6 +1255,8 @@ mod tests {
         /// When set, each device write records whether this journal store named the device.
         journal_probe: Option<MemoryStore>,
         journaled_at_write: Vec<(AudioDeviceID, bool)>,
+        /// The device of every mute or volume write that reached a settable control, in order.
+        writes: Vec<AudioDeviceID>,
     }
 
     impl FakeBackend {
@@ -1285,6 +1296,7 @@ mod tests {
         }
 
         fn observe_write(&mut self, id: AudioDeviceID) {
+            self.writes.push(id);
             if let Some(store) = &self.journal_probe {
                 let uid = self.devices[&id].uid.clone();
                 let is_journaled = store
@@ -1358,13 +1370,13 @@ mod tests {
             audio_device_id: AudioDeviceID,
             volume: f32,
         ) -> Result<Option<()>> {
+            if self.device(audio_device_id)?.volume.is_none() {
+                return Ok(None);
+            }
             self.observe_write(audio_device_id);
             let device = self.device_mut(audio_device_id)?;
             if device.fail_set_volume {
                 return Err(anyhow!("fake volume failure"));
-            }
-            if device.volume.is_none() {
-                return Ok(None);
             }
             if !device.ignore_set_volume {
                 device.volume = Some(volume);
@@ -1752,6 +1764,70 @@ mod tests {
         }
 
         assert_eq!(stores.journal.saves(), 2);
+    }
+
+    #[test]
+    fn mute_polls_do_not_write_to_devices_that_already_read_muted() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.writes.clear();
+
+        for _ in 0..3 {
+            controller.toggle(Some(true)).unwrap();
+        }
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn muting_devices_that_already_read_muted_writes_and_journals_nothing() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", true)),
+            (2, Device::fallback("USB Mic", 0.0)),
+        ]));
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert_eq!(stores.journal.saves(), 0);
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn unmuting_devices_that_already_read_unmuted_writes_nothing() {
+        let mut controller = controller(native_and_volume_devices());
+
+        controller.mute_all(false).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(!controller.muted);
+    }
+
+    #[test]
+    fn mute_polls_re_mute_devices_someone_else_unmuted_and_exit_restores_them() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(1).unwrap().mute = Some(false);
+        controller.backend.device_mut(2).unwrap().volume = Some(0.4);
+        controller.backend.writes.clear();
+
+        controller.toggle(Some(true)).unwrap();
+
+        assert_eq!(controller.backend.writes, vec![1, 2]);
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        let journal = stores.journal_json();
+        assert_eq!(journal["devices"]["Built-in UID"]["native_mute"], true);
+        assert_eq!(journal["devices"]["USB Mic UID"]["saved_volume"], 0.65);
+
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
     }
 
     #[test]
