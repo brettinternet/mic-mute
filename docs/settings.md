@@ -6,7 +6,7 @@ Mic Mute stores its settings at:
 ~/Library/Application Support/mic-mute/settings.json
 ```
 
-The settings file shares its folder with two files Mic Mute manages itself, neither of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (the next launch restores them after a crash), and `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume.
+The settings file shares its folder with three files Mic Mute manages itself, none of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (the next launch restores them after a crash); `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume; and `mute-state.json`, which remembers whether you last muted or unmuted, for [`launch_state`](#launch_state).
 
 The file is JSON. The complete default configuration is:
 
@@ -19,7 +19,13 @@ The file is JSON. The complete default configuration is:
   "show_in_dock": false,
   "launch_at_login": false,
   "show_popup": true,
-  "excluded_devices": []
+  "excluded_devices": [],
+  "mode": "toggle",
+  "allow_url_unmute": false,
+  "launch_state": "keep",
+  "mute_on_lock": false,
+  "mute_on_sleep": false,
+  "mute_on_display_sleep": false
 }
 ```
 
@@ -77,7 +83,53 @@ Controls the small on-screen mute-status popup.
 - `true` (default): show the popup when the microphone is muted.
 - `false`: keep the popup hidden while retaining the tray indicator.
 
-The tray menu can also toggle this setting.
+The tray menu can also toggle this setting. A `status` URL shows the popup for two seconds either way.
+
+### `mode`
+
+Controls what the mute shortcut does.
+
+- `"toggle"` (default): each press mutes or unmutes.
+- `"push_to_talk"`: holding the shortcut unmutes the microphones, and releasing it mutes them again.
+
+In push-to-talk mode the microphones rest muted:
+
+- Launching Mic Mute in this mode mutes them, and so does switching to it.
+- A release can get lost, for example when the screen locks while you hold the shortcut. So Mic Mute also mutes when the screen locks, the screen saver starts, the Mac or its displays go to sleep, or another user's session becomes active; when the shortcut changes while held; and when the mode changes back to `"toggle"` while held. To talk again after one of these, press the shortcut again.
+- The tray menu's Mute item and the URL actions work as in toggle mode. An unmute from either lasts until the next release of the shortcut, or one of the events above.
+
+Any shortcut works; one you can hold with one hand, such as `F13` without modifiers, is easiest.
+
+### `allow_url_unmute`
+
+Controls which [URL actions](../README.md#control-from-other-apps) may run.
+
+- `false` (default): only `mute` and `status` run. Mic Mute refuses `unmute` and `toggle` and logs a warning.
+- `true`: every action runs, `unmute` and `toggle` included.
+
+Any app, and any web page through the browser, can open a `com.brettinternet.mic-mute://` URL. By default a URL can therefore mute the microphones and show their state, but never unmute them. With this setting on, any app, or a web page you let open Mic Mute, can unmute them.
+
+### `launch_state`
+
+Controls whether Mic Mute mutes the microphones when it starts.
+
+- `"keep"` (default): leave them as they are. Mic Mute starts muted when every microphone is muted, and unmuted otherwise.
+- `"muted"`: mute every microphone.
+- `"last"`: mute them if you last chose mute before Mic Mute quit; otherwise leave them as they are.
+
+Mic Mute never unmutes at launch, and in push-to-talk mode it always mutes. Quitting restores the microphones Mic Mute muted, so with `"last"`, quitting while muted and starting again leaves them muted. Mic Mute remembers your last choice in `mute-state.json`, not in `settings.json`.
+
+### `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`
+
+Mute automatically when you step away. Each is `false` by default.
+
+- `mute_on_lock`: mute when the screen locks, or when fast user switching makes another user's session active.
+- `mute_on_sleep`: mute when the Mac goes to sleep.
+- `mute_on_display_sleep`: mute when the displays go to sleep.
+
+Nothing unmutes automatically: unlocking or waking the Mac leaves the microphones muted until you unmute them. In push-to-talk mode these events, and the screen saver starting, mute whatever these settings say.
+
+macOS reports no lid-close event. Closing the lid of a Mac without an external display puts it and its display to sleep, so `mute_on_sleep` or `mute_on_display_sleep` covers it, as does `mute_on_lock` when the Mac locks on sleep. In clamshell mode, with an external display keeping the Mac awake, closing the lid only turns the built-in display off: nothing reports it, and nothing mutes.
 
 ### `excluded_devices`
 

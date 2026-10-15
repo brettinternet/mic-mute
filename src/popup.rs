@@ -193,6 +193,24 @@ impl Popup {
         Ok(self)
     }
 
+    /// Shows the popup with the current state, even while it is disabled or the mic is
+    /// unmuted, until [`Self::hide_unless_pinned`]: a `status` URL asks for it.
+    pub fn show_status(&mut self) -> Result<&mut Self> {
+        self.update_placement()?;
+        self.redraw()?;
+        self.order_front();
+        Ok(self)
+    }
+
+    /// Ends the "Mic on" flash after an unmute, or a status flash: hides the popup unless it
+    /// should stay up, muted with the popup enabled.
+    pub fn hide_unless_pinned(&mut self) -> Result<&mut Self> {
+        if !should_show_popup(self.enabled, self.mic_muted) {
+            self.hide()?;
+        }
+        Ok(self)
+    }
+
     /// Enabling the popup while the mic is muted shows it at once; disabling it hides it.
     pub fn set_enabled(&mut self, enabled: bool) -> Result<&mut Self> {
         self.enabled = enabled;
@@ -218,8 +236,9 @@ impl Popup {
                 .set_outer_position(Popup::get_position(&monitor, size));
             self.current_monitor = Some(monitor);
 
+            // A visible popup stays visible on the new monitor, a status flash included.
             if was_visible {
-                self.show_front();
+                self.order_front();
             }
         }
         Ok(self)
@@ -273,10 +292,13 @@ impl Popup {
     }
 
     fn show_front(&self) {
-        if !self.enabled {
-            return;
+        if self.enabled {
+            self.order_front();
         }
+    }
 
+    /// Shows the popup in front of every window, whether or not it is enabled.
+    fn order_front(&self) {
         self.window.set_visible(true);
         unsafe {
             let ns_window = self.window.ns_window() as id;

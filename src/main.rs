@@ -6,13 +6,18 @@ mod event_loop;
 mod icons;
 mod launch_at_login;
 mod mic;
+mod mic_command;
+mod mute_triggers;
 mod popup;
 mod popup_content;
+mod push_to_talk;
+mod session_events;
 mod settings;
 mod shortcuts;
 mod store;
 mod tray;
 mod ui;
+mod url_scheme;
 mod utils;
 // TODO: Use better Apple logging support? https://lib.rs/crates/oslog
 

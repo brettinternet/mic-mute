@@ -40,10 +40,10 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// The settings after About → Reset: `mic_shortcut`, `show_in_dock`, `show_popup`, and
-/// `excluded_devices` at their defaults, so Mic Mute mutes every microphone again. Every other
-/// field is kept: `launch_at_login` mirrors the system login item, and fields this build
-/// doesn't manage must survive. List a new setting here if Reset should cover it.
+/// The settings after About → Reset: every setting this build manages at its default except
+/// `launch_at_login`, which mirrors the system login item. Resetting `excluded_devices` makes
+/// Mic Mute mute every microphone again. Fields this build doesn't manage are kept. List a new
+/// setting here if Reset should cover it.
 fn reset_settings(current: &Settings) -> Settings {
     let defaults = Settings::default();
     Settings {
@@ -51,6 +51,13 @@ fn reset_settings(current: &Settings) -> Settings {
         show_in_dock: defaults.show_in_dock,
         show_popup: defaults.show_popup,
         excluded_devices: defaults.excluded_devices,
+        // Inputs besides the tray menu.
+        mode: defaults.mode,
+        allow_url_unmute: defaults.allow_url_unmute,
+        launch_state: defaults.launch_state,
+        mute_on_lock: defaults.mute_on_lock,
+        mute_on_sleep: defaults.mute_on_sleep,
+        mute_on_display_sleep: defaults.mute_on_display_sleep,
         ..current.clone()
     }
 }
@@ -350,6 +357,12 @@ mod tests {
                 "launch_at_login": {launch_at_login},
                 "show_popup": false,
                 "excluded_devices": [{{ "uid": "Teams UID", "name": "Teams Audio" }}],
+                "mode": "push_to_talk",
+                "allow_url_unmute": true,
+                "launch_state": "last",
+                "mute_on_lock": true,
+                "mute_on_sleep": true,
+                "mute_on_display_sleep": true,
                 "future_setting": {{ "nested": [1, "two"] }}
             }}"#
         ))
@@ -367,12 +380,34 @@ mod tests {
     }
 
     #[test]
+    fn reset_restores_toggle_mode_and_turns_url_unmute_off() {
+        let reset = reset_settings(&customized_settings(true));
+        assert_eq!(reset.mode, Settings::default().mode);
+        assert!(!reset.allow_url_unmute);
+    }
+
+    #[test]
+    fn reset_turns_automatic_mute_off() {
+        let reset = reset_settings(&customized_settings(true));
+        assert_eq!(reset.launch_state, Settings::default().launch_state);
+        assert!(!reset.mute_on_lock);
+        assert!(!reset.mute_on_sleep);
+        assert!(!reset.mute_on_display_sleep);
+    }
+
+    #[test]
     fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
         let reset_fields = [
             "mic_shortcut",
             "show_in_dock",
             "show_popup",
             "excluded_devices",
+            "mode",
+            "allow_url_unmute",
+            "launch_state",
+            "mute_on_lock",
+            "mute_on_sleep",
+            "mute_on_display_sleep",
         ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);
