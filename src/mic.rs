@@ -423,8 +423,9 @@ impl AudioBackend for CoreAudioBackend {
     }
 }
 
-/// The control the app mutes a device with: native mute when it is settable, else input
-/// volume. Chosen from capabilities alone, never from device names.
+/// The control the app mutes a device with and reads its state from: native mute when it is
+/// settable, else input volume. A native mute that can be read but not set counts as absent.
+/// Chosen from capabilities alone, never from device names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MuteControl {
     Native,
@@ -479,39 +480,27 @@ fn input_device_ids<B: AudioBackend>(backend: &B) -> Result<Vec<AudioDeviceID>> 
     Ok(input_device_ids)
 }
 
+/// The device's state as `control` reads it: its native mute, or whether its input volume is
+/// at zero. `None` when the control can't be read.
 fn read_muted<B: AudioBackend>(
     backend: &B,
     audio_device_id: AudioDeviceID,
+    control: MuteControl,
 ) -> Result<Option<bool>> {
-    let name = backend.device_name(audio_device_id)?;
-    trace!(
-        "Reading mute state for device {} - {}",
-        audio_device_id,
-        name
-    );
-
-    match backend.get_mute(audio_device_id)? {
-        Some(muted) => Ok(Some(muted)),
-        None => match backend.get_volume(audio_device_id)? {
-            Some(volume) => Ok(Some(is_volume_muted(volume))),
-            None => {
-                trace!(
-                    "Audio device {} has no supported mute or input volume control",
-                    audio_device_id
-                );
-                Ok(None)
-            }
-        },
+    match control {
+        MuteControl::Native => backend.get_mute(audio_device_id),
+        MuteControl::Volume => Ok(backend.get_volume(audio_device_id)?.map(is_volume_muted)),
     }
 }
 
-fn wait_for_state<B: AudioBackend>(
+/// Reads the native mute until it shows `state`; a write can take a moment to show.
+fn wait_for_native_mute<B: AudioBackend>(
     backend: &B,
     audio_device_id: AudioDeviceID,
     state: bool,
 ) -> Result<bool> {
     for attempt in 0..5 {
-        if read_muted(backend, audio_device_id)? == Some(state) {
+        if backend.get_mute(audio_device_id)? == Some(state) {
             return Ok(true);
         }
         if attempt != 4 {
@@ -547,7 +536,7 @@ fn restore_native_mute<B: AudioBackend>(
             audio_device_id
         ));
     }
-    if !wait_for_state(backend, audio_device_id, false)? {
+    if !wait_for_native_mute(backend, audio_device_id, false)? {
         return Err(anyhow!(
             "audio device {} remained muted after native unmute",
             audio_device_id
@@ -787,8 +776,13 @@ impl<B: AudioBackend> MicController<B> {
         input_device_ids(&self.backend)
     }
 
+    /// The device's state, read from the control the app mutes it with. `None` for a device
+    /// the app leaves out.
     fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
-        read_muted(&self.backend, audio_device_id)
+        match mute_control(&self.backend, audio_device_id)? {
+            Some(control) => read_muted(&self.backend, audio_device_id, control),
+            None => Ok(None),
+        }
     }
 
     fn is_muted_all(&self) -> Result<bool> {
@@ -820,10 +814,6 @@ impl<B: AudioBackend> MicController<B> {
             }
         }
         Ok(true)
-    }
-
-    fn wait_for_device_state(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<bool> {
-        wait_for_state(&self.backend, audio_device_id, state)
     }
 
     fn mute(
@@ -874,7 +864,7 @@ impl<B: AudioBackend> MicController<B> {
         state: bool,
     ) -> Result<bool> {
         let is_recorded = state
-            && self.is_muted(audio_device_id)? == Some(false)
+            && self.backend.get_mute(audio_device_id)? == Some(false)
             && self.journal.record_native_mute(key, name);
         if is_recorded {
             // Journal the change before making it, so a crash can't leave it unrecorded.
@@ -886,7 +876,7 @@ impl<B: AudioBackend> MicController<B> {
             }
             return Ok(false);
         }
-        if !self.wait_for_device_state(audio_device_id, state)? {
+        if !wait_for_native_mute(&self.backend, audio_device_id, state)? {
             return Err(anyhow!(
                 "audio device {} did not reach requested mute state {} after native mute set",
                 audio_device_id,
@@ -1190,6 +1180,8 @@ mod tests {
         uid: String,
         input: bool,
         mute: Option<bool>,
+        /// Whether `mute` can be set; a readable native mute may still be read-only.
+        mute_settable: bool,
         volume: Option<f32>,
         fail_uid: bool,
         fail_input_channels: bool,
@@ -1206,6 +1198,7 @@ mod tests {
                 uid: uid_of(name),
                 input: true,
                 mute,
+                mute_settable: mute.is_some(),
                 volume,
                 fail_uid: false,
                 fail_input_channels: false,
@@ -1226,6 +1219,14 @@ mod tests {
 
         fn no_control(name: &str) -> Self {
             Self::new(name, None, None)
+        }
+
+        /// Reports a native mute that can be read but not set.
+        fn read_only_mute(name: &str, muted: bool, volume: Option<f32>) -> Self {
+            Self {
+                mute_settable: false,
+                ..Self::new(name, Some(muted), volume)
+            }
         }
     }
 
@@ -1320,7 +1321,8 @@ mod tests {
         }
 
         fn is_mute_settable(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
-            Ok(self.device(audio_device_id)?.mute.is_some())
+            let device = self.device(audio_device_id)?;
+            Ok(device.mute.is_some() && device.mute_settable)
         }
 
         fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
@@ -1328,6 +1330,10 @@ mod tests {
         }
 
         fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>> {
+            // Like CoreAudioBackend, which checks AudioObjectIsPropertySettable first.
+            if !self.is_mute_settable(audio_device_id)? {
+                return Ok(None);
+            }
             self.observe_write(audio_device_id);
             let device = self.device_mut(audio_device_id)?;
             if device.fail_set_mute {
@@ -1639,6 +1645,60 @@ mod tests {
 
         assert!(!controller.muted);
         assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn read_only_native_mute_is_muted_and_read_by_volume() {
+        let backend = FakeBackend::with_devices(vec![(
+            1,
+            Device::read_only_mute("Virtual Mic", false, Some(0.65)),
+        )]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        let device = controller.backend.device(1).unwrap();
+        assert_eq!(device.volume, Some(0.0));
+        assert_eq!(device.mute, Some(false));
+    }
+
+    #[test]
+    fn read_only_native_mute_without_volume_does_not_block_other_devices() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::read_only_mute("Virtual Mic", false, None)),
+            (2, Device::native("Built-in", false)),
+        ]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn only_a_read_only_native_mute_does_not_claim_muted() {
+        let backend =
+            FakeBackend::with_devices(vec![(1, Device::read_only_mute("Virtual Mic", true, None))]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(!controller.muted);
+        assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn startup_reads_a_read_only_native_mute_device_by_its_volume() {
+        let backend = FakeBackend::with_devices(vec![(
+            1,
+            Device::read_only_mute("Virtual Mic", false, Some(0.0)),
+        )]);
+
+        let controller = controller(backend);
+
+        assert!(controller.muted);
     }
 
     fn native_and_volume_devices() -> FakeBackend {
