@@ -17,6 +17,7 @@ includes:
 
 tasks:
   default:
+    desc: List the available tasks
     silent: true
     cmds:
       - task -l
@@ -37,6 +38,7 @@ tasks:
       RUST_LOG: trace
 
   debug:
+    desc: Build and run the debug binary once, with trace logging
     cmds:
       - cargo build --locked
       - '"${CARGO_TARGET_DIR:-target}/debug/mic-mute"'
@@ -45,6 +47,7 @@ tasks:
       RUST_LOG: trace
 
   check:
+    desc: Lint with clippy and check formatting
     aliases: [lint]
     cmds:
       - cargo clippy --locked --release -- -D warnings
@@ -57,10 +60,12 @@ tasks:
       - cargo fmt
 
   test:
+    desc: Run the tests
     cmds:
       - cargo test --locked
 
   build:
+    desc: Build and bundle Mic Mute.app, then show it in Finder
     cmds:
       - task: build-dependencies
       - task: build-target
@@ -76,12 +81,14 @@ tasks:
       - ./scripts/check-tool-version.sh cargo-bundle {{.CARGO_BUNDLE_VERSION}}
 
   build-target:
+    internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
       - cargo bundle --release --target {{ .TARGET }} --format osx
       - open ./target/{{ .TARGET }}/release/bundle/osx
 
   release:
+    desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
     cmds:
       - task: release-dependencies
       - cargo clean
@@ -120,5 +127,6 @@ tasks:
       TITLE: "{{ .NAME }}-{{ .VERSION }}-{{ .TARGET }}"
 
   clean:
+    desc: Delete the build artifacts (cargo clean)
     cmds:
       - cargo clean
