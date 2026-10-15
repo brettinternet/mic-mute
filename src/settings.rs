@@ -1,6 +1,8 @@
 use crate::utils::write_atomically;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,19 +53,135 @@ fn default_show_popup() -> bool {
     true
 }
 
+/// Why settings.json can't be used.
+#[derive(Debug)]
+pub enum LoadError {
+    /// The file exists but can't be read.
+    Read { path: PathBuf, source: io::Error },
+    /// The file isn't valid settings JSON: a syntax error, a value of the wrong type, or an
+    /// empty file.
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+}
+
+impl LoadError {
+    /// One-based line and column of a parse error.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Parse { source, .. } => Some((source.line(), source.column())),
+            Self::Read { .. } => None,
+        }
+    }
+
+    /// One-line notice for the tray, e.g.
+    /// `settings.json is invalid (line 3, column 5) — using defaults`.
+    pub fn notice(&self, fallback: Fallback) -> String {
+        let path = self.path();
+        let file = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        let problem = match self.position() {
+            Some((line, column)) => format!("is invalid (line {line}, column {column})"),
+            None => "can't be read".to_string(),
+        };
+        let fallback = match fallback {
+            Fallback::Defaults => "using defaults",
+            Fallback::Previous => "keeping previous settings",
+        };
+        format!("{file} {problem} — {fallback}")
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Read { path, .. } | Self::Parse { path, .. } => path,
+        }
+    }
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(f, "Failed to read {}: {}", path.display(), source)
+            }
+            Self::Parse { path, source } => write!(
+                f,
+                "{} is invalid at line {}, column {}: {}",
+                path.display(),
+                source.line(),
+                source.column(),
+                serde_message(source)
+            ),
+        }
+    }
+}
+
+// Display already includes the cause's message, so `source()` stays `None`.
+impl std::error::Error for LoadError {}
+
+/// serde_json's message without the " at line L column C" suffix its Display adds;
+/// `LoadError` reports the position itself.
+fn serde_message(err: &serde_json::Error) -> String {
+    let message = err.to_string();
+    let position = format!(" at line {} column {}", err.line(), err.column());
+    match message.strip_suffix(&position) {
+        Some(stripped) => stripped.to_string(),
+        None => message,
+    }
+}
+
+/// What the app runs on while settings.json is unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fallback {
+    /// The built-in defaults: the file was already unusable at startup.
+    Defaults,
+    /// The settings in use before the file broke.
+    Previous,
+}
+
+/// What `Settings::save` did.
+#[derive(Debug)]
+pub enum SaveOutcome {
+    /// The file now holds these settings.
+    Saved,
+    /// The file on disk is invalid, so it was left untouched. The change applies only in
+    /// memory, until the file is fixed or the app quits.
+    KeptInMemory(LoadError),
+}
+
 impl Settings {
-    pub fn load() -> Self {
-        Self::load_from_file().unwrap_or_default()
+    /// Loads settings.json. A missing file gives the defaults; an unreadable or invalid file is
+    /// an error, so callers can keep the settings they have instead of resetting them.
+    pub fn load() -> Result<Self, LoadError> {
+        match Self::config_path() {
+            Some(path) => Self::load_from(&path),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// Loads settings from `path` without ever writing it. A missing file gives the defaults.
+    pub fn load_from(path: &Path) -> Result<Self, LoadError> {
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => {
+                return Err(LoadError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        serde_json::from_slice(&data).map_err(|source| LoadError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     fn config_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
-    }
-
-    fn load_from_file() -> Option<Self> {
-        let path = Self::config_path()?;
-        let data = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
     }
 
     /// Returns the last-modified time of the settings file, or None if it doesn't exist.
@@ -73,17 +191,30 @@ impl Settings {
             .and_then(|m| m.modified().ok())
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// Saves to settings.json; see `save_to`.
+    pub fn save(&self) -> Result<SaveOutcome> {
         let path = Self::config_path().context("Failed to resolve the settings directory")?;
-        self.save_to(&path)
+        let outcome = self.save_to(&path)?;
+        if let SaveOutcome::KeptInMemory(err) = &outcome {
+            log::warn!("Keeping the settings change in memory only: {}", err);
+        }
+        Ok(outcome)
     }
 
     /// Writes these settings, unknown fields included, to `path` atomically: `<name>.tmp`
     /// first, then a rename, so a crash never leaves a half-written file.
-    pub fn save_to(&self, path: &Path) -> Result<()> {
+    ///
+    /// Never replaces an existing file that is unreadable or invalid, so a hand edit in
+    /// progress isn't lost: that writes nothing and returns `SaveOutcome::KeptInMemory`.
+    pub fn save_to(&self, path: &Path) -> Result<SaveOutcome> {
+        if let Err(err) = Self::load_from(path) {
+            return Ok(SaveOutcome::KeptInMemory(err));
+        }
         let mut data = serde_json::to_vec_pretty(self).context("Failed to serialize settings")?;
         data.push(b'\n');
-        write_atomically(path, &data).with_context(|| format!("Failed to write {}", path.display()))
+        write_atomically(path, &data)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        Ok(SaveOutcome::Saved)
     }
 }
 
@@ -364,5 +495,164 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert!(saved.show_in_dock);
         assert!(!dir.0.join("dotfiles-settings.json.tmp").exists());
+    }
+
+    /// Line 3 lacks its trailing comma; serde_json reports the next key, at line 4, column 3.
+    const MISSING_COMMA: &str =
+        "{\n  \"show_in_dock\": false,\n  \"show_popup\": true\n  \"launch_at_login\": true\n}\n";
+
+    fn write_file(dir: &TempDir, contents: &str) -> PathBuf {
+        let path = dir.settings_path();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_from_missing_file_gives_defaults() {
+        let dir = TempDir::new();
+
+        let loaded = Settings::load_from(&dir.settings_path()).unwrap();
+
+        assert!(loaded.show_popup);
+        assert!(!loaded.launch_at_login);
+        assert!(loaded.extra.is_empty());
+        assert!(
+            !dir.settings_path().exists(),
+            "loading must not create the file"
+        );
+    }
+
+    #[test]
+    fn load_from_invalid_json_reports_path_line_and_column() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+        assert_eq!(err.position(), Some((4, 3)));
+        let message = err.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.contains("line 4, column 3"), "{message}");
+        assert_eq!(
+            message.matches("line 4").count(),
+            1,
+            "position repeated: {message}"
+        );
+    }
+
+    #[test]
+    fn load_from_wrong_value_type_reports_its_position() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{\n  \"show_popup\": \"yes\"\n}\n");
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+        assert_eq!(err.position().map(|(line, _)| line), Some(2));
+        assert!(err.to_string().contains("invalid type"), "{err}");
+    }
+
+    #[test]
+    fn load_from_empty_file_is_an_error() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "");
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+    }
+
+    #[test]
+    fn load_from_unreadable_path_is_a_read_error() {
+        let dir = TempDir::new();
+        let path = dir.settings_path();
+        std::fs::create_dir(&path).unwrap();
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Read { .. }));
+        assert_eq!(err.position(), None);
+        assert_eq!(
+            err.notice(Fallback::Defaults),
+            "settings.json can't be read — using defaults"
+        );
+    }
+
+    #[test]
+    fn notice_names_the_file_position_and_fallback() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert_eq!(
+            err.notice(Fallback::Defaults),
+            "settings.json is invalid (line 4, column 3) — using defaults"
+        );
+        assert_eq!(
+            err.notice(Fallback::Previous),
+            "settings.json is invalid (line 4, column 3) — keeping previous settings"
+        );
+    }
+
+    #[test]
+    fn serde_message_drops_only_the_position_suffix() {
+        let err = serde_json::from_str::<Settings>("{\"show_popup\": tru}").unwrap_err();
+
+        let message = serde_message(&err);
+
+        assert!(!message.is_empty());
+        assert!(!message.contains(" at line "), "{message}");
+        assert!(err.to_string().starts_with(&message));
+    }
+
+    #[test]
+    fn save_to_never_replaces_an_invalid_file() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+        let settings = Settings {
+            show_in_dock: true,
+            ..Settings::default()
+        };
+
+        let outcome = settings.save_to(&path).unwrap();
+
+        assert!(matches!(
+            outcome,
+            SaveOutcome::KeptInMemory(LoadError::Parse { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MISSING_COMMA);
+        assert!(!dir.tmp_path().exists());
+    }
+
+    #[test]
+    fn save_to_never_replaces_an_empty_file() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "");
+
+        let outcome = Settings::default().save_to(&path).unwrap();
+
+        assert!(matches!(outcome, SaveOutcome::KeptInMemory(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    }
+
+    #[test]
+    fn save_to_writes_again_once_the_file_is_fixed() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+        let settings = Settings {
+            show_in_dock: true,
+            ..Settings::default()
+        };
+        assert!(matches!(
+            settings.save_to(&path).unwrap(),
+            SaveOutcome::KeptInMemory(_)
+        ));
+
+        std::fs::write(&path, "{ \"show_popup\": false }").unwrap();
+        let outcome = settings.save_to(&path).unwrap();
+
+        assert!(matches!(outcome, SaveOutcome::Saved));
+        assert!(Settings::load_from(&path).unwrap().show_in_dock);
     }
 }

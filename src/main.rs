@@ -39,14 +39,25 @@ fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
     info!("Starting app");
 
-    let mut settings = Settings::load();
+    // An invalid settings.json is never written over: run on the defaults until it's fixed.
+    let (mut settings, is_settings_file_valid) = match Settings::load() {
+        Ok(settings) => (settings, true),
+        Err(err) => {
+            log::warn!("{}; using the default settings until it's fixed", err);
+            (Settings::default(), false)
+        }
+    };
 
     // On first run (or after upgrading from a version without launch_at_login in
     // settings), adopt the existing plist state so we don't silently disable it.
     let plist_enabled = launch_at_login::is_enabled();
     if plist_enabled != settings.launch_at_login {
         settings.launch_at_login = plist_enabled;
-        let _ = settings.save();
+        if is_settings_file_valid {
+            if let Err(e) = settings.save() {
+                log::error!("Failed to save settings: {}", e);
+            }
+        }
     }
 
     let app_vars = AppVars::new();

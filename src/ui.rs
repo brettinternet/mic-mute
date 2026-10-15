@@ -140,4 +140,12 @@ impl UI {
             .context("Failed to update UI popup placement")?;
         Ok(self)
     }
+
+    /// Shows `notice` in the tray menu and tooltip while settings.json is unusable; `None`
+    /// removes it. Unlike a dialog, this never pauses mute enforcement.
+    pub fn set_settings_notice(&mut self, notice: Option<&str>) -> Result<()> {
+        self.tray
+            .set_settings_notice(notice)
+            .context("Failed to update settings notice")
+    }
 }
