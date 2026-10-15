@@ -33,6 +33,10 @@ use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Signals that end the app; the watcher thread restores the microphones before exiting.
+const SHUTDOWN_SIGNALS: [libc::c_int; 4] =
+    [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
+
 extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
@@ -76,17 +80,18 @@ fn main() {
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
-    // Register SIGTERM/SIGINT handlers. The signal handler only sets a flag;
+    // Register the shutdown signal handlers. The signal handler only sets a flag;
     // a background thread performs microphone cleanup before exiting.
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            handle_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGINT,
-            handle_signal as *const () as libc::sighandler_t,
-        );
+    for signal in SHUTDOWN_SIGNALS {
+        let previous =
+            unsafe { libc::signal(signal, handle_signal as *const () as libc::sighandler_t) };
+        if previous == libc::SIG_ERR {
+            log::error!(
+                "Failed to handle signal {}: {}",
+                signal,
+                std::io::Error::last_os_error()
+            );
+        }
     }
     let shutdown_controller = controller.clone();
     std::thread::spawn(move || loop {
