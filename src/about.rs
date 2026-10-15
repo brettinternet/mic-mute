@@ -52,6 +52,10 @@ fn reset_settings(current: &Settings) -> Settings {
         // Inputs besides the tray menu.
         mode: defaults.mode,
         allow_url_unmute: defaults.allow_url_unmute,
+        launch_state: defaults.launch_state,
+        mute_on_lock: defaults.mute_on_lock,
+        mute_on_sleep: defaults.mute_on_sleep,
+        mute_on_display_sleep: defaults.mute_on_display_sleep,
         ..current.clone()
     }
 }
@@ -352,6 +356,10 @@ mod tests {
                 "show_popup": false,
                 "mode": "push_to_talk",
                 "allow_url_unmute": true,
+                "launch_state": "last",
+                "mute_on_lock": true,
+                "mute_on_sleep": true,
+                "mute_on_display_sleep": true,
                 "excluded_devices": ["Teams Audio"]
             }}"#
         ))
@@ -375,6 +383,15 @@ mod tests {
     }
 
     #[test]
+    fn reset_turns_automatic_mute_off() {
+        let reset = reset_settings(&customized_settings(true));
+        assert_eq!(reset.launch_state, Settings::default().launch_state);
+        assert!(!reset.mute_on_lock);
+        assert!(!reset.mute_on_sleep);
+        assert!(!reset.mute_on_display_sleep);
+    }
+
+    #[test]
     fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
         let reset_fields = [
             "mic_shortcut",
@@ -382,6 +399,10 @@ mod tests {
             "show_popup",
             "mode",
             "allow_url_unmute",
+            "launch_state",
+            "mute_on_lock",
+            "mute_on_sleep",
+            "mute_on_display_sleep",
         ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);

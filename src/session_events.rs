@@ -1,5 +1,6 @@
-//! macOS session events that can swallow a held shortcut's release: the screen locking, the
-//! screen saver starting, the Mac or its displays going to sleep, and a switch to another user.
+//! macOS session events: the screen locking, the screen saver starting, the Mac or its displays
+//! going to sleep, and a switch to another user. Each can swallow a held push-to-talk
+//! shortcut's release, and the `mute_on_*` settings mute on them (`mute_triggers.rs`).
 //!
 //! An observer, an instance of a class declared with `ClassDecl`, receives them from
 //! NSWorkspace's notification center and from the distributed notification center

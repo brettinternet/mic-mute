@@ -4,9 +4,11 @@ use crate::config::AppVars;
 use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::mic_command::MicCommand;
-use crate::push_to_talk::{self, PushToTalk};
+use crate::mute_triggers::{self, LastMuteState, MUTE_STATE_FILE_NAME};
+use crate::push_to_talk::PushToTalk;
 use crate::session_events::SessionEvents;
 use crate::settings::Settings;
+use crate::store;
 use crate::ui::UI;
 use crate::url_scheme::{UrlAction, UrlActions};
 use anyhow::Result;
@@ -110,13 +112,18 @@ fn update_mic(
     request.is_some() && !controller.muted
 }
 
-/// Runs a change the user asked for. Returns when to hide the popup: a moment after an unmute.
+/// Runs a change the user asked for, and records the resulting intent for
+/// `launch_state: "last"`. Returns when to hide the popup: a moment after an unmute.
 fn request_mic(
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
+    last_state: &mut LastMuteState,
     command: MicCommand,
 ) -> Option<Instant> {
-    update_mic(ui, controller, Some(command)).then(|| Instant::now() + HIDE_POPUP_DELAY)
+    let has_unmuted = update_mic(ui, controller, Some(command));
+    let intent = controller.read().should_enforce_mute();
+    last_state.record(intent);
+    has_unmuted.then(|| Instant::now() + HIDE_POPUP_DELAY)
 }
 
 /// Keeps the popup up until the later of `hide_at` and `until`; `None` sorts before every
@@ -131,6 +138,7 @@ fn run_url_action(
     action: UrlAction,
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
+    last_state: &mut LastMuteState,
     allow_url_unmute: bool,
 ) -> Option<Instant> {
     if !action.is_allowed(allow_url_unmute) {
@@ -154,7 +162,7 @@ fn run_url_action(
         return Some(Instant::now() + STATUS_POPUP_DURATION);
     };
     log::info!("Running the {} URL action", action.name());
-    request_mic(ui, controller, command)
+    request_mic(ui, controller, last_state, command)
 }
 
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
@@ -178,8 +186,11 @@ pub fn start(
     let mut url_actions = UrlActions::default();
     // The shortcut's hold in push_to_talk mode.
     let mut push_to_talk = PushToTalk::default();
-    // Screen lock and sleep, watched from Init on; they end a push-to-talk hold.
+    // Screen lock and sleep, watched from Init on: they end a push-to-talk hold, and the
+    // mute_on_* settings mute on them.
     let mut session_events: Option<SessionEvents> = None;
+    // The mute state the user last chose, for `launch_state: "last"`.
+    let mut last_state = LastMuteState::load(store::state_file(MUTE_STATE_FILE_NAME));
 
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
@@ -261,8 +272,8 @@ pub fn start(
             match SessionEvents::new() {
                 Ok(events) => session_events = Some(events),
                 Err(err) => log::error!(
-                    "Failed to watch for screen lock and sleep, which end a push-to-talk hold: \
-                     {:#}",
+                    "Failed to watch for screen lock and sleep, which end a push-to-talk hold \
+                     and drive the mute_on_* settings: {:#}",
                     err
                 ),
             }
@@ -271,10 +282,16 @@ pub fn start(
         let Some((ui, event_ids)) = &ui_and_ids else {
             return;
         };
-        // Push-to-talk rests muted, so a launch in that mode mutes.
-        if is_launching && push_to_talk::mutes_at_launch(settings.read().mode) {
-            log::info!("Muting at launch: the shortcut is in push_to_talk mode");
-            request_mic(ui, &controller, MicCommand::Mute);
+        // Push-to-talk and `launch_state` can mute at launch; nothing unmutes.
+        if is_launching {
+            let reason = mute_triggers::launch_mute_reason(&settings.read(), last_state.muted());
+            if let Some(reason) = reason {
+                log::info!("Muting at launch: {}", reason);
+                request_mic(ui, &controller, &mut last_state, MicCommand::Mute);
+            }
+            // Without a mute, the intent adopted from the hardware is the latest state.
+            let intent = controller.read().should_enforce_mute();
+            last_state.record(intent);
         }
         let EventIds {
             button_toggle_mute,
@@ -304,7 +321,7 @@ pub fn start(
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
-                let hide_at = request_mic(ui, &controller, MicCommand::Toggle);
+                let hide_at = request_mic(ui, &controller, &mut last_state, MicCommand::Toggle);
                 keep_popup_until(&mut hide_popup_at, hide_at);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
@@ -383,7 +400,7 @@ pub fn start(
                 );
                 if let Some(command) = mute {
                     log::info!("Muting: the reset changed the shortcut's mode or hotkey");
-                    request_mic(ui, &controller, command);
+                    request_mic(ui, &controller, &mut last_state, command);
                 }
             }
         }
@@ -401,7 +418,7 @@ pub fn start(
                     mode,
                     command
                 );
-                let hide_at = request_mic(ui, &controller, command);
+                let hide_at = request_mic(ui, &controller, &mut last_state, command);
                 keep_popup_until(&mut hide_popup_at, hide_at);
             }
         }
@@ -409,19 +426,28 @@ pub fn start(
         // URL actions, including any that arrived before the UI existed.
         while let Some(action) = url_actions.pop() {
             let allow_url_unmute = settings.read().allow_url_unmute;
-            let hide_at = run_url_action(action, ui, &controller, allow_url_unmute);
+            let hide_at =
+                run_url_action(action, ui, &controller, &mut last_state, allow_url_unmute);
             keep_popup_until(&mut hide_popup_at, hide_at);
         }
 
-        // After the shortcut and URLs, so a mute here wins. Each event can swallow a held
-        // shortcut's release, so in push_to_talk mode it mutes.
+        // After the shortcut and URLs, so a mute here wins. In push_to_talk mode every event
+        // mutes, since it can swallow a held shortcut's release; in toggle mode, the mute_on_*
+        // settings choose. Nothing unmutes on unlock or wake.
         let received = session_events.as_ref().map(SessionEvents::take);
         for event in received.unwrap_or_default() {
-            let mode = settings.read().mode;
-            match push_to_talk.interrupt(mode) {
-                Some(command) => {
-                    log::info!("{}: muting for push to talk", event.description());
-                    request_mic(ui, &controller, command);
+            let (mode, trigger) = {
+                let settings = settings.read();
+                (settings.mode, mute_triggers::trigger_for(event, &settings))
+            };
+            let reason = match push_to_talk.interrupt(mode) {
+                Some(_) => Some("push to talk"),
+                None => trigger,
+            };
+            match reason {
+                Some(reason) => {
+                    log::info!("{}: muting ({})", event.description(), reason);
+                    request_mic(ui, &controller, &mut last_state, MicCommand::Mute);
                 }
                 None => trace!("{}", event.description()),
             }
@@ -474,7 +500,7 @@ pub fn start(
                                 log::info!(
                                     "Muting: settings.json changed the shortcut's mode or hotkey"
                                 );
-                                request_mic(ui, &controller, command);
+                                request_mic(ui, &controller, &mut last_state, command);
                             }
                             None
                         }

@@ -34,8 +34,8 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
-    // Inputs besides the tray menu: the shortcut's mode (`push_to_talk`) and URLs
-    // (`url_scheme`).
+    // Inputs besides the tray menu: the shortcut's mode (`push_to_talk`), URLs (`url_scheme`),
+    // and automatic mute (`mute_triggers`), which never unmutes.
     /// What the mute shortcut does: toggle, or unmute only while held.
     #[serde(default)]
     pub mode: ShortcutMode,
@@ -43,6 +43,18 @@ pub struct Settings {
     /// a URL, so by default URLs can only mute and show the state.
     #[serde(default)]
     pub allow_url_unmute: bool,
+    /// Whether a launch mutes: never, always, or when the user last chose mute.
+    #[serde(default)]
+    pub launch_state: LaunchState,
+    /// Mute when the screen locks or another user's session becomes active.
+    #[serde(default)]
+    pub mute_on_lock: bool,
+    /// Mute when the Mac goes to sleep.
+    #[serde(default)]
+    pub mute_on_sleep: bool,
+    /// Mute when the displays go to sleep.
+    #[serde(default)]
+    pub mute_on_display_sleep: bool,
     /// Fields this version doesn't know (written by a newer version or a fork), saved back
     /// unchanged. Empty when the file has none, as in `impl Default`.
     #[serde(flatten)]
@@ -59,6 +71,10 @@ impl Default for Settings {
             // Inputs besides the tray menu.
             mode: ShortcutMode::Toggle,
             allow_url_unmute: false,
+            launch_state: LaunchState::Keep,
+            mute_on_lock: false,
+            mute_on_sleep: false,
+            mute_on_display_sleep: false,
             extra: serde_json::Map::new(),
         }
     }
@@ -79,6 +95,19 @@ pub enum ShortcutMode {
     Toggle,
     /// Holding the shortcut unmutes; releasing it mutes again.
     PushToTalk,
+}
+
+/// What a launch does with the microphones (`launch_state`). None of the choices unmutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchState {
+    /// Leave them as they are: muted when every microphone is muted.
+    #[default]
+    Keep,
+    /// Mute every microphone.
+    Muted,
+    /// Mute if the user last chose mute (`mute-state.json`); otherwise like `Keep`.
+    Last,
 }
 
 /// Why settings.json can't be used.
@@ -355,6 +384,10 @@ mod tests {
             show_popup: false,
             mode: ShortcutMode::PushToTalk,
             allow_url_unmute: true,
+            launch_state: LaunchState::Last,
+            mute_on_lock: true,
+            mute_on_sleep: true,
+            mute_on_display_sleep: true,
             extra: serde_json::Map::new(),
         };
 
@@ -367,6 +400,8 @@ mod tests {
         assert!(!loaded.show_popup);
         assert_eq!(loaded.mode, ShortcutMode::PushToTalk);
         assert!(loaded.allow_url_unmute);
+        assert_eq!(loaded.launch_state, LaunchState::Last);
+        assert!(loaded.mute_on_lock && loaded.mute_on_sleep && loaded.mute_on_display_sleep);
 
         let _ = fs::remove_file(&tmp_path);
     }
@@ -434,6 +469,10 @@ mod tests {
             "show_popup",
             "mode",
             "allow_url_unmute",
+            "launch_state",
+            "mute_on_lock",
+            "mute_on_sleep",
+            "mute_on_display_sleep",
         ] {
             assert!(
                 !loaded.extra.contains_key(known),
@@ -467,8 +506,12 @@ mod tests {
             [
                 "allow_url_unmute",
                 "launch_at_login",
+                "launch_state",
                 "mic_shortcut",
                 "mode",
+                "mute_on_display_sleep",
+                "mute_on_lock",
+                "mute_on_sleep",
                 "show_in_dock",
                 "show_popup"
             ]
@@ -820,6 +863,52 @@ mod tests {
     fn an_unknown_mode_makes_the_file_invalid() {
         let dir = TempDir::new();
         let path = write_file(&dir, "{\n  \"mode\": \"hold\"\n}\n");
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+        assert_eq!(err.position().map(|(line, _)| line), Some(2));
+    }
+
+    #[test]
+    fn automatic_mute_is_off_by_default_and_when_missing() {
+        let loaded: Settings = serde_json::from_str(r#"{ "show_popup": false }"#).unwrap();
+        for settings in [Settings::default(), loaded] {
+            assert_eq!(settings.launch_state, LaunchState::Keep);
+            assert!(!settings.mute_on_lock);
+            assert!(!settings.mute_on_sleep);
+            assert!(!settings.mute_on_display_sleep);
+        }
+    }
+
+    #[test]
+    fn automatic_mute_settings_round_trip() {
+        for (launch_state, text) in [
+            (LaunchState::Keep, "keep"),
+            (LaunchState::Muted, "muted"),
+            (LaunchState::Last, "last"),
+        ] {
+            let settings = Settings {
+                launch_state,
+                mute_on_lock: true,
+                mute_on_sleep: false,
+                mute_on_display_sleep: true,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["launch_state"], serde_json::json!(text));
+            let loaded: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(loaded.launch_state, launch_state);
+            assert!(loaded.mute_on_lock);
+            assert!(!loaded.mute_on_sleep);
+            assert!(loaded.mute_on_display_sleep);
+        }
+    }
+
+    #[test]
+    fn an_unknown_launch_state_makes_the_file_invalid() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{\n  \"launch_state\": \"unmuted\"\n}\n");
 
         let err = Settings::load_from(&path).unwrap_err();
 
