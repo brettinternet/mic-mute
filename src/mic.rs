@@ -33,6 +33,8 @@ const UNMUTE_FALLBACK_VOLUME: f32 = 0.5;
 const NATIVE_READBACK_ATTEMPTS: u32 = 5;
 /// How often a device whose accepted writes never take effect is written to again.
 const IGNORED_WRITES_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// Identical repeats of a failure stay at `trace!` this long before an `error!` counts them.
+const FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
     0x766d7663; // 'vmvc'
 
@@ -724,9 +726,117 @@ pub fn restore_from_journal_file() {
     journal.save_logged();
 }
 
+/// Logs an operation that can fail on every poll without flooding the log: the first failure
+/// at `error!`, identical repeats at `trace!` for [`FAILURE_REPORT_INTERVAL`], then one
+/// `error!` with their count, and `info!` once the operation succeeds again.
+pub struct FailureLog {
+    /// Starts every failure line, e.g. "Failed to update microphone mute state".
+    failure_text: &'static str,
+    /// The line for the first success after failures.
+    recovery_text: &'static str,
+    streak: Option<FailureStreak>,
+}
+
+/// The failures since the last success.
+struct FailureStreak {
+    message: String,
+    /// When `message` was last logged at `error!`.
+    reported_at: Instant,
+    /// Identical failures since then, logged at `trace!`.
+    unreported: u32,
+    /// Every failure since the last success.
+    failures: u32,
+}
+
+/// What [`FailureLog`] logs for one failure.
+#[derive(Debug, PartialEq, Eq)]
+enum FailureReport {
+    /// `error!`: a failure unlike the one before.
+    New,
+    /// `error!`: an identical failure after the quiet period, with the identical failures
+    /// since the last report, this one included.
+    Repeated { count: u32, since: Duration },
+    /// `trace!`: an identical failure inside the quiet period.
+    Suppressed,
+}
+
+impl FailureLog {
+    pub fn new(failure_text: &'static str, recovery_text: &'static str) -> Self {
+        Self {
+            failure_text,
+            recovery_text,
+            streak: None,
+        }
+    }
+
+    /// Logs a failure that happened at `now`.
+    pub fn report(&mut self, err: &anyhow::Error, now: Instant) {
+        let message = format!("{:#}", err);
+        match self.record_failure(&message, now) {
+            FailureReport::New => error!("{}: {}", self.failure_text, message),
+            FailureReport::Repeated { count, since } => error!(
+                "{}: {} (repeated {} times in the last {} s)",
+                self.failure_text,
+                message,
+                count,
+                since.as_secs()
+            ),
+            FailureReport::Suppressed => trace!("{} again: {}", self.failure_text, message),
+        }
+    }
+
+    /// Notes a success, and logs the recovery when it ends a run of failures.
+    pub fn clear(&mut self) {
+        if let Some(failures) = self.record_success() {
+            info!(
+                "{} after {} failed attempt(s)",
+                self.recovery_text, failures
+            );
+        }
+    }
+
+    fn record_failure(&mut self, message: &str, now: Instant) -> FailureReport {
+        let failures = self
+            .streak
+            .as_ref()
+            .map_or(0, |streak| streak.failures)
+            .saturating_add(1);
+        if let Some(streak) = self
+            .streak
+            .as_mut()
+            .filter(|streak| streak.message == message)
+        {
+            streak.failures = failures;
+            let since = now.saturating_duration_since(streak.reported_at);
+            if since < FAILURE_REPORT_INTERVAL {
+                streak.unreported = streak.unreported.saturating_add(1);
+                return FailureReport::Suppressed;
+            }
+            let count = streak.unreported.saturating_add(1);
+            streak.reported_at = now;
+            streak.unreported = 0;
+            return FailureReport::Repeated { count, since };
+        }
+        self.streak = Some(FailureStreak {
+            message: message.to_string(),
+            reported_at: now,
+            unreported: 0,
+            failures,
+        });
+        FailureReport::New
+    }
+
+    /// Ends a run of failures; returns how many there were.
+    fn record_success(&mut self) -> Option<u32> {
+        self.streak.take().map(|streak| streak.failures)
+    }
+}
+
 pub struct MicController<B = CoreAudioBackend> {
     pub muted: bool,
     desired_muted: bool,
+    /// Rate-limits the log of failed updates; the event loop reports each `toggle` outcome.
+    pub update_failures: FailureLog,
     /// What the app changed per device and must undo, keyed by device UID and mirrored to
     /// `restore.json`.
     journal: RestoreJournal,
@@ -768,6 +878,10 @@ impl<B: AudioBackend> MicController<B> {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
+            update_failures: FailureLog::new(
+                "Failed to update microphone mute state",
+                "Microphone mute state updates work again",
+            ),
             journal,
             levels,
             connected_journaled: HashSet::new(),
@@ -1252,9 +1366,14 @@ impl<B: AudioBackend> MicController<B> {
                 Ok(Some(_)) => trace!("Successfully {} audio device {}: {}", end_state, id, name),
                 Ok(None) => trace!("Skipped audio device {}: {}", id, name),
                 Err(err) => {
-                    error!(
+                    // The combined error below carries this failure, and the event loop logs
+                    // it through `update_failures`; per poll, this line is detail.
+                    trace!(
                         "Failed to {} audio device {}: {}: {}",
-                        action, id, name, err
+                        action,
+                        id,
+                        name,
+                        err
                     );
                     failures.push(format!("{} ({})", name, err));
                 }
@@ -1974,6 +2093,94 @@ mod tests {
             (1, Device::native("Built-in", false)),
             (2, Device::ignoring_writes("Teams Audio")),
         ])
+    }
+
+    fn failure_log() -> FailureLog {
+        FailureLog::new("Failed to test", "Tests work again")
+    }
+
+    #[test]
+    fn failure_log_reports_a_new_failure_at_once() {
+        let mut log = failure_log();
+
+        assert_eq!(
+            log.record_failure("boom", Instant::now()),
+            FailureReport::New
+        );
+    }
+
+    #[test]
+    fn failure_log_suppresses_identical_repeats_then_reports_their_count() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        log.record_failure("boom", start);
+        let mut poll = start;
+        for _ in 0..299 {
+            poll += Duration::from_millis(200);
+            assert_eq!(log.record_failure("boom", poll), FailureReport::Suppressed);
+        }
+
+        let report_at = start + FAILURE_REPORT_INTERVAL;
+        assert_eq!(
+            log.record_failure("boom", report_at),
+            FailureReport::Repeated {
+                count: 300,
+                since: FAILURE_REPORT_INTERVAL
+            }
+        );
+        // The quiet period starts over.
+        assert_eq!(
+            log.record_failure("boom", report_at + Duration::from_secs(1)),
+            FailureReport::Suppressed
+        );
+    }
+
+    #[test]
+    fn failure_log_reports_a_different_failure_at_once() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        log.record_failure("boom", start);
+
+        assert_eq!(
+            log.record_failure("bang", start + Duration::from_secs(1)),
+            FailureReport::New
+        );
+        assert_eq!(
+            log.record_failure("bang", start + Duration::from_secs(2)),
+            FailureReport::Suppressed
+        );
+    }
+
+    #[test]
+    fn failure_log_ends_a_run_of_failures_once_with_its_count() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        assert_eq!(log.record_success(), None);
+        log.record_failure("boom", start);
+        log.record_failure("boom", start + Duration::from_secs(1));
+        log.record_failure("bang", start + Duration::from_secs(2));
+
+        assert_eq!(log.record_success(), Some(3));
+        assert_eq!(log.record_success(), None);
+        assert_eq!(
+            log.record_failure("boom", start + Duration::from_secs(3)),
+            FailureReport::New
+        );
+    }
+
+    #[test]
+    fn failure_log_report_and_clear_drive_the_same_run_of_failures() {
+        let start = Instant::now();
+        let mut log = failure_log();
+
+        log.report(&anyhow!("boom"), start);
+        assert_eq!(
+            log.record_failure("boom", start + Duration::from_secs(1)),
+            FailureReport::Suppressed
+        );
+        log.clear();
+
+        assert_eq!(log.record_success(), None);
     }
 
     #[test]
