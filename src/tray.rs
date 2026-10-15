@@ -1,5 +1,5 @@
 use crate::config::AppVars;
-use crate::icons::{rasterize_svg, tray_icon_color};
+use crate::icons;
 use crate::shortcuts::Shortcut;
 use anyhow::{Context, Result};
 use log::trace;
@@ -20,18 +20,11 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-fn get_image(muted: bool, _theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
-    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
-    let svg = if muted { MIC_OFF } else { MIC_ON };
-    rasterize_svg(svg, &tray_icon_color(muted))
-}
-
-fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
-    trace!("Fetching icons");
-    let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
-    let icon =
-        Icon::from_rgba(icon_rgba, icon_width, icon_height).context("Failed to open icon")?;
+/// The tray icon for `muted`, built from the cached render; the theme doesn't change it yet.
+fn get_icon(muted: bool, _theme: Theme) -> Result<Icon> {
+    let rendered = icons::tray_mic(muted).rendered()?;
+    let icon = Icon::from_rgba(rendered.rgba.clone(), rendered.width, rendered.height)
+        .context("Failed to open icon")?;
     Ok(icon)
 }
 

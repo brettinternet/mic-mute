@@ -1,5 +1,5 @@
-use crate::icons::{popup_icon_color, rasterize_svg};
-use anyhow::{Context, Result};
+use crate::icons::{self, RenderedIcon};
+use anyhow::Result;
 use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
@@ -84,46 +84,32 @@ fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     }
 }
 
-/// Rasterizes an SVG and returns PNG-encoded bytes plus source dimensions.
-/// Uses the same NSData→NSImage path as the previous PNG-based approach.
-fn svg_to_png(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    let color = popup_icon_color(muted, theme);
-    let (rgba, w, h) = rasterize_svg(svg_bytes, &color)?;
-    let img = image::RgbaImage::from_raw(w, h, rgba).context("Failed to create RgbaImage")?;
-    let mut png = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .context("Failed to encode PNG")?;
-    Ok((png, w, h))
-}
-
-fn svg_to_ns_image(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<id> {
-    let (png, w, h) = svg_to_png(svg_bytes, muted, theme)?;
+/// A new `NSImage` of `icon`'s cached PNG, 16 pt tall; the caller owns it (+1) and releases it.
+fn ns_image(icon: &RenderedIcon) -> id {
     const ICON_HEIGHT: f64 = 16.;
-    let icon_width = (w as f64) / (h as f64 / ICON_HEIGHT);
-    let ns_image = unsafe {
+    let icon_width = f64::from(icon.width) / (f64::from(icon.height) / ICON_HEIGHT);
+    unsafe {
         let nsdata = NSData::dataWithBytes_length_(
             nil,
-            png.as_ptr() as *const std::os::raw::c_void,
-            png.len() as u64,
+            icon.png.as_ptr() as *const std::os::raw::c_void,
+            icon.png.len() as u64,
         );
         let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
         let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, ICON_HEIGHT)];
         let _: () = msg_send![ns_image, setTemplate: NO];
         ns_image
-    };
-    Ok(ns_image)
+    }
 }
 
 fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
-    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
-    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
-    svg_to_ns_image(if muted { MIC_OFF } else { MIC_ON }, muted, theme)
+    let icon = icons::popup_mic(muted, theme).rendered()?;
+    Ok(ns_image(&icon))
 }
 
+/// `muted` is `CameraController::muted`: `true` while no camera is in use.
 fn get_camera_image(muted: bool, theme: Theme) -> Result<id> {
-    const VIDEO_ON: &[u8] = include_bytes!("../assets/video.svg");
-    const VIDEO_OFF: &[u8] = include_bytes!("../assets/video-off.svg");
-    svg_to_ns_image(if muted { VIDEO_OFF } else { VIDEO_ON }, muted, theme)
+    let icon = icons::popup_camera(!muted, theme).rendered()?;
+    Ok(ns_image(&icon))
 }
 
 fn make_image_view(image: id, frame: NSRect) -> id {
@@ -271,33 +257,5 @@ mod tests {
     #[test]
     fn test_mic_mute_description_unmuted() {
         assert_eq!(get_mic_mute_description_text(false), "Mic on");
-    }
-
-    #[test]
-    fn svg_to_png_encodes_every_popup_icon_as_a_decodable_png() {
-        const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
-        let icons: [(&str, &[u8]); 4] = [
-            ("mic.svg", include_bytes!("../assets/mic.svg")),
-            ("mic-off.svg", include_bytes!("../assets/mic-off.svg")),
-            ("video.svg", include_bytes!("../assets/video.svg")),
-            ("video-off.svg", include_bytes!("../assets/video-off.svg")),
-        ];
-        for (name, svg) in icons {
-            for theme in [Theme::Light, Theme::Dark] {
-                for muted in [true, false] {
-                    let case = format!("{name} (muted: {muted}, theme: {theme:?})");
-                    let (png, w, h) = svg_to_png(svg, muted, theme)
-                        .unwrap_or_else(|e| panic!("{case} failed to encode: {e:#}"));
-                    assert!(
-                        png.starts_with(PNG_SIGNATURE),
-                        "{case} lacks the PNG signature"
-                    );
-                    let decoded =
-                        image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-                            .unwrap_or_else(|e| panic!("{case} is not a valid PNG: {e}"));
-                    assert_eq!((decoded.width(), decoded.height()), (w, h), "{case}");
-                }
-            }
-        }
     }
 }
