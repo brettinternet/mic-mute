@@ -1545,9 +1545,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-std",
- "block",
  "cocoa",
- "core-foundation-sys",
  "coreaudio-rs",
  "dirs",
  "env_logger",
