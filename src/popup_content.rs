@@ -4,6 +4,7 @@ use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
+use std::sync::Arc;
 use tao::dpi::LogicalSize;
 use tao::window::Theme;
 
@@ -63,14 +64,19 @@ fn get_text_color(muted: bool, theme: Theme) -> id {
     }
 }
 
+/// Sets `label`'s text and color.
+unsafe fn set_label(label: id, text: &str, color: id) {
+    let text = NSString::alloc(nil).init_str(text);
+    label.setStringValue_(text);
+    let _: () = msg_send![text, release];
+    let _: () = msg_send![label, setTextColor: color];
+}
+
 fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
         let label: id = msg_send![label, initWithFrame: frame];
-        let label_str = NSString::alloc(nil).init_str(text);
-        label.setStringValue_(label_str);
-        let _: () = msg_send![label_str, release];
-        let _: () = msg_send![label, setTextColor: color];
+        set_label(label, text, color);
         let _: () = msg_send![label, setBezeled: NO];
         let _: () = msg_send![label, setEditable: NO];
         let _: () = msg_send![label, setDrawsBackground: NO];
@@ -101,24 +107,27 @@ fn ns_image(icon: &RenderedIcon) -> id {
     }
 }
 
-fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
-    let icon = icons::popup_mic(muted, theme).rendered()?;
-    Ok(ns_image(&icon))
+/// Shows `icon` in `image_view`, which then holds the only reference to the new `NSImage`.
+unsafe fn set_image(image_view: id, icon: &RenderedIcon) {
+    let image = ns_image(icon);
+    image_view.setImage_(image);
+    let _: () = msg_send![image, release];
 }
 
-/// `muted` is `CameraController::muted`: `true` while no camera is in use.
-fn get_camera_image(muted: bool, theme: Theme) -> Result<id> {
-    let icon = icons::popup_camera(!muted, theme).rendered()?;
-    Ok(ns_image(&icon))
-}
-
-fn make_image_view(image: id, frame: NSRect) -> id {
+fn make_image_view(icon: &RenderedIcon, frame: NSRect) -> id {
     unsafe {
         let view = NSImageView::alloc(nil);
         let view: id = msg_send![view, initWithFrame: frame];
-        view.setImage_(image);
+        set_image(view, icon);
         view
     }
+}
+
+/// The mic and camera icons for `state`, from the process-wide cache.
+fn icons_for(state: PopupState) -> Result<(Arc<RenderedIcon>, Arc<RenderedIcon>)> {
+    let mic = icons::popup_mic(state.mic_muted, state.theme).rendered()?;
+    let camera = icons::popup_camera(state.camera_in_use, state.theme).rendered()?;
+    Ok((mic, camera))
 }
 
 /// 1pt-wide vertical separator. Explicit size constraints tell the gravity-based
@@ -150,6 +159,15 @@ unsafe fn make_separator_view(line_height: f64) -> id {
     sep
 }
 
+/// What the popup content shows; `Popup` redraws it only when this changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupState {
+    pub mic_muted: bool,
+    pub camera_in_use: bool,
+    pub theme: Theme,
+}
+
+/// Non-owning ids: the stack view `view` (owned by the window's content view) retains the rest.
 #[derive(Copy, Clone)]
 pub struct PopupContent {
     mic_label: id,
@@ -160,32 +178,22 @@ pub struct PopupContent {
 }
 
 impl PopupContent {
-    pub fn new(
-        mic_muted: bool,
-        camera_muted: bool,
-        size: LogicalSize<f64>,
-        theme: Theme,
-    ) -> Result<Self> {
+    pub fn new(state: PopupState, size: LogicalSize<f64>) -> Result<Self> {
+        // Fetch the icons before allocating any view, so an error leaks none.
+        let (mic_icon, camera_icon) = icons_for(state)?;
         let frame = get_frame_rect(size);
 
         let mic_label = get_textfield(
-            get_mic_mute_description_text(mic_muted),
-            get_text_color(mic_muted, theme),
+            get_mic_mute_description_text(state.mic_muted),
+            get_text_color(state.mic_muted, state.theme),
             frame,
         );
-        let mic_ns_image = get_mic_image(mic_muted, theme)?;
-        let mic_image = make_image_view(mic_ns_image, frame);
-        unsafe {
-            let _: () = msg_send![mic_ns_image, release];
-        }
-        let camera_ns_image = get_camera_image(camera_muted, theme)?;
-        let camera_image = make_image_view(camera_ns_image, frame);
-        unsafe {
-            let _: () = msg_send![camera_ns_image, release];
-        }
+        let mic_image = make_image_view(&mic_icon, frame);
+        let camera_image = make_image_view(&camera_icon, frame);
+        let camera_off = !state.camera_in_use;
         let camera_label = get_textfield(
-            get_camera_mute_description_text(camera_muted),
-            get_text_color(camera_muted, theme),
+            get_camera_mute_description_text(camera_off),
+            get_text_color(camera_off, state.theme),
             frame,
         );
 
@@ -216,32 +224,25 @@ impl PopupContent {
         })
     }
 
-    pub fn update(
-        &mut self,
-        mic_muted: bool,
-        camera_muted: bool,
-        theme: Theme,
-        _active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
-        let mic_img = get_mic_image(mic_muted, theme)?;
-        let cam_img = get_camera_image(camera_muted, theme)?;
+    /// Shows `state` in the labels and icons. On an error nothing has changed yet.
+    pub fn render(&self, state: PopupState) -> Result<()> {
+        let (mic_icon, camera_icon) = icons_for(state)?;
+        let camera_off = !state.camera_in_use;
         unsafe {
-            let mic_str = NSString::alloc(nil).init_str(get_mic_mute_description_text(mic_muted));
-            self.mic_label.setStringValue_(mic_str);
-            let _: () = msg_send![mic_str, release];
-            let _: () = msg_send![self.mic_label, setTextColor: get_text_color(mic_muted, theme)];
-            self.mic_image.setImage_(mic_img);
-            let _: () = msg_send![mic_img, release];
-            self.camera_image.setImage_(cam_img);
-            let _: () = msg_send![cam_img, release];
-            let cam_str =
-                NSString::alloc(nil).init_str(get_camera_mute_description_text(camera_muted));
-            self.camera_label.setStringValue_(cam_str);
-            let _: () = msg_send![cam_str, release];
-            let _: () =
-                msg_send![self.camera_label, setTextColor: get_text_color(camera_muted, theme)];
+            set_label(
+                self.mic_label,
+                get_mic_mute_description_text(state.mic_muted),
+                get_text_color(state.mic_muted, state.theme),
+            );
+            set_image(self.mic_image, &mic_icon);
+            set_image(self.camera_image, &camera_icon);
+            set_label(
+                self.camera_label,
+                get_camera_mute_description_text(camera_off),
+                get_text_color(camera_off, state.theme),
+            );
         }
-        Ok(self)
+        Ok(())
     }
 }
 
