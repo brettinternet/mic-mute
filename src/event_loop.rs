@@ -96,6 +96,14 @@ fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool)
     toggle && !controller.muted
 }
 
+/// Hands the devices settings.json excludes to the controller. A tray click, a hand edit, and
+/// About → Reset Settings all change them in `settings`, so the poll applies each of them here.
+/// Returns whether they changed.
+fn apply_exclusions(controller: &RwLock<MicController>, settings: &RwLock<Settings>) -> bool {
+    let excluded = settings.read().excluded_uids();
+    controller.write().set_excluded(excluded)
+}
+
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
     if let Err(err) = controller.write().restore_on_exit() {
         log::error!("Failed to restore microphone state on exit: {}", err);
@@ -354,7 +362,16 @@ pub fn start(
         // Poll mic state and cursor-monitor position on a 200 ms interval.
         if last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
+            let exclusions_changed = apply_exclusions(&controller, &settings);
             update_mic(ui, &controller, false);
+            if exclusions_changed {
+                // Exclusions change the mute state while unmuted too, which `update_mic`
+                // leaves off the UI.
+                let muted = controller.read().muted;
+                if let Err(err) = ui.write().update_mic(muted) {
+                    log::error!("Failed to update microphone UI: {:#}", err);
+                }
+            }
             if let Err(err) = ui.write().detect() {
                 log::error!("Failed to update popup placement: {:#}", err);
             }

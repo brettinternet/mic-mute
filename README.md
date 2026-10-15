@@ -33,6 +33,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Mutes CoreAudio-controllable devices only.
 - Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
 - Skips devices that accept mute and volume changes but ignore them, such as Microsoft Teams Audio, with a warning in the log. Mic Mute tries such a device again every minute and when it reconnects; until it responds, the tray and popup show the state of the other microphones.
+- Never mutes the devices listed in [`excluded_devices`](./docs/settings.md#excluded_devices), and leaves them out of the mute state: an excluded microphone may be live while the tray and popup show muted.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 - Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.

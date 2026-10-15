@@ -16,7 +16,7 @@ use objc2_core_audio::{
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_foundation::{CFRetained, CFString};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -478,6 +478,49 @@ impl WriteRetry {
     }
 }
 
+/// What one read of a device found. The app reads a device's state from the control it mutes
+/// the device with; the other cases are devices it leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// The user excluded the device: the app leaves it alone and doesn't read it.
+    Excluded,
+    /// Neither native mute nor input volume can be set.
+    NoControl,
+    /// Accepted writes take effect on no control ([`WriteBehavior::IgnoresWrites`]).
+    IgnoresWrites,
+    /// The state the control reads; `None` when it can't be read.
+    State(MuteControl, Option<bool>),
+}
+
+impl Reading {
+    /// The state that counts toward `muted`; `None` for a device the app leaves out.
+    fn muted(self) -> Option<bool> {
+        match self {
+            Self::State(_, state) => state,
+            Self::Excluded | Self::NoControl | Self::IgnoresWrites => None,
+        }
+    }
+}
+
+/// Whether the readings show at least one device the app controls, and every such device
+/// muted.
+fn are_controlled_devices_muted(readings: impl IntoIterator<Item = Reading>) -> bool {
+    let mut is_controlling_any = false;
+    for state in readings.into_iter().filter_map(Reading::muted) {
+        if !state {
+            return false;
+        }
+        is_controlling_any = true;
+    }
+    is_controlling_any
+}
+
+/// Whether `excluded`, a set of device UIDs, names the device with `key`. A device without a
+/// readable UID is never excluded, so a failing UID read can't leave it live.
+fn is_excluded_by(excluded: &BTreeSet<String>, key: &DeviceKey) -> bool {
+    matches!(key, DeviceKey::Uid(uid) if excluded.contains(uid))
+}
+
 fn device_key<B: AudioBackend>(backend: &B, audio_device_id: AudioDeviceID) -> DeviceKey {
     match backend.device_uid(audio_device_id) {
         Ok(uid) => DeviceKey::Uid(uid),
@@ -822,6 +865,12 @@ pub struct MicController<B = CoreAudioBackend> {
     /// What writes showed about devices whose controls don't do what they advertise, keyed
     /// like the journal. Kept for the session, also while a device is disconnected.
     write_behavior: HashMap<DeviceKey, WriteBehavior>,
+    /// UIDs of the devices the user excluded (`excluded_devices` in settings.json): the app
+    /// never mutes, unmutes, or enforces them, and they don't count toward `muted`.
+    excluded: BTreeSet<String>,
+    /// Connected excluded devices whose journaled changes the app has tried to undo since they
+    /// connected or became excluded; a muted poll tries each only once.
+    released_excluded: HashSet<DeviceKey>,
     backend: B,
 }
 
@@ -836,18 +885,25 @@ impl<B: AudioBackend> Debug for MicController<B> {
 }
 
 impl MicController<CoreAudioBackend> {
-    /// A controller for the real devices, with its records in the settings folder.
-    pub fn new() -> Result<Self> {
+    /// A controller for the real devices, with its records in the settings folder. It leaves
+    /// alone the devices whose UIDs `excluded` lists.
+    pub fn new(excluded: BTreeSet<String>) -> Result<Self> {
         Self::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(state_file(JOURNAL_FILE_NAME)),
             InputLevels::load(state_file(LEVELS_FILE_NAME)),
+            excluded,
         )
     }
 }
 
 impl<B: AudioBackend> MicController<B> {
-    fn with_backend(backend: B, journal: RestoreJournal, levels: InputLevels) -> Result<Self> {
+    fn with_backend(
+        backend: B,
+        journal: RestoreJournal,
+        levels: InputLevels,
+        excluded: BTreeSet<String>,
+    ) -> Result<Self> {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
@@ -859,6 +915,8 @@ impl<B: AudioBackend> MicController<B> {
             levels,
             connected_journaled: HashSet::new(),
             write_behavior: HashMap::new(),
+            excluded,
+            released_excluded: HashSet::new(),
             backend,
         };
         trace!("Creating audio controller");
@@ -936,65 +994,45 @@ impl<B: AudioBackend> MicController<B> {
             .copied()
     }
 
-    /// The control the app mutes the device with and reads its state from, or `None` when it
-    /// leaves the device out: nothing is settable, or accepted writes never take effect.
-    fn state_control(&self, audio_device_id: AudioDeviceID) -> Result<Option<MuteControl>> {
-        let Some(control) = mute_control(&self.backend, audio_device_id)? else {
-            return Ok(None);
-        };
-        Ok(match self.write_behavior_of(audio_device_id) {
-            None => Some(control),
-            Some(WriteBehavior::IgnoresNativeMute) => Some(MuteControl::Volume),
-            Some(WriteBehavior::IgnoresWrites(_)) => None,
-        })
+    fn is_excluded(&self, key: &DeviceKey) -> bool {
+        is_excluded_by(&self.excluded, key)
     }
 
-    /// The device's state, read from the control the app mutes it with. `None` for a device
-    /// the app leaves out.
-    fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
-        match self.state_control(audio_device_id)? {
-            Some(control) => read_muted(&self.backend, audio_device_id, control),
-            None => Ok(None),
+    /// Reads the device's state from the control the app mutes it with; `key` is its record
+    /// key. An excluded device isn't read at all.
+    fn read_device(&self, audio_device_id: AudioDeviceID, key: &DeviceKey) -> Result<Reading> {
+        if self.is_excluded(key) {
+            return Ok(Reading::Excluded);
         }
+        let Some(control) = mute_control(&self.backend, audio_device_id)? else {
+            return Ok(Reading::NoControl);
+        };
+        let control = match self.write_behavior.get(key) {
+            None => control,
+            Some(WriteBehavior::IgnoresNativeMute) => MuteControl::Volume,
+            Some(WriteBehavior::IgnoresWrites(_)) => return Ok(Reading::IgnoresWrites),
+        };
+        let state = read_muted(&self.backend, audio_device_id, control)?;
+        Ok(Reading::State(control, state))
     }
 
     fn is_muted_all(&self) -> Result<bool> {
-        let mut controllable = false;
-        for id in &self.get_input_device_ids()? {
-            match self.is_muted(*id)? {
-                Some(state) => {
-                    controllable = true;
-                    trace!("Input device {} is {}", id, state_name(state));
-                    if !state {
-                        return Ok(false);
-                    }
-                }
-                None => trace!(
-                    "Input device {} is left out: nothing settable, or it ignores writes",
-                    id
-                ),
-            }
+        let mut readings = Vec::new();
+        for id in self.get_input_device_ids()? {
+            let reading = self.read_device(id, &device_key(&self.backend, id))?;
+            trace!("Input device {} reads {:?}", id, reading);
+            readings.push(reading);
         }
-        Ok(controllable)
+        Ok(are_controlled_devices_muted(readings))
     }
 
-    fn all_devices_match_state(&self, ids: &[AudioDeviceID], state: bool) -> Result<bool> {
-        for id in ids {
-            if let Some(actual) = self.is_muted(*id)? {
-                if actual != state {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
-
-    /// Mutes or unmutes one device. Returns `None` when the device is left out: nothing is
-    /// settable, or its accepted writes never take effect.
+    /// Mutes or unmutes one device the user hasn't excluded. Returns `None` when the device is
+    /// left out: nothing is settable, or its accepted writes never take effect.
     fn mute(
         &mut self,
         audio_device_id: AudioDeviceID,
         name: &str,
+        key: &DeviceKey,
         state: bool,
         now: Instant,
     ) -> Result<Option<AudioDeviceID>> {
@@ -1005,23 +1043,12 @@ impl<B: AudioBackend> MicController<B> {
             );
             return Ok(None);
         };
-        let key = device_key(&self.backend, audio_device_id);
         let is_handled = if state {
-            self.mute_device(audio_device_id, name, &key, control, now)?
+            self.mute_device(audio_device_id, name, key, control, now)?
         } else {
-            self.unmute_device(audio_device_id, name, &key, control)?
+            self.unmute_device(audio_device_id, name, key, control)?
         };
-        if !is_handled {
-            return Ok(None);
-        }
-
-        let state_text = match self.is_muted(audio_device_id)? {
-            Some(true) => "muted",
-            Some(false) => "unmuted",
-            None => "left out",
-        };
-        trace!("Device {} now registers as {}", audio_device_id, state_text);
-        Ok(Some(audio_device_id))
+        Ok(is_handled.then_some(audio_device_id))
     }
 
     /// Mutes a device and learns from the readback. When native mute ignores an accepted write,
@@ -1332,10 +1359,22 @@ impl<B: AudioBackend> MicController<B> {
         let action = action_name(state);
         let end_state = state_name(state);
         let mut failures = Vec::new();
+        let mut polled = Vec::with_capacity(ids.len());
         for id in &ids {
             let name = self.backend.device_name(*id)?;
+            let key = device_key(&self.backend, *id);
+            if self.is_excluded(&key) {
+                trace!(
+                    "Leaving out audio device {}: {} because it is excluded",
+                    id,
+                    name
+                );
+                self.release_excluded_device(*id, &key, state);
+                polled.push((*id, key));
+                continue;
+            }
             trace!("Setting mute={} for {}", state, name);
-            match self.mute(*id, &name, state, now) {
+            match self.mute(*id, &name, &key, state, now) {
                 Ok(Some(_)) => trace!("Successfully {} audio device {}: {}", end_state, id, name),
                 Ok(None) => trace!("Skipped audio device {}: {}", id, name),
                 Err(err) => {
@@ -1351,11 +1390,23 @@ impl<B: AudioBackend> MicController<B> {
                     failures.push(format!("{} ({})", name, err));
                 }
             }
+            polled.push((*id, key));
         }
+        // An excluded device that disconnects gets another restore attempt when it is back.
+        self.released_excluded
+            .retain(|key| polled.iter().any(|(_, polled_key)| polled_key == key));
         // Drop the entries of devices that unmuting restored; a no-op when nothing changed.
         self.journal.save_logged();
 
-        self.muted = self.is_muted_all().unwrap_or(false);
+        // One reading per device decides both `muted` and whether every device reached `state`.
+        let readings: Vec<Result<Reading>> = polled
+            .iter()
+            .map(|(id, key)| self.read_device(*id, key))
+            .collect();
+        self.muted = readings.iter().all(Result::is_ok)
+            && are_controlled_devices_muted(
+                readings.iter().filter_map(|r| r.as_ref().ok().copied()),
+            );
         if !failures.is_empty() {
             return Err(anyhow!(
                 "failed to {} {} input device(s): {}",
@@ -1364,15 +1415,101 @@ impl<B: AudioBackend> MicController<B> {
                 failures.join("; ")
             ));
         }
-        if !self.all_devices_match_state(&ids, state)? {
-            self.muted = self.is_muted_all().unwrap_or(false);
+        let readings = readings.into_iter().collect::<Result<Vec<_>>>()?;
+        if readings
+            .iter()
+            .any(|reading| reading.muted().is_some_and(|muted| muted != state))
+        {
             return Err(anyhow!(
                 "one or more input devices did not reach requested mute state {}",
                 state
             ));
         }
-        self.muted = self.is_muted_all()?;
         Ok(self)
+    }
+
+    /// Undoes what the journal lists for an excluded device: once while it stays connected,
+    /// and again on each user unmute (`state` false). A failed restore stays journaled, so exit
+    /// tries again.
+    fn release_excluded_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        key: &DeviceKey,
+        state: bool,
+    ) {
+        let is_first_attempt = self.released_excluded.insert(key.clone());
+        if self.journal.get(key).is_none() || (state && !is_first_attempt) {
+            return;
+        }
+        let device = [(audio_device_id, key.clone())];
+        let failures = restore_devices(&mut self.backend, &mut self.journal, &device);
+        if !failures.is_empty() {
+            error!(
+                "Failed to restore excluded input device {}",
+                failures.join("; ")
+            );
+        }
+    }
+
+    /// Leaves the devices with these UIDs alone from now on, and undoes, by the journal, what
+    /// the app changed on the ones it didn't exclude before. A device included again is muted by
+    /// the next poll while the user wants mute. Returns whether the exclusions changed.
+    pub fn set_excluded(&mut self, excluded: BTreeSet<String>) -> bool {
+        if excluded == self.excluded {
+            return false;
+        }
+        let newly_excluded: BTreeSet<String> =
+            excluded.difference(&self.excluded).cloned().collect();
+        if excluded.is_empty() {
+            info!("No input device is excluded from muting any more");
+        } else {
+            let uids: Vec<&str> = excluded.iter().map(String::as_str).collect();
+            info!(
+                "Excluding {} input device(s) from muting: {}",
+                uids.len(),
+                uids.join(", ")
+            );
+        }
+        self.excluded = excluded;
+        let excluded = &self.excluded;
+        self.released_excluded
+            .retain(|key| is_excluded_by(excluded, key));
+        self.release_newly_excluded(&newly_excluded);
+        self.muted = self.is_muted_all().unwrap_or(false);
+        true
+    }
+
+    /// Restores the connected devices among `uids` that the journal lists.
+    fn release_newly_excluded(&mut self, uids: &BTreeSet<String>) {
+        if uids.is_empty() || self.journal.is_empty() {
+            return;
+        }
+        let devices: Vec<_> = match journaled_devices(&self.backend, &self.journal) {
+            Ok(devices) => devices
+                .into_iter()
+                .filter(|(_, key)| is_excluded_by(uids, key))
+                .collect(),
+            Err(err) => {
+                // The next muted poll, or exit, restores them.
+                warn!(
+                    "Could not list the excluded input devices to restore: {}",
+                    err
+                );
+                return;
+            }
+        };
+        for (_, key) in &devices {
+            self.released_excluded.insert(key.clone());
+        }
+        let failures = restore_devices(&mut self.backend, &mut self.journal, &devices);
+        if !failures.is_empty() {
+            error!(
+                "Failed to restore {} excluded input device(s): {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
+        self.journal.save_logged();
     }
 
     /// Undoes every journaled change on connected devices and saves pending records.
@@ -1608,6 +1745,11 @@ mod tests {
         DeviceKey::Uid(uid_of(name))
     }
 
+    /// The UIDs of the devices named `names`, as `Settings::excluded_uids` gives them.
+    fn uids(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| uid_of(name)).collect()
+    }
+
     #[derive(Default)]
     struct FakeBackend {
         devices: HashMap<AudioDeviceID, Device>,
@@ -1758,10 +1900,20 @@ mod tests {
 
     impl Stores {
         fn launch(&self, backend: FakeBackend) -> MicController<FakeBackend> {
+            self.launch_excluding(backend, &[])
+        }
+
+        /// Launches with `excluded_devices` listing the devices named `excluded`.
+        fn launch_excluding(
+            &self,
+            backend: FakeBackend,
+            excluded: &[&str],
+        ) -> MicController<FakeBackend> {
             MicController::with_backend(
                 backend,
                 RestoreJournal::load(self.journal.boxed()),
                 InputLevels::load(self.levels.boxed()),
+                uids(excluded),
             )
             .unwrap()
         }
@@ -1783,6 +1935,7 @@ mod tests {
             CoreAudioBackend,
             RestoreJournal::load(stores.journal.boxed()),
             InputLevels::load(stores.levels.boxed()),
+            BTreeSet::new(),
         );
 
         assert!(result.is_ok());
@@ -2872,5 +3025,266 @@ mod tests {
         assert_eq!(backend.device(1).unwrap().mute, Some(false));
         assert_eq!(backend.device(2).unwrap().volume, Some(0.65));
         assert_eq!(stores.journal.contents(), None);
+    }
+
+    // Excluded devices
+
+    #[test]
+    fn muted_needs_a_controlled_device_and_every_controlled_device_muted() {
+        let muted = Reading::State(MuteControl::Native, Some(true));
+        let unmuted = Reading::State(MuteControl::Volume, Some(false));
+        let unreadable = Reading::State(MuteControl::Native, None);
+        let left_out = [
+            Reading::Excluded,
+            Reading::NoControl,
+            Reading::IgnoresWrites,
+        ];
+        let mut left_out_and_muted = left_out.to_vec();
+        left_out_and_muted.push(muted);
+
+        assert!(are_controlled_devices_muted([muted]));
+        assert!(are_controlled_devices_muted(left_out_and_muted));
+        assert!(!are_controlled_devices_muted([muted, unmuted]));
+        assert!(!are_controlled_devices_muted(left_out));
+        assert!(!are_controlled_devices_muted([unreadable]));
+        assert!(!are_controlled_devices_muted([]));
+    }
+
+    #[test]
+    fn excluded_device_is_never_written_and_does_not_count_toward_muted() {
+        let mut controller =
+            Stores::default().launch_excluding(native_and_volume_devices(), &["USB Mic"]);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.writes, vec![Write::Mute(1, true)]);
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+    }
+
+    #[test]
+    fn excluded_device_is_never_unmuted() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", true)),
+            (2, Device::native("Steam Mic", true)),
+        ]);
+        let mut controller = Stores::default().launch_excluding(backend, &["Steam Mic"]);
+
+        controller.mute_all(false).unwrap();
+
+        assert_eq!(controller.backend.writes, vec![Write::Mute(1, false)]);
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+        assert!(!controller.muted);
+    }
+
+    #[test]
+    fn only_excluded_devices_do_not_claim_muted() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::native("Built-in", true))]);
+        let mut controller = Stores::default().launch_excluding(backend, &["Built-in"]);
+        assert!(!controller.muted);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(!controller.muted);
+        assert!(controller.should_enforce_mute());
+        assert!(controller.backend.writes.is_empty());
+    }
+
+    #[test]
+    fn startup_leaves_an_unmuted_excluded_device_out_of_the_mute_state() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", true)),
+            (2, Device::native("Steam Mic", false)),
+        ]);
+
+        let controller = Stores::default().launch_excluding(backend, &["Steam Mic"]);
+
+        assert!(controller.muted);
+        assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn excluding_devices_the_app_muted_undoes_its_changes_by_the_journal() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.set_excluded(uids(&["Built-in", "USB Mic"])));
+
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
+        assert!(!controller.muted);
+        assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn excluded_device_stays_audible_while_mute_is_enforced() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.set_excluded(uids(&["USB Mic"]));
+        controller.backend.writes.clear();
+
+        for _ in 0..3 {
+            controller.toggle(Some(true)).unwrap();
+        }
+
+        assert!(controller.backend.writes.is_empty());
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn excluding_devices_muted_before_launch_leaves_them_muted() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", true)),
+            (2, Device::fallback("USB Mic", 0.0)),
+        ]);
+        let mut controller = controller(backend);
+        controller.mute_all(true).unwrap();
+
+        controller.set_excluded(uids(&["Built-in", "USB Mic"]));
+
+        assert!(controller.backend.writes.is_empty());
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+    }
+
+    #[test]
+    fn including_a_device_while_muted_mutes_it_on_the_next_poll() {
+        let mut controller =
+            Stores::default().launch_excluding(native_and_volume_devices(), &["USB Mic"]);
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.set_excluded(BTreeSet::new()));
+        assert!(!controller.muted, "the USB mic is live until the poll");
+
+        controller.toggle(Some(true)).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+    }
+
+    #[test]
+    fn unchanged_exclusions_change_nothing() {
+        let mut controller =
+            Stores::default().launch_excluding(native_and_volume_devices(), &["USB Mic"]);
+
+        assert!(!controller.set_excluded(uids(&["USB Mic"])));
+    }
+
+    #[test]
+    fn exclusions_follow_the_uid_not_the_name_or_the_id() {
+        let mut first = Device::native("USB Microphone", false);
+        first.uid = "first UID".to_string();
+        let mut second = Device::native("USB Microphone", false);
+        second.uid = "second UID".to_string();
+        let mut controller = controller(FakeBackend::with_devices(vec![(1, first), (2, second)]));
+        controller.set_excluded(BTreeSet::from(["second UID".to_string()]));
+
+        controller.mute_all(true).unwrap();
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(false));
+
+        // Back under a new ID and a new name, it is still excluded.
+        let mut second = controller.backend.unplug(2);
+        second.name = "Renamed Microphone".to_string();
+        controller.backend.plug(7, second);
+        controller.toggle(Some(true)).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(7).unwrap().mute, Some(false));
+    }
+
+    #[test]
+    fn device_without_a_uid_is_never_excluded() {
+        let mut device = Device::native("No UID", false);
+        device.fail_uid = true;
+        let backend = FakeBackend::with_devices(vec![(1, device)]);
+        let mut controller = Stores::default().launch_excluding(backend, &["No UID"]);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn excluded_device_that_reconnects_while_muted_is_restored_once() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        let usb = controller.backend.unplug(2);
+        controller.set_excluded(uids(&["USB Mic"]));
+        controller.toggle(Some(true)).unwrap();
+        assert_eq!(controller.journal.saved_volume(&key("USB Mic")), Some(0.65));
+
+        controller.backend.plug(9, usb);
+        controller.toggle(Some(true)).unwrap();
+
+        assert_eq!(controller.backend.device(9).unwrap().volume, Some(0.65));
+        assert!(controller.journal.get(&key("USB Mic")).is_none());
+        assert!(controller.muted);
+        controller.backend.writes.clear();
+        controller.toggle(Some(true)).unwrap();
+        assert!(controller.backend.writes.is_empty());
+    }
+
+    #[test]
+    fn failed_restore_of_an_excluded_device_waits_for_exit() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(2).unwrap().fail_set_volume = true;
+
+        controller.set_excluded(uids(&["USB Mic"]));
+
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        assert_eq!(
+            stores.journal_json()["devices"]["USB Mic UID"]["saved_volume"],
+            0.65
+        );
+        controller.backend.writes.clear();
+        controller.toggle(Some(true)).unwrap();
+        assert!(
+            controller.backend.writes.is_empty(),
+            "mute polls don't retry it"
+        );
+
+        controller.backend.device_mut(2).unwrap().fail_set_volume = false;
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn user_unmute_retries_restoring_an_excluded_device() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(2).unwrap().fail_set_volume = true;
+        controller.set_excluded(uids(&["USB Mic"]));
+        controller.backend.device_mut(2).unwrap().fail_set_volume = false;
+
+        controller.mute_all(false).unwrap();
+
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+        assert!(controller.journal.is_empty());
+    }
+
+    #[test]
+    fn excluding_a_device_that_ignores_writes_ends_its_write_retries() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        controller.set_excluded(uids(&["Teams Audio"]));
+        assert!(controller.journal.get(&key("Teams Audio")).is_none());
+        controller.backend.writes.clear();
+
+        controller
+            .mute_all_at(true, start + IGNORED_WRITES_RETRY_INTERVAL)
+            .unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(controller.muted);
     }
 }

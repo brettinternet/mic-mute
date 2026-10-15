@@ -18,7 +18,8 @@ The file is JSON. The complete default configuration is:
   },
   "show_in_dock": false,
   "launch_at_login": false,
-  "show_popup": true
+  "show_popup": true,
+  "excluded_devices": []
 }
 ```
 
@@ -72,6 +73,27 @@ Controls the small on-screen mute-status popup.
 
 The tray menu can also toggle this setting.
 
+### `excluded_devices`
+
+Lists the input devices Mic Mute leaves alone. It never mutes, unmutes, or keeps muted an excluded device, and the mute state in the tray and popup covers only the other microphones.
+
+- `[]` (default): Mic Mute mutes every input device it can control.
+- Each entry names a device by its CoreAudio device UID, which stays the same when the device reconnects, the Mac restarts, or the device is renamed, so two devices with the same name stay separate. UIDs are case-sensitive and must match exactly. `name` is only shown while the device isn't connected.
+
+```json
+{
+  "excluded_devices": [
+    { "uid": "MSLoopbackDriverDevice_UID", "name": "Microsoft Teams Audio" }
+  ]
+}
+```
+
+An entry can also be the bare UID, as in `"excluded_devices": ["MSLoopbackDriverDevice_UID"]`; Mic Mute saves such an entry back unchanged. A device whose UID can't be read is never excluded.
+
+**An excluded microphone may be live while the tray and popup show muted.** Excluding a device that Mic Mute muted undoes what Mic Mute changed, as quitting would: it turns native mute off or restores the input volume. A device that was already muted when Mic Mute muted the others stays muted. If that restore fails, Mic Mute tries again on the next unmute, when the device reconnects, and on quit. Removing a device from the list while mute is on mutes it as soon as Mic Mute applies the change. If every input device is excluded or can't be controlled, Mic Mute doesn't show muted.
+
+About → Reset Settings empties the list.
+
 ## About window
 
 The tray menu's About item shows the mute shortcut in use, the settings file's location, and the version.
@@ -79,13 +101,13 @@ The tray menu's About item shows the mute shortcut in use, the settings file's l
 The About window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Choosing About again brings the open window to the front, updated if the shortcut in use has changed. Each button closes the window.
 
 - **Open Settings** opens `settings.json` in the default text editor. If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
-- **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. The defaults apply at once and are saved like any other settings change.
+- **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. It also empties `excluded_devices`, so Mic Mute mutes every microphone again. The defaults apply at once and are saved like any other settings change.
 
 ## Editing settings
 
 Mic Mute checks the file every two seconds and reloads it when its modification time changes. Valid changes apply without a restart. The tray menu writes its setting changes to this file; Mic Mute's own saves don't trigger a reload.
 
-Fields omitted from the settings file use the documented defaults, including `show_popup: true`, and a missing file means every default. Loading settings does not rewrite the file. The file is created or updated when settings are explicitly saved, such as through a tray-menu setting change.
+Fields omitted from the settings file use the documented defaults, including `show_popup: true` and `excluded_devices: []`, and a missing file means every default. Loading settings does not rewrite the file. The file is created or updated when settings are explicitly saved, such as through a tray-menu setting change.
 
 Saves write every documented field and keep fields Mic Mute doesn't recognize, such as settings from a newer version. Each save is atomic: Mic Mute writes `settings.json.tmp` in the same folder, then renames it over `settings.json`, so a crash never leaves a half-written file. If `settings.json` is a symlink, the file it points to is replaced and the link stays.
 
