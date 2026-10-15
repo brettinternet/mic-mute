@@ -49,6 +49,8 @@ Controls whether Mic Mute opens when the user logs in.
 
 The tray menu can also toggle this setting.
 
+Mic Mute implements this with the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. When the setting is on, each launch of the app bundle points that file at the bundle's current location, so moving the app doesn't break the login item. A copy that isn't inside an app bundle, such as a development build started with `cargo run`, never repoints a login item that starts an app bundle.
+
 ### `show_popup`
 
 Controls the small on-screen mute-status popup.

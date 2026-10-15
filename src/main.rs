@@ -59,6 +59,12 @@ fn main() {
             }
         }
     }
+    // The app may have moved since the LaunchAgent was written; repoint it at this bundle.
+    if settings.launch_at_login {
+        if let Err(e) = launch_at_login::refresh() {
+            log::error!("Failed to refresh launch at login: {}", e);
+        }
+    }
 
     let app_vars = AppVars::new();
 
