@@ -36,6 +36,10 @@ objc2-core-audio = { version = "0.3", features = [
   "AudioHardwareDeprecated",
 ] }
 objc2-core-audio-types = { version = "0.3", features = ["CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "CFString",
+] }
 
 [lints.rust]
 # objc 0.2.x macros use the old cfg(cargo-clippy) pattern which triggers this lint

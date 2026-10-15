@@ -59,6 +59,8 @@ fn update_mic(
         let mut ui = ui.write();
         ui.update_mic(controller.muted, device_name.as_deref())
             .unwrap();
+    } else {
+        controller.watch_unmuted();
     }
     if toggle && !controller.muted {
         task::spawn(async move {

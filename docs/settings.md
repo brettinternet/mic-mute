@@ -6,6 +6,8 @@ Mic Mute stores its settings at:
 ~/Library/Application Support/mic-mute/settings.json
 ```
 
+The settings file shares its folder with `restore.json`, which Mic Mute manages itself and which isn't a setting: it exists only while microphones Mic Mute muted still need restoring, and the next launch restores them after a crash.
+
 The file is JSON. The complete default configuration is:
 
 ```json

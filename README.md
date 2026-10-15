@@ -34,6 +34,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
+- Microphones Mic Mute muted but couldn't restore as it quit (after `kill -9`, a crash, or power loss) are restored at the next launch; a microphone unplugged by then is restored when it reconnects.
 
 ## Releases
 

@@ -1935,6 +1935,7 @@ dependencies = [
  "objc",
  "objc2-core-audio",
  "objc2-core-audio-types",
+ "objc2-core-foundation",
  "parking_lot",
  "resvg",
  "serde",
