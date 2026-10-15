@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use image::ImageEncoder;
 use parking_lot::Mutex;
+use resvg::tiny_skia::{Pixmap, Transform};
 use std::sync::Arc;
 use tao::window::Theme;
 
@@ -11,40 +12,31 @@ struct IconColor {
     b: u8,
 }
 
+/// #ef4444: muted, or no camera in use, on a light background; the muted tray icon.
+const RED: IconColor = IconColor {
+    r: 239,
+    g: 68,
+    b: 68,
+};
+/// #f87171: muted, or no camera in use, on a dark background.
+const LIGHT_RED: IconColor = IconColor {
+    r: 248,
+    g: 113,
+    b: 113,
+};
+const BLACK: IconColor = IconColor { r: 0, g: 0, b: 0 };
+const WHITE: IconColor = IconColor {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
 fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
     match theme {
-        Theme::Light if muted => IconColor {
-            r: 239,
-            g: 68,
-            b: 68,
-        }, // #ef4444
-        Theme::Light => IconColor { r: 0, g: 0, b: 0 },
-        Theme::Dark if muted => IconColor {
-            r: 248,
-            g: 113,
-            b: 113,
-        }, // #f87171
-        _ => IconColor {
-            r: 255,
-            g: 255,
-            b: 255,
-        },
-    }
-}
-
-fn tray_icon_color(muted: bool) -> IconColor {
-    if muted {
-        IconColor {
-            r: 239,
-            g: 68,
-            b: 68,
-        } // #ef4444
-    } else {
-        IconColor {
-            r: 255,
-            g: 255,
-            b: 255,
-        }
+        Theme::Light if muted => RED,
+        Theme::Light => BLACK,
+        Theme::Dark if muted => LIGHT_RED,
+        _ => WHITE,
     }
 }
 
@@ -76,19 +68,41 @@ impl Glyph {
     }
 }
 
-/// One icon in one color. Only `tray_mic`, `popup_mic`, and `popup_camera` build variants, so
-/// there are at most 4 glyphs × 4 colors of them.
+/// The camera-in-use badge: a dot in the top-right corner, where neither mic glyph has ink. Its
+/// circle's stroke is as wide as the circle's diameter, which fills it, so the badge stays
+/// stroke-only.
+const CAMERA_BADGE_SVG: &[u8] = include_bytes!("../assets/camera-badge.svg");
+
+/// One icon in one color, with or without the camera badge. Only `tray_mic`, `popup_mic`, and
+/// `popup_camera` build variants: 10 distinct ones, as the tray's unbadged icons are the
+/// light-theme popup's mic icons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IconVariant {
     glyph: Glyph,
+    /// Draws `CAMERA_BADGE_SVG` over the glyph.
+    has_camera_badge: bool,
     color: IconColor,
 }
 
-/// The tray's mic icon: red while muted, else white.
-pub fn tray_mic(muted: bool) -> IconVariant {
-    IconVariant {
-        glyph: Glyph::mic(muted),
-        color: tray_icon_color(muted),
+/// An icon variant as the tray shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrayImage {
+    pub variant: IconVariant,
+    /// AppKit draws a template image from its alpha alone, in the menu bar's text color.
+    pub is_template: bool,
+}
+
+/// The tray's mic icon. Unmuted, it's a black template image, which macOS tints for light and
+/// dark menu bars and for the highlight while the menu is open. Muted, it's red and no
+/// template: red reads on both. A camera in use adds the badge, in the same color.
+pub fn tray_mic(muted: bool, camera_in_use: bool) -> TrayImage {
+    TrayImage {
+        variant: IconVariant {
+            glyph: Glyph::mic(muted),
+            has_camera_badge: camera_in_use,
+            color: if muted { RED } else { BLACK },
+        },
+        is_template: !muted,
     }
 }
 
@@ -96,6 +110,7 @@ pub fn tray_mic(muted: bool) -> IconVariant {
 pub fn popup_mic(muted: bool, theme: Theme) -> IconVariant {
     IconVariant {
         glyph: Glyph::mic(muted),
+        has_camera_badge: false,
         color: popup_icon_color(muted, theme),
     }
 }
@@ -109,6 +124,7 @@ pub fn popup_camera(in_use: bool, theme: Theme) -> IconVariant {
         } else {
             Glyph::VideoOff
         },
+        has_camera_badge: false,
         color: popup_icon_color(!in_use, theme),
     }
 }
@@ -125,8 +141,8 @@ pub struct RenderedIcon {
 
 /// Every variant rendered so far. Holds plain bytes, never AppKit objects, so nothing in it
 /// needs a retain or a release; callers build `NSImage`s and tray icons from it when the shown
-/// variant changes. Bounded by the variant count (at most 16 entries of a few KB each), so it
-/// never evicts.
+/// variant changes. Bounded by the variant count (10 entries of a few KB each), so it never
+/// evicts.
 static RENDERED: Mutex<Vec<(IconVariant, Arc<RenderedIcon>)>> = Mutex::new(Vec::new());
 
 impl IconVariant {
@@ -142,7 +158,13 @@ impl IconVariant {
     }
 
     fn render(self) -> Result<RenderedIcon> {
-        let (rgba, width, height) = rasterize_svg(self.glyph.svg(), &self.color)?;
+        let glyph = self.glyph.svg();
+        let layers: &[&[u8]] = if self.has_camera_badge {
+            &[glyph, CAMERA_BADGE_SVG]
+        } else {
+            &[glyph]
+        };
+        let (rgba, width, height) = rasterize_layers(layers, &self.color)?;
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)
             .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
@@ -156,32 +178,50 @@ impl IconVariant {
     }
 }
 
-/// Rasterizes an SVG with the given stroke color.
-/// Returns un-premultiplied RGBA bytes plus the source dimensions.
-fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u32, u32)> {
+/// Parses an SVG with the given stroke color.
+fn parse_svg(svg_bytes: &[u8], color: &IconColor) -> Result<resvg::usvg::Tree> {
     let svg_str = std::str::from_utf8(svg_bytes).context("SVG is not valid UTF-8")?;
     let colored = svg_str.replacen(
         "<svg ",
         &format!("<svg stroke=\"rgb({},{},{})\" ", color.r, color.g, color.b),
         1,
     );
-
     let options = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_str(&colored, &options).context("Failed to parse SVG")?;
-    let size = tree.size();
-    let w = size.width() as u32;
-    let h = size.height() as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("Failed to allocate pixmap")?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap.as_mut(),
-    );
+    resvg::usvg::Tree::from_str(&colored, &options).context("Failed to parse SVG")
+}
 
-    // tiny-skia produces premultiplied RGBA; un-premultiply for callers.
-    let raw = pixmap.take();
-    let (chunks, _) = raw.as_chunks::<4>();
-    let straight: Vec<u8> = chunks
+/// Pixel dimensions of a parsed SVG.
+fn tree_size(tree: &resvg::usvg::Tree) -> (u32, u32) {
+    let size = tree.size();
+    (size.width() as u32, size.height() as u32)
+}
+
+/// Rasterizes SVG layers with the given stroke color, each drawn over the ones before it; every
+/// layer must have the first one's size. Returns un-premultiplied RGBA bytes plus that size.
+fn rasterize_layers(layers: &[&[u8]], color: &IconColor) -> Result<(Vec<u8>, u32, u32)> {
+    let [first, overlays @ ..] = layers else {
+        bail!("Failed to rasterize an icon without SVG layers");
+    };
+    let tree = parse_svg(first, color)?;
+    let (w, h) = tree_size(&tree);
+    let mut pixmap = Pixmap::new(w, h).context("Failed to allocate pixmap")?;
+    resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
+    for overlay in overlays {
+        let tree = parse_svg(overlay, color)?;
+        let (overlay_w, overlay_h) = tree_size(&tree);
+        if (overlay_w, overlay_h) != (w, h) {
+            bail!("Failed to draw a {overlay_w}x{overlay_h} SVG layer over a {w}x{h} one");
+        }
+        // resvg draws over what the pixmap already holds.
+        resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
+    }
+    Ok((unpremultiply(&pixmap.take()), w, h))
+}
+
+/// tiny-skia produces premultiplied RGBA; callers get it un-premultiplied.
+fn unpremultiply(premultiplied: &[u8]) -> Vec<u8> {
+    let (chunks, _) = premultiplied.as_chunks::<4>();
+    chunks
         .iter()
         .flat_map(|p: &[u8; 4]| {
             let a = p[3];
@@ -197,9 +237,7 @@ fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u32, u
                 ]
             }
         })
-        .collect();
-
-    Ok((straight, w, h))
+        .collect()
 }
 
 #[cfg(test)]
@@ -207,8 +245,14 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// Icons the app embeds with `include_bytes!` (`Glyph::svg`).
-    const EMBEDDED_ICONS: [&str; 4] = ["mic.svg", "mic-off.svg", "video.svg", "video-off.svg"];
+    /// Icons the app embeds with `include_bytes!` (`Glyph::svg`, `CAMERA_BADGE_SVG`).
+    const EMBEDDED_ICONS: [&str; 5] = [
+        "mic.svg",
+        "mic-off.svg",
+        "video.svg",
+        "video-off.svg",
+        "camera-badge.svg",
+    ];
 
     fn asset_svg_paths() -> Vec<PathBuf> {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
@@ -223,9 +267,12 @@ mod tests {
 
     /// Every variant the tray and the popup can show.
     fn every_variant() -> Vec<IconVariant> {
-        let mut variants = vec![tray_mic(true), tray_mic(false)];
-        for theme in [Theme::Light, Theme::Dark] {
-            for state in [true, false] {
+        let mut variants = Vec::new();
+        for state in [true, false] {
+            for camera_in_use in [true, false] {
+                variants.push(tray_mic(state, camera_in_use).variant);
+            }
+            for theme in [Theme::Light, Theme::Dark] {
                 variants.push(popup_mic(state, theme));
                 variants.push(popup_camera(state, theme));
             }
@@ -243,11 +290,10 @@ mod tests {
             );
         }
 
-        let color = tray_icon_color(true);
         for path in &paths {
             let name = path.display();
             let svg = std::fs::read(path).expect("SVG should be readable");
-            let (rgba, w, h) = rasterize_svg(&svg, &color)
+            let (rgba, w, h) = rasterize_layers(&[&svg], &RED)
                 .unwrap_or_else(|e| panic!("{name} failed to rasterize: {e:#}"));
             assert!(w > 0 && h > 0, "{name} rasterized to {w}x{h}");
             assert_eq!(rgba.len(), w as usize * h as usize * 4, "{name}");
@@ -259,10 +305,10 @@ mod tests {
     }
 
     #[test]
-    fn rasterize_svg_strokes_opaque_pixels_in_the_requested_color() {
+    fn rasterize_layers_strokes_opaque_pixels_in_the_requested_color() {
         let color = popup_icon_color(true, Theme::Light);
-        let (rgba, _, _) =
-            rasterize_svg(include_bytes!("../assets/mic.svg"), &color).expect("mic.svg rasterizes");
+        let (rgba, _, _) = rasterize_layers(&[include_bytes!("../assets/mic.svg")], &color)
+            .expect("mic.svg rasterizes");
         let opaque: Vec<&[u8]> = rgba
             .chunks_exact(4)
             .filter(|pixel| pixel[3] == u8::MAX)
@@ -292,8 +338,6 @@ mod tests {
             b: 255,
         };
         let cases = [
-            (tray_mic(true), Glyph::MicOff, red),
-            (tray_mic(false), Glyph::Mic, white),
             (popup_mic(true, Theme::Light), Glyph::MicOff, red),
             (popup_mic(false, Theme::Light), Glyph::Mic, black),
             (popup_mic(true, Theme::Dark), Glyph::MicOff, light_red),
@@ -304,7 +348,34 @@ mod tests {
             (popup_camera(false, Theme::Dark), Glyph::VideoOff, light_red),
         ];
         for (variant, glyph, color) in cases {
-            assert_eq!(variant, IconVariant { glyph, color });
+            let expected = IconVariant {
+                glyph,
+                has_camera_badge: false,
+                color,
+            };
+            assert_eq!(variant, expected);
+        }
+
+        let tray_cases = [
+            ((true, false), Glyph::MicOff, false, red, false),
+            ((true, true), Glyph::MicOff, true, red, false),
+            ((false, false), Glyph::Mic, false, black, true),
+            ((false, true), Glyph::Mic, true, black, true),
+        ];
+        for ((muted, camera_in_use), glyph, has_camera_badge, color, is_template) in tray_cases {
+            let expected = TrayImage {
+                variant: IconVariant {
+                    glyph,
+                    has_camera_badge,
+                    color,
+                },
+                is_template,
+            };
+            assert_eq!(
+                tray_mic(muted, camera_in_use),
+                expected,
+                "muted {muted}, camera in use {camera_in_use}"
+            );
         }
     }
 
@@ -345,5 +416,85 @@ mod tests {
                 "{variant:?}: the PNG's pixels differ from the RGBA"
             );
         }
+    }
+
+    #[test]
+    fn rendered_caches_only_the_variants_the_tray_and_popup_show() {
+        let mut distinct: Vec<IconVariant> = Vec::new();
+        for variant in every_variant() {
+            if !distinct.contains(&variant) {
+                distinct.push(variant);
+            }
+        }
+        assert_eq!(distinct.len(), 10, "update the variant count in the docs");
+        for variant in &distinct {
+            variant.rendered().expect("every variant renders");
+        }
+
+        let cached = RENDERED.lock();
+        assert!(cached.len() <= distinct.len(), "{} cached", cached.len());
+        for (variant, _) in cached.iter() {
+            assert!(distinct.contains(variant), "{variant:?} is cached");
+        }
+    }
+
+    /// The alpha channel of `layers` rasterized in black.
+    fn alpha(layers: &[&[u8]]) -> Vec<u8> {
+        let (rgba, _, _) = rasterize_layers(layers, &BLACK).expect("layers rasterize");
+        rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
+    }
+
+    #[test]
+    fn camera_badge_is_a_solid_dot_clear_of_both_mic_glyphs() {
+        let (_, width, _) = rasterize_layers(&[CAMERA_BADGE_SVG], &BLACK).expect("badge renders");
+        let badge = alpha(&[CAMERA_BADGE_SVG]);
+        let position = |index: usize| (index as u32 % width, index as u32 / width);
+
+        // The pixels at least half covered span the dot's diameter. Every pixel whose center
+        // lies more than a pixel inside the dot's edge must be fully covered: no hole.
+        let covered: Vec<(u32, u32)> = (0..badge.len())
+            .filter(|&index| badge[index] >= 128)
+            .map(position)
+            .collect();
+        let x_span = covered.iter().map(|&(x, _)| x);
+        let y_span = covered.iter().map(|&(_, y)| y);
+        let (min_x, max_x) = (x_span.clone().min().unwrap(), x_span.max().unwrap());
+        let (min_y, max_y) = (y_span.clone().min().unwrap(), y_span.max().unwrap());
+        let center_x = (min_x + max_x + 1) as f32 / 2.0;
+        let center_y = (min_y + max_y + 1) as f32 / 2.0;
+        let radius = (max_x + 1 - min_x) as f32 / 2.0;
+        assert!(radius >= 2.5, "the badge is only {radius} px wide");
+        for (index, &coverage) in badge.iter().enumerate() {
+            let (x, y) = position(index);
+            let distance = (x as f32 + 0.5 - center_x).hypot(y as f32 + 0.5 - center_y);
+            if distance <= radius - 1.0 {
+                assert_eq!(coverage, u8::MAX, "hole at ({x}, {y})");
+            }
+        }
+
+        for glyph in [Glyph::Mic, Glyph::MicOff] {
+            let plain = alpha(&[glyph.svg()]);
+            let badged = alpha(&[glyph.svg(), CAMERA_BADGE_SVG]);
+            for index in 0..badge.len() {
+                let (x, y) = position(index);
+                assert!(
+                    plain[index] == 0 || badge[index] == 0,
+                    "{glyph:?} and the badge both ink ({x}, {y})"
+                );
+                let expected = plain[index].max(badge[index]);
+                assert_eq!(badged[index], expected, "{glyph:?} at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn rasterize_layers_rejects_missing_and_differently_sized_layers() {
+        assert!(rasterize_layers(&[], &BLACK).is_err());
+
+        let small = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+            <path d="M1 1h14"/></svg>"#;
+        let err = rasterize_layers(&[Glyph::Mic.svg(), small], &BLACK)
+            .expect_err("a 16x16 layer over a 24x24 glyph");
+        assert!(err.to_string().contains("16x16"), "{err:#}");
     }
 }
