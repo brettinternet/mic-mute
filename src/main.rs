@@ -36,7 +36,13 @@ extern "C" fn handle_signal(_: libc::c_int) {
 }
 
 fn main() {
-    Builder::from_env(Env::default().default_filter_or("trace")).init();
+    // RUST_LOG overrides this. Release builds skip the 200 ms poll's per-tick trace output.
+    let default_filter = if cfg!(debug_assertions) {
+        "trace"
+    } else {
+        "info"
+    };
+    Builder::from_env(Env::default().default_filter_or(default_filter)).init();
     info!("Starting app");
 
     // An invalid settings.json is never written over: run on the defaults until it's fixed.
