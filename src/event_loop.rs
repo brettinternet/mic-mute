@@ -90,6 +90,7 @@ pub fn start(
     // Start in the past so the first iteration triggers the poll immediately.
     let mut last_poll = Instant::now() - poll_interval;
     let mut hide_popup_at: Option<Instant> = None;
+    let mut is_exiting = false;
 
     // Poll the settings file for changes every 2 seconds so edits to
     // settings.json take effect without restarting the app.
@@ -120,6 +121,17 @@ pub fn start(
         ActivationPolicy::Accessory
     });
     event_loop.run(move |event, _, control_flow| {
+        // Every NSApp terminate: path (Dock → Quit, ⌘Q, logout, AppleScript `quit`) and
+        // ControlFlow::Exit end the loop here. After tray → Exit, restoring again is a no-op.
+        if let Event::LoopDestroyed = event {
+            restore_microphone_on_exit(&controller);
+            return;
+        }
+        // Tray → Exit already restored the microphones; never re-mute them before the end.
+        if is_exiting {
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
         let mut exit_requested = false;
 
         if let Event::UserEvent(Message::CameraStateChanged(active)) = event {
@@ -247,6 +259,7 @@ pub fn start(
         }
 
         if exit_requested {
+            is_exiting = true;
             restore_microphone_on_exit(&controller);
             *control_flow = ControlFlow::Exit;
         } else {
