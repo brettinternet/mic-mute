@@ -15,4 +15,9 @@ targets = ["aarch64-apple-darwin"]
 unmaintained = "all"
 unsound = "all"
 # Each entry needs a reason: { id = "RUSTSEC-YYYY-NNNN", reason = "..." }.
-ignore = []
+ignore = [
+  # Both come in through async-std, whose only use is the popup's 1 s hide
+  # timer. Remove them together with async-std.
+  { id = "RUSTSEC-2025-0052", reason = "async-std: only the popup's hide timer uses it" },
+  { id = "RUSTSEC-2026-0221", reason = "event-listener 5.4.1 comes in only through async-std" },
+]
