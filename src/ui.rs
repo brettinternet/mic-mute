@@ -1,5 +1,5 @@
 use crate::config::AppVars;
-use crate::event_loop::{create, EventIds, EventLoopMessage};
+use crate::event_loop::{EventIds, EventLoopTarget};
 use crate::popup::Popup;
 use crate::settings::Settings;
 use crate::shortcuts::Shortcuts;
@@ -23,14 +23,17 @@ pub struct UI {
 }
 
 impl UI {
+    /// Creates the popup, the hotkey manager, and the tray icon on `target`. Call it only from
+    /// the running loop, on `StartCause::Init` or later: on macOS, tray-icon needs the loop
+    /// running, not just created.
     pub fn new(
+        target: &EventLoopTarget,
         mic_muted: bool,
         camera_muted: bool,
         app_vars: AppVars,
         settings: &Settings,
-    ) -> Result<(Self, EventLoopMessage, EventIds)> {
-        let event_loop = create();
-        let popup = Popup::new(&event_loop, mic_muted, settings.show_popup)
+    ) -> Result<(Self, EventIds)> {
+        let popup = Popup::new(target, mic_muted, settings.show_popup)
             .context("Failed to setup popup window")?;
         let shortcuts =
             Shortcuts::new(&settings.mic_shortcut).context("Failed to setup shortcuts")?;
@@ -64,21 +67,17 @@ impl UI {
             camera_muted,
         };
         ui.sync_shortcut();
-        Ok((ui, event_loop, event_ids))
+        Ok((ui, event_ids))
     }
 
-    pub fn update_mic(
-        &mut self,
-        muted: bool,
-        active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
+    pub fn update_mic(&mut self, muted: bool) -> Result<&mut Self> {
         trace!("Updating UI mic state {}", muted);
         self.mic_muted = muted;
         self.tray
             .update(muted, !self.camera_muted)
             .context("Failed to update UI tray")?;
         self.popup
-            .update_with_camera(muted, self.camera_muted, active_device_name)
+            .update_with_camera(muted, self.camera_muted)
             .context("Failed to update UI popup")?;
         Ok(self)
     }
@@ -91,7 +90,7 @@ impl UI {
             .update(self.mic_muted, !muted)
             .context("Failed to update UI tray for camera")?;
         self.popup
-            .update_with_camera(self.mic_muted, muted, None)
+            .update_with_camera(self.mic_muted, muted)
             .context("Failed to update UI popup for camera")?;
         Ok(self)
     }

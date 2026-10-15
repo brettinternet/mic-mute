@@ -1,4 +1,4 @@
-use crate::event_loop::EventLoopMessage;
+use crate::event_loop::EventLoopTarget;
 use crate::popup_content::{PopupContent, PopupState};
 use crate::utils::get_cursor_pos;
 use anyhow::{Context, Result};
@@ -88,11 +88,11 @@ pub struct Popup {
 }
 
 impl Popup {
-    pub fn new(event_loop: &EventLoopMessage, mic_muted: bool, enabled: bool) -> Result<Self> {
+    pub fn new(target: &EventLoopTarget, mic_muted: bool, enabled: bool) -> Result<Self> {
         // The camera state arrives with the first update; until then the content says
         // "Camera on", as it always has.
         let camera_in_use = true;
-        let initial_monitor = Popup::get_initial_monitor(event_loop);
+        let initial_monitor = Popup::get_initial_monitor(target);
         let size = Popup::get_size();
         let scale = initial_monitor
             .as_ref()
@@ -115,9 +115,7 @@ impl Popup {
         if let Some(monitor) = initial_monitor.as_ref() {
             builder = builder.with_position(Popup::get_position(monitor, size));
         }
-        let window = builder
-            .build(event_loop)
-            .context("Failed to build window")?;
+        let window = builder.build(target).context("Failed to build window")?;
         window.set_visible(false);
         window.set_ignore_cursor_events(true)?;
 
@@ -158,13 +156,8 @@ impl Popup {
 
     /// Redraws what changed, then brings the popup to the front whenever it should show; the
     /// front-ordering runs on every call, not only on a change. `camera_muted` is
-    /// `CameraController::muted` (`true` while no camera is in use); the device name isn't shown.
-    pub fn update_with_camera(
-        &mut self,
-        mic_muted: bool,
-        camera_muted: bool,
-        _active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
+    /// `CameraController::muted` (`true` while no camera is in use).
+    pub fn update_with_camera(&mut self, mic_muted: bool, camera_muted: bool) -> Result<&mut Self> {
         self.mic_muted = mic_muted;
         self.camera_in_use = !camera_muted;
         self.update_placement()?;
@@ -275,8 +268,8 @@ impl Popup {
         })
     }
 
-    fn get_initial_monitor(event_loop: &EventLoopMessage) -> Option<MonitorHandle> {
-        event_loop.primary_monitor()
+    fn get_initial_monitor(target: &EventLoopTarget) -> Option<MonitorHandle> {
+        target.primary_monitor()
     }
 
     fn show_front(&self) {

@@ -8,8 +8,7 @@ use log::{error, info, trace, warn};
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceUID, kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyVolumeScalar,
-    kAudioHardwareNoError, kAudioHardwarePropertyDefaultInputDevice,
-    kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
+    kAudioHardwareNoError, kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyScopeGlobal, AudioDeviceID, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectIsPropertySettable, AudioObjectPropertyAddress,
     AudioObjectPropertySelector, AudioObjectSetPropertyData,
@@ -25,7 +24,6 @@ use std::mem;
 use std::ptr::{null, NonNull};
 use std::time::Instant;
 
-const SYSTEM_OBJECT_ID: AudioDeviceID = 1;
 const VOLUME_MUTED_EPSILON: f32 = 0.000_001;
 /// Unmute level for a volume-controlled device Mic Mute has never seen audible.
 const UNMUTE_FALLBACK_VOLUME: f32 = 0.5;
@@ -111,7 +109,6 @@ pub trait AudioBackend {
     fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>>;
     fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>>;
     fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>>;
-    fn default_input_device(&self) -> Result<Option<AudioDeviceID>>;
 }
 
 #[derive(Default)]
@@ -396,30 +393,6 @@ impl AudioBackend for CoreAudioBackend {
             }
         }
         Ok(None)
-    }
-
-    fn default_input_device(&self) -> Result<Option<AudioDeviceID>> {
-        let mut property_address = AudioObjectPropertyAddress {
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain,
-        };
-        let mut device_id: AudioDeviceID = 0;
-        let mut data_size = mem::size_of::<AudioDeviceID>() as u32;
-        let status = unsafe {
-            AudioObjectGetPropertyData(
-                SYSTEM_OBJECT_ID,
-                NonNull::new_unchecked(&mut property_address),
-                0,
-                null(),
-                NonNull::new_unchecked(&mut data_size),
-                NonNull::new_unchecked(&mut device_id as *mut AudioDeviceID as *mut c_void),
-            )
-        };
-        if status != kAudioHardwareNoError || device_id == 0 {
-            return Ok(None);
-        }
-        Ok(Some(device_id))
     }
 }
 
@@ -1167,15 +1140,6 @@ impl<B: AudioBackend> MicController<B> {
     pub fn should_enforce_mute(&self) -> bool {
         self.desired_muted
     }
-
-    /// Returns the name of the default system input device, if available.
-    pub fn active_device_name(&self) -> Option<String> {
-        self.backend
-            .default_input_device()
-            .ok()
-            .flatten()
-            .and_then(|device_id| self.backend.device_name(device_id).ok())
-    }
 }
 
 #[cfg(test)]
@@ -1241,7 +1205,6 @@ mod tests {
     struct FakeBackend {
         devices: HashMap<AudioDeviceID, Device>,
         ids: Vec<AudioDeviceID>,
-        default_input: Option<AudioDeviceID>,
         /// When set, each device write records whether this journal store named the device.
         journal_probe: Option<MemoryStore>,
         journaled_at_write: Vec<(AudioDeviceID, bool)>,
@@ -1249,13 +1212,11 @@ mod tests {
 
     impl FakeBackend {
         fn with_devices(devices: Vec<(AudioDeviceID, Device)>) -> Self {
-            let default_input = devices.first().map(|(id, _)| *id);
             let ids = devices.iter().map(|(id, _)| *id).collect();
             let devices = devices.into_iter().collect();
             Self {
                 devices,
                 ids,
-                default_input,
                 ..Self::default()
             }
         }
@@ -1364,10 +1325,6 @@ mod tests {
                 device.volume = Some(volume);
             }
             Ok(Some(()))
-        }
-
-        fn default_input_device(&self) -> Result<Option<AudioDeviceID>> {
-            Ok(self.default_input)
         }
     }
 

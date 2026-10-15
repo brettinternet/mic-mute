@@ -165,7 +165,7 @@ pub struct ShortcutStatus {
     pub problem: Option<ShortcutProblem>,
 }
 
-/// `Shortcuts` publishes its status here because `about::show_about` has no access to `UI`.
+/// `Shortcuts` publishes its status here because `about::AboutWindow` has no access to `UI`.
 static STATUS: Mutex<ShortcutStatus> = Mutex::new(ShortcutStatus {
     registered: None,
     problem: None,
