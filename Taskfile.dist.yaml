@@ -65,7 +65,7 @@ tasks:
       - cargo test --locked
 
   build:
-    desc: Build and bundle Mic Mute.app, then show it in Finder
+    desc: Build and bundle Mic Mute.app, then show it in Finder (NO_OPEN=1 skips Finder)
     cmds:
       - task: build-dependencies
       - task: build-target
@@ -85,7 +85,8 @@ tasks:
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
       - cargo bundle --release --target {{ .TARGET }} --format osx
-      - open ./target/{{ .TARGET }}/release/bundle/osx
+      - cmd: open "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
+        if: '[ -z "{{.NO_OPEN}}" ]'
 
   release:
     desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
@@ -113,13 +114,15 @@ tasks:
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
       - cargo bundle --release --target {{ .TARGET }} --format osx
-      - rcodesign sign --pem-source {{ .PEM_FILE }} ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app
-      - hdiutil create -volname {{ .TITLE }} -srcfolder ./target/{{ .TARGET }}/release/bundle/osx -ov -format UDZO {{ .TITLE }}.dmg
+      - rcodesign sign --pem-source {{ .PEM_FILE }} "{{ .BUNDLE_DIR }}/Mic Mute.app"
+      - hdiutil create -volname {{ .TITLE }} -srcfolder "{{ .BUNDLE_DIR }}" -ov -format UDZO {{ .TITLE }}.dmg
       # - rcodesign sign --pem-source {{ .PEM_FILE }} {{ .TITLE }}.dmg
     env:
       RUST_LOG: warn
     vars:
       PEM_FILE: sign.crt
+      BUNDLE_DIR:
+        sh: echo "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
       NAME:
         sh: toml get Cargo.toml package.name --raw
       VERSION:
