@@ -38,7 +38,8 @@ tasks:
 
   debug:
     cmds:
-      - ./target/debug/mvcm
+      - cargo build --locked
+      - '"${CARGO_TARGET_DIR:-target}/debug/mic-mute"'
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
