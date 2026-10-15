@@ -27,7 +27,13 @@ use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowTarget};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
-const POLL_INTERVAL_MILLIS: u64 = 200;
+/// How often the loop polls the microphones while CoreAudio listeners report device changes:
+/// the poll is a safety net for a change no listener reports.
+const LISTENING_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How often it polls them while a listener is missing.
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How often the popup follows the cursor's monitor while it may be on screen.
+const CURSOR_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// The shortest time from one poll to the next that a device change runs: a device whose
 /// controls keep changing, as when another app fights the mute, can't make the loop poll more
 /// often than this.
@@ -148,6 +154,43 @@ fn device_change_poll_at(pending: Option<Instant>, last_poll: Instant, now: Inst
     pending.map_or(at, |pending| pending.min(at))
 }
 
+/// How often to poll the microphones: rarely while CoreAudio listeners report every device
+/// change (`MicController::is_listening`), else as often as before there were listeners.
+fn poll_interval_for(is_listening: bool) -> Duration {
+    if is_listening {
+        LISTENING_POLL_INTERVAL
+    } else {
+        FALLBACK_POLL_INTERVAL
+    }
+}
+
+/// Logs the poll interval once it changes; `was_listening` is `None` before the first call.
+fn log_poll_interval(was_listening: &mut Option<bool>, is_listening: bool) {
+    if *was_listening == Some(is_listening) {
+        return;
+    }
+    *was_listening = Some(is_listening);
+    let millis = poll_interval_for(is_listening).as_millis();
+    if is_listening {
+        log::info!(
+            "Polling the microphones every {} ms; CoreAudio reports device changes",
+            millis
+        );
+    } else {
+        log::warn!(
+            "Polling the microphones every {} ms until every CoreAudio listener is registered",
+            millis
+        );
+    }
+}
+
+/// Whether the popup may be on screen, so it must follow the cursor's monitor: while muted with
+/// the popup on, and while it flashes after an unmute or a `status` URL (`hide_popup_at`). A
+/// hidden popup is placed when it shows.
+fn is_cursor_tracked(is_muted: bool, is_popup_enabled: bool, is_flashing: bool) -> bool {
+    (is_muted && is_popup_enabled) || is_flashing
+}
+
 /// Runs a URL's action and returns when to hide the popup. An action that can unmute runs only
 /// with `allow_url_unmute`: any app or web page can open the URL.
 fn run_url_action(
@@ -235,11 +278,15 @@ pub fn start(
     // The mute state the user last chose, for `launch_state: "last"`.
     let mut last_state = LastMuteState::load(store::state_file(MUTE_STATE_FILE_NAME));
 
-    let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
-    let mut last_poll = Instant::now() - poll_interval;
+    let mut last_poll = Instant::now()
+        .checked_sub(LISTENING_POLL_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    // Whether every CoreAudio listener was registered at the last pass; see `log_poll_interval`.
+    let mut was_listening: Option<bool> = None;
     // When the poll a reported device change asked for runs; see `device_change_poll_at`.
     let mut device_poll_at: Option<Instant> = None;
+    let mut last_cursor_check = Instant::now();
     let mut hide_popup_at: Option<Instant> = None;
     let mut is_exiting = false;
     let mut devices_menu_failures = FailureLog::new(
@@ -605,8 +652,10 @@ pub fn start(
             }
         }
 
-        // Poll mic state and cursor-monitor position on a 200 ms interval, and soon after a
-        // reported device change.
+        // Poll the microphones every poll interval, and soon after a reported device change.
+        let is_listening = controller.read().is_listening();
+        log_poll_interval(&mut was_listening, is_listening);
+        let poll_interval = poll_interval_for(is_listening);
         let is_device_poll_due = device_poll_at.is_some_and(|at| Instant::now() >= at);
         if is_poll_requested || is_device_poll_due || last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
@@ -624,6 +673,15 @@ pub fn start(
                 }
             }
             show_devices(ui, &controller, &settings, &mut devices_menu_failures);
+        }
+
+        // The popup follows the cursor's monitor on its own cadence, while it may be on screen.
+        let is_muted = controller.read().muted;
+        let is_popup_enabled = settings.read().show_popup;
+        let is_tracking_cursor =
+            is_cursor_tracked(is_muted, is_popup_enabled, hide_popup_at.is_some());
+        if is_tracking_cursor && last_cursor_check.elapsed() >= CURSOR_CHECK_INTERVAL {
+            last_cursor_check = Instant::now();
             if let Err(err) = ui.write().detect() {
                 log::error!("Failed to update popup placement: {:#}", err);
             }
@@ -646,8 +704,13 @@ pub fn start(
             // Sleep until the next scheduled check rather than spinning.
             let next_poll = last_poll + poll_interval;
             let next_settings = last_settings_check + settings_poll_interval;
+            let next_cursor_check =
+                is_tracking_cursor.then(|| last_cursor_check + CURSOR_CHECK_INTERVAL);
             let mut next_wake = next_poll.min(next_settings);
-            for deadline in [hide_popup_at, device_poll_at].into_iter().flatten() {
+            for deadline in [hide_popup_at, device_poll_at, next_cursor_check]
+                .into_iter()
+                .flatten()
+            {
                 next_wake = next_wake.min(deadline);
             }
             *control_flow = ControlFlow::WaitUntil(next_wake);
@@ -709,6 +772,31 @@ mod tests {
         assert_eq!(device_change_poll_at(None, last_poll, later), later);
         let soon = last_poll + Duration::from_millis(10);
         assert_eq!(device_change_poll_at(None, last_poll, soon), spaced);
+    }
+
+    #[test]
+    fn the_poll_slows_down_only_while_every_listener_is_registered() {
+        assert_eq!(poll_interval_for(true), LISTENING_POLL_INTERVAL);
+        assert_eq!(poll_interval_for(false), FALLBACK_POLL_INTERVAL);
+        assert!(FALLBACK_POLL_INTERVAL < LISTENING_POLL_INTERVAL);
+        assert!(DEVICE_CHANGE_POLL_SPACING < FALLBACK_POLL_INTERVAL);
+    }
+
+    #[test]
+    fn the_popup_follows_the_cursor_only_while_it_may_be_on_screen() {
+        assert!(
+            is_cursor_tracked(true, true, false),
+            "muted with the popup on"
+        );
+        assert!(
+            is_cursor_tracked(false, false, true),
+            "a flash, even disabled"
+        );
+        assert!(!is_cursor_tracked(true, false, false), "the popup is off");
+        assert!(
+            !is_cursor_tracked(false, true, false),
+            "unmuted, after the flash"
+        );
     }
 
     #[test]

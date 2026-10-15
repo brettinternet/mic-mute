@@ -62,7 +62,7 @@ fn install_panic_hook() {
 }
 
 fn main() {
-    // RUST_LOG overrides this. Release builds skip the 200 ms poll's per-tick trace output.
+    // RUST_LOG overrides this. Release builds skip the poll's per-tick trace output.
     let default_filter = if cfg!(debug_assertions) {
         "trace"
     } else {
