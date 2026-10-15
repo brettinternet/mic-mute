@@ -1,8 +1,9 @@
 use crate::config::AppVars;
 use crate::icons::{rasterize_svg, tray_icon_color};
-use crate::settings::ShortcutConfig;
+use crate::shortcuts::Shortcut;
 use anyhow::{Context, Result};
 use log::trace;
+use muda::accelerator::{Key, KeyAccelerator};
 use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use std::fmt;
 use tao::window::Theme;
@@ -34,26 +35,10 @@ fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
     Ok(icon)
 }
 
-fn accelerator_from_config(config: &ShortcutConfig) -> Accelerator {
-    let parts = config
-        .modifiers
-        .iter()
-        .map(|modifier| match modifier.as_str() {
-            "meta" => "cmd".to_string(),
-            other => other.to_string(),
-        });
-    let accelerator = parts
-        .chain(std::iter::once(config.key.clone()))
-        .collect::<Vec<_>>()
-        .join("+");
-
-    accelerator
-        .parse::<Accelerator>()
-        .unwrap_or_else(|_| "A".parse().unwrap())
+/// The Mute item's key-equivalent label for `shortcut`.
+fn accelerator_for(shortcut: Shortcut) -> Accelerator {
+    Accelerator::new(Some(shortcut.modifiers()), shortcut.code())
 }
-
-unsafe impl Send for Tray {}
-unsafe impl Sync for Tray {}
 
 impl fmt::Debug for Tray {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -79,16 +64,13 @@ impl Tray {
         login_enabled: bool,
         dock_visible: bool,
         popup_visible: bool,
-        mic_shortcut: &ShortcutConfig,
     ) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
-        let toggle_mute = MenuItem::new(
-            get_mute_menu_text(muted),
-            true,
-            Some(accelerator_from_config(mic_shortcut)),
-        );
+        // The shortcut label is set later with `update_accelerators`: muda fails to
+        // build the whole menu when an item has a key it can't show (e.g. CapsLock).
+        let toggle_mute = MenuItem::new(get_mute_menu_text(muted), true, None);
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
         let show_popup = CheckMenuItem::new("Show Popup", true, popup_visible, None);
@@ -149,12 +131,36 @@ impl Tray {
         Ok(())
     }
 
-    /// Update the displayed keyboard shortcuts after settings change.
-    pub fn update_accelerators(&mut self, mic_shortcut: &ShortcutConfig) -> Result<()> {
+    /// Shows `mic_shortcut`, the registered shortcut, on the Mute item; `None` shows none.
+    ///
+    /// # Errors
+    ///
+    /// When muda can't show the key (e.g. CapsLock or a media key); the item then shows
+    /// no shortcut rather than a stale one.
+    pub fn update_accelerators(&mut self, mic_shortcut: Option<Shortcut>) -> Result<()> {
+        let Some(shortcut) = mic_shortcut else {
+            return self.clear_mute_accelerator();
+        };
+        let shown = self
+            .toggle_mute
+            .set_accelerator(Some(accelerator_for(shortcut)))
+            .with_context(|| format!("Failed to show the {shortcut} shortcut in the tray menu"));
+        if shown.is_err() {
+            self.clear_mute_accelerator()?;
+        }
+        shown
+    }
+
+    /// muda 0.19 on macOS keeps an item's old key equivalent on `set_accelerator(None)`
+    /// and on a failed `set_accelerator`; an empty key equivalent is what it gives items
+    /// created without one.
+    fn clear_mute_accelerator(&mut self) -> Result<()> {
         self.toggle_mute
-            .set_accelerator(Some(accelerator_from_config(mic_shortcut)))
-            .context("Failed to update mic accelerator")?;
-        Ok(())
+            .set_key_accelerator(Some(KeyAccelerator::new(
+                None,
+                Key::Character(String::new()),
+            )))
+            .context("Failed to clear the mute shortcut in the tray menu")
     }
 
     pub fn toggle_mute_id(&self) -> &MenuId {
@@ -185,6 +191,28 @@ impl Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::ShortcutConfig;
+    use crate::shortcuts::parse_shortcut;
+    use muda::accelerator::{Code, Modifiers};
+
+    #[test]
+    fn accelerator_matches_muda_parse_of_the_same_shortcut() {
+        let shortcut = parse_shortcut(&ShortcutConfig::default()).unwrap();
+        let expected: Accelerator = "shift+cmd+KeyM".parse().unwrap();
+        assert_eq!(accelerator_for(shortcut), expected);
+    }
+
+    #[test]
+    fn accelerator_keeps_every_modifier() {
+        let config = ShortcutConfig {
+            modifiers: ["ctrl", "alt", "shift", "meta"].map(String::from).to_vec(),
+            key: "F13".to_string(),
+        };
+        let accelerator = accelerator_for(parse_shortcut(&config).unwrap());
+        let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER;
+        assert_eq!(accelerator.modifiers(), all);
+        assert_eq!(accelerator.key(), Code::F13);
+    }
 
     #[test]
     fn test_get_mute_menu_text_muted() {
