@@ -62,6 +62,7 @@ fn update_mic(
     } else {
         controller.watch_unmuted();
     }
+    controller.save_input_levels_if_due();
     if toggle && !controller.muted {
         task::spawn(async move {
             task::sleep(Duration::from_secs(1)).await;

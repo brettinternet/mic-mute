@@ -1,5 +1,5 @@
 //! What Mic Mute remembers about microphones between runs, next to `settings.json`:
-//! the restore journal (`restore.json`).
+//! the restore journal (`restore.json`) and the last audible input levels (`input-levels.json`).
 
 use crate::store::StateStore;
 use anyhow::{Context, Result};
@@ -7,8 +7,15 @@ use log::{error, info, trace, warn};
 use objc2_core_audio::AudioDeviceID;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub const JOURNAL_FILE_NAME: &str = "restore.json";
+pub const LEVELS_FILE_NAME: &str = "input-levels.json";
+
+/// Level changes smaller than this aren't worth a write.
+const LEVEL_EPSILON: f32 = 0.001;
+/// Users drag input sliders, so `input-levels.json` is written at most this often.
+const LEVELS_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Identifies a device in the records.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -263,6 +270,150 @@ impl RestoreJournal {
     }
 }
 
+/// The last audible input level of one device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputLevel {
+    /// The device name when the level was recorded, for readers of the file.
+    #[serde(default)]
+    pub name: String,
+    pub volume: f32,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LevelsFile {
+    #[serde(default)]
+    devices: BTreeMap<String, InputLevel>,
+}
+
+/// The last audible input level of each volume-controlled device. Unlike the journal it
+/// survives clean exits: it's the fallback when a device is unmuted with no saved level.
+pub struct InputLevels {
+    store: Box<dyn StateStore>,
+    levels: BTreeMap<DeviceKey, InputLevel>,
+    has_unsaved_changes: bool,
+    last_save: Option<Instant>,
+    save_failing: bool,
+}
+
+impl InputLevels {
+    /// Reads the levels; an unreadable file is logged and treated as empty.
+    pub fn load(store: Box<dyn StateStore>) -> Self {
+        let levels = match store.load() {
+            Ok(None) => BTreeMap::new(),
+            Ok(Some(text)) => match serde_json::from_str::<LevelsFile>(&text) {
+                Ok(file) => Self::valid_levels(file.devices),
+                Err(err) => {
+                    error!("Ignoring unreadable {}: {}", LEVELS_FILE_NAME, err);
+                    BTreeMap::new()
+                }
+            },
+            Err(err) => {
+                error!("Failed to read {}: {:#}", LEVELS_FILE_NAME, err);
+                BTreeMap::new()
+            }
+        };
+        Self {
+            store,
+            levels,
+            has_unsaved_changes: false,
+            last_save: None,
+            save_failing: false,
+        }
+    }
+
+    fn valid_levels(levels: BTreeMap<String, InputLevel>) -> BTreeMap<DeviceKey, InputLevel> {
+        levels
+            .into_iter()
+            .filter(|(uid, level)| {
+                let is_valid = !uid.is_empty() && is_valid_volume(level.volume);
+                if !is_valid {
+                    warn!("Ignoring invalid level for {} in {}", uid, LEVELS_FILE_NAME);
+                }
+                is_valid
+            })
+            .map(|(uid, level)| (DeviceKey::Uid(uid), level))
+            .collect()
+    }
+
+    pub fn get(&self, key: &DeviceKey) -> Option<f32> {
+        self.levels.get(key).map(|level| level.volume)
+    }
+
+    /// Records an audible level. Changes smaller than [`LEVEL_EPSILON`] are ignored.
+    pub fn record(&mut self, key: &DeviceKey, name: &str, volume: f32) {
+        if !is_valid_volume(volume) {
+            return;
+        }
+        if let Some(level) = self.levels.get(key) {
+            if (level.volume - volume).abs() < LEVEL_EPSILON {
+                return;
+            }
+        }
+        trace!("Recording input level {:.3} for {}", volume, name);
+        self.levels.insert(
+            key.clone(),
+            InputLevel {
+                name: name.to_string(),
+                volume,
+            },
+        );
+        if key.uid().is_some() {
+            self.has_unsaved_changes = true;
+        }
+    }
+
+    /// Saves pending changes unless the last save was less than [`LEVELS_SAVE_INTERVAL`] ago.
+    pub fn save_if_due(&mut self, now: Instant) {
+        let is_due = self
+            .last_save
+            .is_none_or(|last| now.saturating_duration_since(last) >= LEVELS_SAVE_INTERVAL);
+        if is_due {
+            self.save_at(now);
+        }
+    }
+
+    /// Saves pending changes now, for exit.
+    pub fn save(&mut self) {
+        self.save_at(Instant::now());
+    }
+
+    fn save_at(&mut self, now: Instant) {
+        if !self.has_unsaved_changes {
+            return;
+        }
+        // Count failed attempts too, so a failing disk is retried once per interval.
+        self.last_save = Some(now);
+        match self.write() {
+            Ok(()) => {
+                self.has_unsaved_changes = false;
+                if self.save_failing {
+                    info!("Saved {} again", LEVELS_FILE_NAME);
+                    self.save_failing = false;
+                }
+            }
+            Err(err) => {
+                if self.save_failing {
+                    trace!("Still failing to save {}: {:#}", LEVELS_FILE_NAME, err);
+                } else {
+                    error!("Failed to save {}: {:#}", LEVELS_FILE_NAME, err);
+                    self.save_failing = true;
+                }
+            }
+        }
+    }
+
+    fn write(&self) -> Result<()> {
+        let devices = self
+            .levels
+            .iter()
+            .filter_map(|(key, level)| Some((key.uid()?.to_string(), level.clone())))
+            .collect();
+        let text = serde_json::to_string_pretty(&LevelsFile { devices })
+            .with_context(|| format!("Failed to serialize {}", LEVELS_FILE_NAME))?;
+        self.store.save(&text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +548,84 @@ mod tests {
         journal.save().unwrap();
 
         assert!(store.contents().unwrap().contains("BuiltIn"));
+    }
+
+    #[test]
+    fn levels_ignore_changes_below_the_epsilon() {
+        let store = MemoryStore::default();
+        let mut levels = InputLevels::load(store.boxed());
+        let start = Instant::now();
+        levels.record(&uid("USB"), "USB Mic", 0.65);
+        levels.save_if_due(start);
+
+        levels.record(&uid("USB"), "USB Mic", 0.6505);
+        levels.save_if_due(start + Duration::from_secs(5));
+
+        assert_eq!(store.saves(), 1);
+        assert_eq!(levels.get(&uid("USB")), Some(0.65));
+    }
+
+    #[test]
+    fn levels_are_saved_at_most_once_per_interval() {
+        let store = MemoryStore::default();
+        let mut levels = InputLevels::load(store.boxed());
+        let start = Instant::now();
+        levels.record(&uid("USB"), "USB Mic", 0.65);
+        levels.save_if_due(start);
+
+        levels.record(&uid("USB"), "USB Mic", 0.4);
+        levels.save_if_due(start + Duration::from_millis(400));
+        assert_eq!(store.saves(), 1);
+        levels.save_if_due(start + LEVELS_SAVE_INTERVAL);
+
+        assert_eq!(store.saves(), 2);
+        assert!(store.contents().unwrap().contains("0.4"));
+    }
+
+    #[test]
+    fn levels_flush_pending_changes_on_exit() {
+        let store = MemoryStore::default();
+        let mut levels = InputLevels::load(store.boxed());
+        let start = Instant::now();
+        levels.record(&uid("USB"), "USB Mic", 0.65);
+        levels.save_if_due(start);
+        levels.record(&uid("USB"), "USB Mic", 0.4);
+        levels.save_if_due(start + Duration::from_millis(100));
+
+        levels.save();
+        levels.save();
+
+        assert_eq!(store.saves(), 2);
+        let reloaded = InputLevels::load(store.boxed());
+        assert_eq!(reloaded.get(&uid("USB")), Some(0.4));
+    }
+
+    #[test]
+    fn levels_load_their_file_and_drop_invalid_entries() {
+        let store = MemoryStore::with_contents(
+            r#"{
+                "devices": {
+                    "USB": { "name": "USB Mic", "volume": 0.65 },
+                    "Broken": { "name": "Broken", "volume": -1.0 }
+                }
+            }"#,
+        );
+
+        let levels = InputLevels::load(store.boxed());
+
+        assert_eq!(levels.get(&uid("USB")), Some(0.65));
+        assert_eq!(levels.get(&uid("Broken")), None);
+    }
+
+    #[test]
+    fn levels_of_devices_without_a_uid_stay_in_memory() {
+        let store = MemoryStore::default();
+        let mut levels = InputLevels::load(store.boxed());
+
+        levels.record(&DeviceKey::Session(42), "No UID", 0.65);
+        levels.save();
+
+        assert_eq!(levels.get(&DeviceKey::Session(42)), Some(0.65));
+        assert_eq!(store.saves(), 0);
     }
 }

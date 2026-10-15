@@ -35,6 +35,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 - Microphones Mic Mute muted but couldn't restore as it quit (after `kill -9`, a crash, or power loss) are restored at the next launch; a microphone unplugged by then is restored when it reconnects.
+- Microphones without native mute are muted by setting their input volume to 0. Unmuting restores the level they had; a microphone Mic Mute has never seen audible comes back at 50%.
 
 ## Releases
 

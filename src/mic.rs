@@ -1,8 +1,10 @@
-use crate::device_records::{DeviceKey, RestoreJournal, JOURNAL_FILE_NAME};
+use crate::device_records::{
+    DeviceKey, InputLevels, RestoreJournal, JOURNAL_FILE_NAME, LEVELS_FILE_NAME,
+};
 use crate::store::state_file;
 use anyhow::{anyhow, Context, Result};
 use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceUID, kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyVolumeScalar,
@@ -21,9 +23,12 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::ptr::{null, NonNull};
+use std::time::Instant;
 
 const SYSTEM_OBJECT_ID: AudioDeviceID = 1;
 const VOLUME_MUTED_EPSILON: f32 = 0.000_001;
+/// Unmute level for a volume-controlled device Mic Mute has never seen audible.
+const UNMUTE_FALLBACK_VOLUME: f32 = 0.5;
 const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
     0x766d7663; // 'vmvc'
 
@@ -654,6 +659,9 @@ pub struct MicController<B = CoreAudioBackend> {
     /// What the app changed per device and must undo, keyed by device UID and mirrored to
     /// `restore.json`.
     journal: RestoreJournal,
+    /// The last audible level of each volume-controlled device, mirrored to
+    /// `input-levels.json`.
+    levels: InputLevels,
     /// Journaled devices that were connected at the last unmuted poll. A journaled device that
     /// joins this set gets restored once; later failures wait for the next unmute or exit.
     connected_journaled: HashSet<DeviceKey>,
@@ -676,16 +684,18 @@ impl MicController<CoreAudioBackend> {
         Self::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(state_file(JOURNAL_FILE_NAME)),
+            InputLevels::load(state_file(LEVELS_FILE_NAME)),
         )
     }
 }
 
 impl<B: AudioBackend> MicController<B> {
-    fn with_backend(backend: B, journal: RestoreJournal) -> Result<Self> {
+    fn with_backend(backend: B, journal: RestoreJournal, levels: InputLevels) -> Result<Self> {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
             journal,
+            levels,
             connected_journaled: HashSet::new(),
             backend,
         };
@@ -694,6 +704,7 @@ impl<B: AudioBackend> MicController<B> {
         trace!("Found {} devices: {}", names.len(), names.join(", "));
         // Undo what an unclean exit left behind before the hardware state becomes user intent.
         controller.restore_after_unclean_exit();
+        controller.record_audible_levels();
         controller.muted = controller.is_muted_all()?;
         controller.desired_muted = controller.muted;
         Ok(controller)
@@ -875,20 +886,22 @@ impl<B: AudioBackend> MicController<B> {
         state: bool,
     ) -> Result<bool> {
         if !state {
-            return self.unmute_via_volume(audio_device_id, key);
+            return self.unmute_via_volume(audio_device_id, name, key);
         }
         let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
             return Ok(false);
         };
-        if !is_volume_muted(current_vol) && self.journal.record_saved_volume(key, name, current_vol)
-        {
-            trace!(
-                "Saving volume {:.3} for device {} before muting",
-                current_vol,
-                audio_device_id
-            );
-            // Journal the level before changing it, so a crash can't lose it.
-            self.journal.save_logged();
+        if !is_volume_muted(current_vol) {
+            self.levels.record(key, name, current_vol);
+            if self.journal.record_saved_volume(key, name, current_vol) {
+                trace!(
+                    "Saving volume {:.3} for device {} before muting",
+                    current_vol,
+                    audio_device_id
+                );
+                // Journal the level before changing it, so a crash can't lose it.
+                self.journal.save_logged();
+            }
         }
         if self.backend.set_volume(audio_device_id, 0.0)?.is_none() {
             return Ok(false);
@@ -909,6 +922,7 @@ impl<B: AudioBackend> MicController<B> {
     fn unmute_via_volume(
         &mut self,
         audio_device_id: AudioDeviceID,
+        name: &str,
         key: &DeviceKey,
     ) -> Result<bool> {
         let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
@@ -919,7 +933,7 @@ impl<B: AudioBackend> MicController<B> {
             self.journal.clear_saved_volume(key);
             return Ok(true);
         }
-        let restore_vol = self.unmute_volume(key);
+        let restore_vol = self.unmute_volume(audio_device_id, name, key);
         trace!(
             "Restoring volume {:.3} for device {}",
             restore_vol,
@@ -943,16 +957,26 @@ impl<B: AudioBackend> MicController<B> {
             ));
         }
         self.journal.clear_saved_volume(key);
+        self.levels.record(key, name, volume);
         Ok(true)
     }
 
     /// The level to unmute a volume-muted device at: the level saved when the app muted it,
-    /// else full volume.
-    fn unmute_volume(&self, key: &DeviceKey) -> f32 {
-        self.journal
+    /// else the last audible level recorded, else [`UNMUTE_FALLBACK_VOLUME`].
+    fn unmute_volume(&self, audio_device_id: AudioDeviceID, name: &str, key: &DeviceKey) -> f32 {
+        let is_audible = |volume: &f32| !is_volume_muted(*volume);
+        let known = self
+            .journal
             .saved_volume(key)
-            .filter(|volume| !is_volume_muted(*volume))
-            .unwrap_or(1.0_f32)
+            .filter(is_audible)
+            .or_else(|| self.levels.get(key).filter(is_audible));
+        known.unwrap_or_else(|| {
+            warn!(
+                "No audible input level is known for audio device {}: {}; unmuting at {:.2}",
+                audio_device_id, name, UNMUTE_FALLBACK_VOLUME
+            );
+            UNMUTE_FALLBACK_VOLUME
+        })
     }
 
     pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
@@ -1003,13 +1027,14 @@ impl<B: AudioBackend> MicController<B> {
         Ok(self)
     }
 
-    /// Undoes every journaled change on connected devices. Restoring twice is a no-op, so
-    /// every exit path can call it.
+    /// Undoes every journaled change on connected devices and saves pending records.
+    /// Restoring twice is a no-op, so every exit path can call it.
     pub fn restore_on_exit(&mut self) -> Result<()> {
         let failures = restore_journaled_devices(&mut self.backend, &mut self.journal);
         // Deletes restore.json after a clean, complete restore; failed and disconnected
         // devices stay listed for the next launch.
         self.journal.save_logged();
+        self.levels.save();
         if failures.is_empty() && !self.journal.is_empty() {
             info!(
                 "Keeping {} disconnected device(s) in {} for the next launch",
@@ -1035,6 +1060,7 @@ impl<B: AudioBackend> MicController<B> {
     /// Runs on every poll while the user's intent is unmuted.
     pub fn watch_unmuted(&mut self) {
         self.restore_reconnected_devices();
+        self.record_audible_levels();
     }
 
     /// Restores journaled devices that joined the connected set since the last poll: devices
@@ -1069,6 +1095,43 @@ impl<B: AudioBackend> MicController<B> {
             );
         }
         self.journal.save_logged();
+    }
+
+    /// Records the level of every volume-controlled device that is audible now.
+    fn record_audible_levels(&mut self) {
+        let ids = match self.get_input_device_ids() {
+            Ok(ids) => ids,
+            Err(err) => {
+                trace!("Could not list input devices to record levels: {}", err);
+                return;
+            }
+        };
+        for id in ids {
+            if let Err(err) = self.record_audible_level(id) {
+                trace!("Could not record the input level of device {}: {}", id, err);
+            }
+        }
+    }
+
+    fn record_audible_level(&mut self, audio_device_id: AudioDeviceID) -> Result<()> {
+        if mute_control(&self.backend, audio_device_id)? != Some(MuteControl::Volume) {
+            return Ok(());
+        }
+        let Some(volume) = self.backend.get_volume(audio_device_id)? else {
+            return Ok(());
+        };
+        if is_volume_muted(volume) {
+            return Ok(());
+        }
+        let key = device_key(&self.backend, audio_device_id);
+        let name = self.backend.device_name(audio_device_id)?;
+        self.levels.record(&key, &name, volume);
+        Ok(())
+    }
+
+    /// Saves recorded input levels at most once per second; call on every poll.
+    pub fn save_input_levels_if_due(&mut self) {
+        self.levels.save_if_due(Instant::now());
     }
 
     pub fn toggle(&mut self, state: Option<bool>) -> Result<&Self> {
@@ -1283,16 +1346,21 @@ mod tests {
         }
     }
 
-    /// An in-memory stand-in for restore.json, shared across "launches".
+    /// In-memory stand-ins for restore.json and input-levels.json, shared across "launches".
     #[derive(Default)]
     struct Stores {
         journal: MemoryStore,
+        levels: MemoryStore,
     }
 
     impl Stores {
         fn launch(&self, backend: FakeBackend) -> MicController<FakeBackend> {
-            MicController::with_backend(backend, RestoreJournal::load(self.journal.boxed()))
-                .unwrap()
+            MicController::with_backend(
+                backend,
+                RestoreJournal::load(self.journal.boxed()),
+                InputLevels::load(self.levels.boxed()),
+            )
+            .unwrap()
         }
 
         fn journal_json(&self) -> serde_json::Value {
@@ -1311,10 +1379,12 @@ mod tests {
         let result = MicController::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(stores.journal.boxed()),
+            InputLevels::load(stores.levels.boxed()),
         );
 
         assert!(result.is_ok());
         assert_eq!(stores.journal.saves(), 0);
+        assert_eq!(stores.levels.saves(), 0);
     }
 
     #[test]
@@ -1516,7 +1586,7 @@ mod tests {
         controller.mute_all(false).unwrap();
 
         assert!(!controller.muted);
-        assert_eq!(controller.backend.device(1).unwrap().volume, Some(1.0));
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.5));
     }
 
     #[test]
@@ -1774,6 +1844,68 @@ mod tests {
 
         assert_eq!(controller.backend.device(7).unwrap().volume, Some(0.65));
         assert!(controller.journal.is_empty());
+    }
+
+    #[test]
+    fn restart_unmutes_at_the_level_recorded_in_an_earlier_run() {
+        let stores = Stores::default();
+        let mut first = stores.launch(FakeBackend::with_devices(vec![(
+            1,
+            Device::fallback("USB Mic", 0.65),
+        )]));
+        first.restore_on_exit().unwrap();
+        assert!(stores.levels.contents().unwrap().contains("0.65"));
+
+        // Something else muted the mic by volume before the next launch.
+        let mut backend = first.backend;
+        backend.device_mut(1).unwrap().volume = Some(0.0);
+        let mut second = stores.launch(backend);
+        assert!(second.muted);
+
+        second.mute_all(false).unwrap();
+
+        assert_eq!(second.backend.device(1).unwrap().volume, Some(0.65));
+    }
+
+    #[test]
+    fn unmute_uses_the_recorded_level_when_none_was_saved_at_mute() {
+        let mut controller = controller(FakeBackend::with_devices(vec![(
+            1,
+            Device::fallback("Continuity", 0.65),
+        )]));
+        controller.backend.device_mut(1).unwrap().volume = Some(0.0);
+        controller.mute_all(true).unwrap();
+        assert_eq!(controller.journal.saved_volume(&key("Continuity")), None);
+
+        controller.mute_all(false).unwrap();
+
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.65));
+    }
+
+    #[test]
+    fn levels_of_volume_controlled_devices_are_recorded_while_unmuted() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.backend.device_mut(2).unwrap().volume = Some(0.4);
+
+        controller.watch_unmuted();
+        controller.levels.save();
+
+        assert_eq!(controller.levels.get(&key("USB Mic")), Some(0.4));
+        assert_eq!(controller.levels.get(&key("Built-in")), None);
+        assert!(stores.levels.contents().unwrap().contains("USB Mic UID"));
+    }
+
+    #[test]
+    fn hot_plugged_device_level_is_recorded_while_muted() {
+        let mut controller = controller(FakeBackend::default());
+        controller.mute_all(true).unwrap();
+
+        controller.backend.plug(4, Device::fallback("USB Mic", 0.8));
+        controller.toggle(Some(true)).unwrap();
+
+        assert_eq!(controller.levels.get(&key("USB Mic")), Some(0.8));
+        assert_eq!(controller.journal.saved_volume(&key("USB Mic")), Some(0.8));
     }
 
     #[test]
