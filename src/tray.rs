@@ -1,5 +1,5 @@
 use crate::config::AppVars;
-use crate::icons::{rasterize_svg, tray_icon_color};
+use crate::icons::{self, IconVariant};
 use crate::shortcuts::Shortcut;
 use anyhow::{Context, Result};
 use log::trace;
@@ -20,18 +20,28 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-fn get_image(muted: bool, _theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
-    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
-    let svg = if muted { MIC_OFF } else { MIC_ON };
-    rasterize_svg(svg, &tray_icon_color(muted))
+/// What the tray shows: its icon and the Mute item's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrayView {
+    icon: IconVariant,
+    menu_text: &'static str,
 }
 
-fn get_icon(muted: bool, theme: Theme) -> Result<Icon> {
-    trace!("Fetching icons");
-    let (icon_rgba, icon_width, icon_height) = get_image(muted, theme)?;
-    let icon =
-        Icon::from_rgba(icon_rgba, icon_width, icon_height).context("Failed to open icon")?;
+impl TrayView {
+    /// The theme doesn't change the tray yet: its icon is white, or red while muted.
+    fn new(muted: bool, _theme: Theme) -> Self {
+        Self {
+            icon: icons::tray_mic(muted),
+            menu_text: get_mute_menu_text(muted),
+        }
+    }
+}
+
+/// A tray icon of `variant`, built from its cached render.
+fn get_icon(variant: IconVariant) -> Result<Icon> {
+    let rendered = variant.rendered()?;
+    let icon = Icon::from_rgba(rendered.rgba.clone(), rendered.width, rendered.height)
+        .context("Failed to open icon")?;
     Ok(icon)
 }
 
@@ -60,6 +70,8 @@ pub struct Tray {
     tooltip: String,
     /// Disabled first menu item, and the separator below it, while settings.json is unusable.
     settings_notice: Option<(MenuItem, PredefinedMenuItem)>,
+    /// What the icon and the Mute item show now; `update` leaves matching parts alone.
+    shown: TrayView,
 }
 
 impl Tray {
@@ -72,7 +84,8 @@ impl Tray {
         popup_visible: bool,
     ) -> Result<Self> {
         trace!("Creating tray icon");
-        let icon = get_icon(muted, theme)?;
+        let shown = TrayView::new(muted, theme);
+        let icon = get_icon(shown.icon)?;
         let tray_menu = Menu::new();
         // The shortcut label is set later with `update_accelerators`: muda fails to
         // build the whole menu when an item has a key it can't show (e.g. CapsLock).
@@ -117,28 +130,37 @@ impl Tray {
             menu: tray_menu,
             tooltip,
             settings_notice: None,
+            shown,
         };
         Ok(tray)
     }
 
+    /// Shows `muted` in the icon and the Mute item, touching only the parts that change, so a
+    /// repeated call with the same state costs nothing.
     pub fn update(&mut self, muted: bool, theme: Theme) -> Result<()> {
-        trace!("Updating tray with {} state", get_mute_menu_text(muted));
-        self.update_icon(muted, theme)?;
-        self.update_menu(muted)?;
-        Ok(())
+        let next = TrayView::new(muted, theme);
+        self.update_menu(next.menu_text);
+        self.update_icon(next.icon)
     }
 
-    fn update_icon(&mut self, muted: bool, theme: Theme) -> Result<()> {
-        let icon = get_icon(muted, theme)?;
-        self.systray.set_icon(Some(icon))?;
+    /// A failed icon stays unrecorded, so the next `update` retries it.
+    fn update_icon(&mut self, icon: IconVariant) -> Result<()> {
+        if icon == self.shown.icon {
+            return Ok(());
+        }
+        self.systray.set_icon(Some(get_icon(icon)?))?;
+        self.shown.icon = icon;
         trace!("Updated tray icon");
         Ok(())
     }
 
-    fn update_menu(&mut self, muted: bool) -> Result<()> {
-        self.toggle_mute.set_text(get_mute_menu_text(muted));
-        trace!("Updated tray menu");
-        Ok(())
+    fn update_menu(&mut self, text: &'static str) {
+        if text == self.shown.menu_text {
+            return;
+        }
+        self.toggle_mute.set_text(text);
+        self.shown.menu_text = text;
+        trace!("Updated tray menu: {}", text);
     }
 
     /// Shows `mic_shortcut`, the registered shortcut, on the Mute item; `None` shows none.
@@ -257,6 +279,19 @@ mod tests {
         let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER;
         assert_eq!(accelerator.modifiers(), all);
         assert_eq!(accelerator.key(), Code::F13);
+    }
+
+    #[test]
+    fn tray_view_follows_the_mute_state_but_not_the_theme() {
+        let muted = TrayView::new(true, Theme::Light);
+        assert_eq!(muted, TrayView::new(true, Theme::Dark));
+
+        let unmuted = TrayView::new(false, Theme::Light);
+        assert_ne!(muted.icon, unmuted.icon);
+        assert_eq!(
+            (muted.menu_text, unmuted.menu_text),
+            (UNMUTE_TEXT, MUTE_TEXT)
+        );
     }
 
     #[test]

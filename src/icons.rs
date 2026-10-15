@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
+use image::ImageEncoder;
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tao::window::Theme;
 
-pub struct IconColor {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IconColor {
+    r: u8,
+    g: u8,
+    b: u8,
 }
 
-pub fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
+fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
     match theme {
         Theme::Light if muted => IconColor {
             r: 239,
@@ -28,7 +32,7 @@ pub fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
     }
 }
 
-pub fn tray_icon_color(muted: bool) -> IconColor {
+fn tray_icon_color(muted: bool) -> IconColor {
     if muted {
         IconColor {
             r: 239,
@@ -44,9 +48,117 @@ pub fn tray_icon_color(muted: bool) -> IconColor {
     }
 }
 
+/// An SVG embedded from `assets/`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Glyph {
+    Mic,
+    MicOff,
+    Video,
+    VideoOff,
+}
+
+impl Glyph {
+    fn mic(muted: bool) -> Self {
+        if muted {
+            Self::MicOff
+        } else {
+            Self::Mic
+        }
+    }
+
+    fn svg(self) -> &'static [u8] {
+        match self {
+            Self::Mic => include_bytes!("../assets/mic.svg"),
+            Self::MicOff => include_bytes!("../assets/mic-off.svg"),
+            Self::Video => include_bytes!("../assets/video.svg"),
+            Self::VideoOff => include_bytes!("../assets/video-off.svg"),
+        }
+    }
+}
+
+/// One icon in one color. Only `tray_mic`, `popup_mic`, and `popup_camera` build variants, so
+/// there are at most 4 glyphs × 4 colors of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IconVariant {
+    glyph: Glyph,
+    color: IconColor,
+}
+
+/// The tray's mic icon: red while muted, else white.
+pub fn tray_mic(muted: bool) -> IconVariant {
+    IconVariant {
+        glyph: Glyph::mic(muted),
+        color: tray_icon_color(muted),
+    }
+}
+
+/// The popup's mic icon: red while muted, else the theme's text color.
+pub fn popup_mic(muted: bool, theme: Theme) -> IconVariant {
+    IconVariant {
+        glyph: Glyph::mic(muted),
+        color: popup_icon_color(muted, theme),
+    }
+}
+
+/// The popup's camera icon: the theme's text color while a camera is in use, else red, like a
+/// muted mic.
+pub fn popup_camera(in_use: bool, theme: Theme) -> IconVariant {
+    IconVariant {
+        glyph: if in_use {
+            Glyph::Video
+        } else {
+            Glyph::VideoOff
+        },
+        color: popup_icon_color(!in_use, theme),
+    }
+}
+
+/// An icon variant's pixels, rendered once and kept for the process lifetime.
+pub struct RenderedIcon {
+    /// Un-premultiplied RGBA, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// The same pixels PNG-encoded.
+    pub png: Vec<u8>,
+}
+
+/// Every variant rendered so far. Holds plain bytes, never AppKit objects, so nothing in it
+/// needs a retain or a release; callers build `NSImage`s and tray icons from it when the shown
+/// variant changes. Bounded by the variant count (at most 16 entries of a few KB each), so it
+/// never evicts.
+static RENDERED: Mutex<Vec<(IconVariant, Arc<RenderedIcon>)>> = Mutex::new(Vec::new());
+
+impl IconVariant {
+    /// This variant rasterized and PNG-encoded: rendered on first use, cached after that.
+    pub fn rendered(self) -> Result<Arc<RenderedIcon>> {
+        let mut rendered = RENDERED.lock();
+        if let Some((_, icon)) = rendered.iter().find(|(variant, _)| *variant == self) {
+            return Ok(Arc::clone(icon));
+        }
+        let icon = Arc::new(self.render()?);
+        rendered.push((self, Arc::clone(&icon)));
+        Ok(icon)
+    }
+
+    fn render(self) -> Result<RenderedIcon> {
+        let (rgba, width, height) = rasterize_svg(self.glyph.svg(), &self.color)?;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+            .context("Failed to encode PNG")?;
+        Ok(RenderedIcon {
+            rgba,
+            width,
+            height,
+            png,
+        })
+    }
+}
+
 /// Rasterizes an SVG with the given stroke color.
 /// Returns un-premultiplied RGBA bytes plus the source dimensions.
-pub fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u32, u32)> {
+fn rasterize_svg(svg_bytes: &[u8], color: &IconColor) -> Result<(Vec<u8>, u32, u32)> {
     let svg_str = std::str::from_utf8(svg_bytes).context("SVG is not valid UTF-8")?;
     let colored = svg_str.replacen(
         "<svg ",
@@ -95,7 +207,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// Icons the app embeds with `include_bytes!` (`tray.rs`, `popup_content.rs`).
+    /// Icons the app embeds with `include_bytes!` (`Glyph::svg`).
     const EMBEDDED_ICONS: [&str; 4] = ["mic.svg", "mic-off.svg", "video.svg", "video-off.svg"];
 
     fn asset_svg_paths() -> Vec<PathBuf> {
@@ -107,6 +219,18 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    /// Every variant the tray and the popup can show.
+    fn every_variant() -> Vec<IconVariant> {
+        let mut variants = vec![tray_mic(true), tray_mic(false)];
+        for theme in [Theme::Light, Theme::Dark] {
+            for state in [true, false] {
+                variants.push(popup_mic(state, theme));
+                variants.push(popup_camera(state, theme));
+            }
+        }
+        variants
     }
 
     #[test]
@@ -146,6 +270,80 @@ mod tests {
         assert!(!opaque.is_empty(), "mic.svg has no fully covered pixels");
         for pixel in opaque {
             assert_eq!(pixel[..3], [color.r, color.g, color.b]);
+        }
+    }
+
+    #[test]
+    fn variants_pick_the_glyph_and_color_for_each_state() {
+        let red = IconColor {
+            r: 239,
+            g: 68,
+            b: 68,
+        };
+        let light_red = IconColor {
+            r: 248,
+            g: 113,
+            b: 113,
+        };
+        let black = IconColor { r: 0, g: 0, b: 0 };
+        let white = IconColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let cases = [
+            (tray_mic(true), Glyph::MicOff, red),
+            (tray_mic(false), Glyph::Mic, white),
+            (popup_mic(true, Theme::Light), Glyph::MicOff, red),
+            (popup_mic(false, Theme::Light), Glyph::Mic, black),
+            (popup_mic(true, Theme::Dark), Glyph::MicOff, light_red),
+            (popup_mic(false, Theme::Dark), Glyph::Mic, white),
+            (popup_camera(true, Theme::Light), Glyph::Video, black),
+            (popup_camera(false, Theme::Light), Glyph::VideoOff, red),
+            (popup_camera(true, Theme::Dark), Glyph::Video, white),
+            (popup_camera(false, Theme::Dark), Glyph::VideoOff, light_red),
+        ];
+        for (variant, glyph, color) in cases {
+            assert_eq!(variant, IconVariant { glyph, color });
+        }
+    }
+
+    #[test]
+    fn rendered_reuses_the_first_render_of_each_variant() {
+        let muted = popup_mic(true, Theme::Dark);
+        let first = muted.rendered().expect("muted mic renders");
+        let again = muted.rendered().expect("muted mic renders");
+        assert!(Arc::ptr_eq(&first, &again), "{muted:?} was rendered twice");
+
+        let unmuted = popup_mic(false, Theme::Dark)
+            .rendered()
+            .expect("unmuted mic renders");
+        assert!(
+            !Arc::ptr_eq(&first, &unmuted),
+            "two variants share a render"
+        );
+    }
+
+    #[test]
+    fn every_variant_renders_a_png_of_its_pixels() {
+        for variant in every_variant() {
+            let icon = variant
+                .rendered()
+                .unwrap_or_else(|e| panic!("{variant:?} failed to render: {e:#}"));
+            let pixels = icon.width as usize * icon.height as usize * 4;
+            assert_eq!(icon.rgba.len(), pixels, "{variant:?}");
+            let decoded = image::load_from_memory_with_format(&icon.png, image::ImageFormat::Png)
+                .unwrap_or_else(|e| panic!("{variant:?} is not a valid PNG: {e}"))
+                .into_rgba8();
+            assert_eq!(
+                (decoded.width(), decoded.height()),
+                (icon.width, icon.height),
+                "{variant:?}"
+            );
+            assert!(
+                *decoded.as_raw() == icon.rgba,
+                "{variant:?}: the PNG's pixels differ from the RGBA"
+            );
         }
     }
 }

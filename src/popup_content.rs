@@ -1,9 +1,10 @@
-use crate::icons::{popup_icon_color, rasterize_svg};
-use anyhow::{Context, Result};
+use crate::icons::{self, RenderedIcon};
+use anyhow::Result;
 use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::Object;
+use std::sync::Arc;
 use tao::dpi::LogicalSize;
 use tao::window::Theme;
 
@@ -11,6 +12,14 @@ const MUTED_DESCRIPTION: &str = "Mic off";
 const UNMUTED_DESCRIPTION: &str = "Mic on";
 const CAMERA_MUTED_DESCRIPTION: &str = "Camera off";
 const CAMERA_UNMUTED_DESCRIPTION: &str = "Camera on";
+
+/// `NSTextAlignmentCenter`, an `NSInteger` (AppKit `NSText.h`). The header picks the value with
+/// `TARGET_ABI_USES_IOS_VALUES`, which `TargetConditionals.h` defines as `!TARGET_CPU_X86_64 || …`:
+/// Apple silicon Macs use the iOS value 1 (`NSTextAlignmentRight` = 2), Intel Macs use 2
+/// (`NSTextAlignmentRight` = 1).
+const NS_TEXT_ALIGNMENT_CENTER: i64 = if cfg!(target_arch = "x86_64") { 2 } else { 1 };
+/// `NSStackViewGravityCenter = 2`, an `NSInteger` (AppKit `NSStackView.h`).
+const NS_STACK_VIEW_GRAVITY_CENTER: i64 = 2;
 
 pub fn get_mic_mute_description_text(muted: bool) -> &'static str {
     if muted {
@@ -55,20 +64,24 @@ fn get_text_color(muted: bool, theme: Theme) -> id {
     }
 }
 
+/// Sets `label`'s text and color.
+unsafe fn set_label(label: id, text: &str, color: id) {
+    let text = NSString::alloc(nil).init_str(text);
+    label.setStringValue_(text);
+    let _: () = msg_send![text, release];
+    let _: () = msg_send![label, setTextColor: color];
+}
+
 fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
-        let _: () = msg_send![label, initWithFrame: frame];
-        let label_str = NSString::alloc(nil).init_str(text);
-        label.setStringValue_(label_str);
-        let _: () = msg_send![label_str, release];
-        let _: () = msg_send![label, setTextColor: color];
+        let label: id = msg_send![label, initWithFrame: frame];
+        set_label(label, text, color);
         let _: () = msg_send![label, setBezeled: NO];
         let _: () = msg_send![label, setEditable: NO];
         let _: () = msg_send![label, setDrawsBackground: NO];
         let _: () = msg_send![label, setSelectable: NO];
-        const NSALIGNMENT_CENTER: i32 = 1;
-        let _: () = msg_send![label, setAlignment: NSALIGNMENT_CENTER];
+        let _: () = msg_send![label, setAlignment: NS_TEXT_ALIGNMENT_CENTER];
         let ns_font = class!(NSFont);
         let default_size: f64 = msg_send![ns_font, systemFontSize];
         let custom_font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size + 3.0_f64];
@@ -77,55 +90,44 @@ fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     }
 }
 
-/// Rasterizes an SVG and returns PNG-encoded bytes plus source dimensions.
-/// Uses the same NSData→NSImage path as the previous PNG-based approach.
-fn svg_to_png(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<(Vec<u8>, u32, u32)> {
-    let color = popup_icon_color(muted, theme);
-    let (rgba, w, h) = rasterize_svg(svg_bytes, &color)?;
-    let img = image::RgbaImage::from_raw(w, h, rgba).context("Failed to create RgbaImage")?;
-    let mut png = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .context("Failed to encode PNG")?;
-    Ok((png, w, h))
-}
-
-fn svg_to_ns_image(svg_bytes: &[u8], muted: bool, theme: Theme) -> Result<id> {
-    let (png, w, h) = svg_to_png(svg_bytes, muted, theme)?;
+/// A new `NSImage` of `icon`'s cached PNG, 16 pt tall; the caller owns it (+1) and releases it.
+fn ns_image(icon: &RenderedIcon) -> id {
     const ICON_HEIGHT: f64 = 16.;
-    let icon_width = (w as f64) / (h as f64 / ICON_HEIGHT);
-    let ns_image = unsafe {
+    let icon_width = f64::from(icon.width) / (f64::from(icon.height) / ICON_HEIGHT);
+    unsafe {
         let nsdata = NSData::dataWithBytes_length_(
             nil,
-            png.as_ptr() as *const std::os::raw::c_void,
-            png.len() as u64,
+            icon.png.as_ptr() as *const std::os::raw::c_void,
+            icon.png.len() as u64,
         );
         let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
         let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, ICON_HEIGHT)];
         let _: () = msg_send![ns_image, setTemplate: NO];
         ns_image
-    };
-    Ok(ns_image)
+    }
 }
 
-fn get_mic_image(muted: bool, theme: Theme) -> Result<id> {
-    const MIC_ON: &[u8] = include_bytes!("../assets/mic.svg");
-    const MIC_OFF: &[u8] = include_bytes!("../assets/mic-off.svg");
-    svg_to_ns_image(if muted { MIC_OFF } else { MIC_ON }, muted, theme)
+/// Shows `icon` in `image_view`, which then holds the only reference to the new `NSImage`.
+unsafe fn set_image(image_view: id, icon: &RenderedIcon) {
+    let image = ns_image(icon);
+    image_view.setImage_(image);
+    let _: () = msg_send![image, release];
 }
 
-fn get_camera_image(muted: bool, theme: Theme) -> Result<id> {
-    const VIDEO_ON: &[u8] = include_bytes!("../assets/video.svg");
-    const VIDEO_OFF: &[u8] = include_bytes!("../assets/video-off.svg");
-    svg_to_ns_image(if muted { VIDEO_OFF } else { VIDEO_ON }, muted, theme)
-}
-
-fn make_image_view(image: id, frame: NSRect) -> id {
+fn make_image_view(icon: &RenderedIcon, frame: NSRect) -> id {
     unsafe {
         let view = NSImageView::alloc(nil);
-        let _: () = msg_send![view, initWithFrame: frame];
-        view.setImage_(image);
+        let view: id = msg_send![view, initWithFrame: frame];
+        set_image(view, icon);
         view
     }
+}
+
+/// The mic and camera icons for `state`, from the process-wide cache.
+fn icons_for(state: PopupState) -> Result<(Arc<RenderedIcon>, Arc<RenderedIcon>)> {
+    let mic = icons::popup_mic(state.mic_muted, state.theme).rendered()?;
+    let camera = icons::popup_camera(state.camera_in_use, state.theme).rendered()?;
+    Ok((mic, camera))
 }
 
 /// 1pt-wide vertical separator. Explicit size constraints tell the gravity-based
@@ -143,6 +145,8 @@ unsafe fn make_separator_view(line_height: f64) -> id {
     let cg_color: *const std::os::raw::c_void = msg_send![color, CGColor];
     let _: () = msg_send![layer, setBackgroundColor: cg_color];
     // Size constraints without position constraints — NSStackView controls position.
+    // NSLayoutConstraint.h, all NSInteger: NSLayoutAttributeWidth = 7, NSLayoutAttributeHeight = 8,
+    // NSLayoutAttributeNotAnAttribute = 0, NSLayoutRelationEqual = 0.
     let _: () = msg_send![sep, setTranslatesAutoresizingMaskIntoConstraints: NO];
     let w: id = msg_send![class!(NSLayoutConstraint),
         constraintWithItem: sep attribute: 7i64 relatedBy: 0i64
@@ -155,6 +159,15 @@ unsafe fn make_separator_view(line_height: f64) -> id {
     sep
 }
 
+/// What the popup content shows; `Popup` redraws it only when this changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupState {
+    pub mic_muted: bool,
+    pub camera_in_use: bool,
+    pub theme: Theme,
+}
+
+/// Non-owning ids: the stack view `view` (owned by the window's content view) retains the rest.
 #[derive(Copy, Clone)]
 pub struct PopupContent {
     mic_label: id,
@@ -165,49 +178,39 @@ pub struct PopupContent {
 }
 
 impl PopupContent {
-    pub fn new(
-        mic_muted: bool,
-        camera_muted: bool,
-        size: LogicalSize<f64>,
-        theme: Theme,
-    ) -> Result<Self> {
+    pub fn new(state: PopupState, size: LogicalSize<f64>) -> Result<Self> {
+        // Fetch the icons before allocating any view, so an error leaks none.
+        let (mic_icon, camera_icon) = icons_for(state)?;
         let frame = get_frame_rect(size);
 
         let mic_label = get_textfield(
-            get_mic_mute_description_text(mic_muted),
-            get_text_color(mic_muted, theme),
+            get_mic_mute_description_text(state.mic_muted),
+            get_text_color(state.mic_muted, state.theme),
             frame,
         );
-        let mic_ns_image = get_mic_image(mic_muted, theme)?;
-        let mic_image = make_image_view(mic_ns_image, frame);
-        unsafe {
-            let _: () = msg_send![mic_ns_image, release];
-        }
-        let camera_ns_image = get_camera_image(camera_muted, theme)?;
-        let camera_image = make_image_view(camera_ns_image, frame);
-        unsafe {
-            let _: () = msg_send![camera_ns_image, release];
-        }
+        let mic_image = make_image_view(&mic_icon, frame);
+        let camera_image = make_image_view(&camera_icon, frame);
+        let camera_off = !state.camera_in_use;
         let camera_label = get_textfield(
-            get_camera_mute_description_text(camera_muted),
-            get_text_color(camera_muted, theme),
+            get_camera_mute_description_text(camera_off),
+            get_text_color(camera_off, state.theme),
             frame,
         );
 
         let view = unsafe {
             let stack: *mut Object = msg_send![class!(NSStackView), alloc];
-            let _: () = msg_send![stack, initWithFrame: frame];
-            const GRAVITY_CENTER: i32 = 2;
-            let _: () = msg_send![stack, addView: mic_image inGravity: GRAVITY_CENTER];
+            let stack: id = msg_send![stack, initWithFrame: frame];
+            let gravity = NS_STACK_VIEW_GRAVITY_CENTER;
+            let _: () = msg_send![stack, addView: mic_image inGravity: gravity];
             let _: () = msg_send![mic_image, release];
-            let _: () = msg_send![stack, addView: mic_label inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: mic_label inGravity: gravity];
             let _: () = msg_send![mic_label, release];
             let sep = make_separator_view(frame.size.height);
-            let _: () = msg_send![stack, addView: sep inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: sep inGravity: gravity];
             let _: () = msg_send![sep, release];
-            let _: () = msg_send![stack, addView: camera_image inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: camera_image inGravity: gravity];
             let _: () = msg_send![camera_image, release];
-            let _: () = msg_send![stack, addView: camera_label inGravity: GRAVITY_CENTER];
+            let _: () = msg_send![stack, addView: camera_label inGravity: gravity];
             let _: () = msg_send![camera_label, release];
             stack
         };
@@ -221,32 +224,25 @@ impl PopupContent {
         })
     }
 
-    pub fn update(
-        &mut self,
-        mic_muted: bool,
-        camera_muted: bool,
-        theme: Theme,
-        _active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
-        let mic_img = get_mic_image(mic_muted, theme)?;
-        let cam_img = get_camera_image(camera_muted, theme)?;
+    /// Shows `state` in the labels and icons. On an error nothing has changed yet.
+    pub fn render(&self, state: PopupState) -> Result<()> {
+        let (mic_icon, camera_icon) = icons_for(state)?;
+        let camera_off = !state.camera_in_use;
         unsafe {
-            let mic_str = NSString::alloc(nil).init_str(get_mic_mute_description_text(mic_muted));
-            self.mic_label.setStringValue_(mic_str);
-            let _: () = msg_send![mic_str, release];
-            let _: () = msg_send![self.mic_label, setTextColor: get_text_color(mic_muted, theme)];
-            self.mic_image.setImage_(mic_img);
-            let _: () = msg_send![mic_img, release];
-            self.camera_image.setImage_(cam_img);
-            let _: () = msg_send![cam_img, release];
-            let cam_str =
-                NSString::alloc(nil).init_str(get_camera_mute_description_text(camera_muted));
-            self.camera_label.setStringValue_(cam_str);
-            let _: () = msg_send![cam_str, release];
-            let _: () =
-                msg_send![self.camera_label, setTextColor: get_text_color(camera_muted, theme)];
+            set_label(
+                self.mic_label,
+                get_mic_mute_description_text(state.mic_muted),
+                get_text_color(state.mic_muted, state.theme),
+            );
+            set_image(self.mic_image, &mic_icon);
+            set_image(self.camera_image, &camera_icon);
+            set_label(
+                self.camera_label,
+                get_camera_mute_description_text(camera_off),
+                get_text_color(camera_off, state.theme),
+            );
         }
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -262,33 +258,5 @@ mod tests {
     #[test]
     fn test_mic_mute_description_unmuted() {
         assert_eq!(get_mic_mute_description_text(false), "Mic on");
-    }
-
-    #[test]
-    fn svg_to_png_encodes_every_popup_icon_as_a_decodable_png() {
-        const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
-        let icons: [(&str, &[u8]); 4] = [
-            ("mic.svg", include_bytes!("../assets/mic.svg")),
-            ("mic-off.svg", include_bytes!("../assets/mic-off.svg")),
-            ("video.svg", include_bytes!("../assets/video.svg")),
-            ("video-off.svg", include_bytes!("../assets/video-off.svg")),
-        ];
-        for (name, svg) in icons {
-            for theme in [Theme::Light, Theme::Dark] {
-                for muted in [true, false] {
-                    let case = format!("{name} (muted: {muted}, theme: {theme:?})");
-                    let (png, w, h) = svg_to_png(svg, muted, theme)
-                        .unwrap_or_else(|e| panic!("{case} failed to encode: {e:#}"));
-                    assert!(
-                        png.starts_with(PNG_SIGNATURE),
-                        "{case} lacks the PNG signature"
-                    );
-                    let decoded =
-                        image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-                            .unwrap_or_else(|e| panic!("{case} is not a valid PNG: {e}"));
-                    assert_eq!((decoded.width(), decoded.height()), (w, h), "{case}");
-                }
-            }
-        }
     }
 }

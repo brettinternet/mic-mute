@@ -1,5 +1,5 @@
 use crate::event_loop::EventLoopMessage;
-use crate::popup_content::PopupContent;
+use crate::popup_content::{PopupContent, PopupState};
 use crate::utils::get_cursor_pos;
 use anyhow::{Context, Result};
 use cocoa::{
@@ -31,6 +31,22 @@ fn should_show_popup(enabled: bool, muted: bool) -> bool {
     enabled && muted
 }
 
+/// The parts of the popup a redraw from `shown` to `next` must touch.
+#[derive(Debug, PartialEq, Eq)]
+struct Redraw {
+    /// The window title, which names the mic state.
+    title: bool,
+    /// The labels and icons, which also follow the camera and the theme.
+    content: bool,
+}
+
+fn redraw_for(shown: PopupState, next: PopupState) -> Redraw {
+    Redraw {
+        title: shown.mic_muted != next.mic_muted,
+        content: shown != next,
+    }
+}
+
 fn monitor_contains_physical_position(
     position: PhysicalPosition<f64>,
     monitor_position: PhysicalPosition<f64>,
@@ -44,15 +60,13 @@ fn monitor_contains_physical_position(
 
 fn setup_window(window: id) {
     unsafe {
-        window.setHasShadow_(true);
+        window.setHasShadow_(YES);
         // Rounded edges hack: https://stackoverflow.com/a/37418915
-        let mask = window.styleMask();
-        let _: () = msg_send![
-            window,
-            setStyleMask: mask
-                | NSWindowStyleMask::NSTitledWindowMask
-                | NSWindowStyleMask::NSFullSizeContentViewWindowMask
-        ];
+        let mask = window.styleMask()
+            | NSWindowStyleMask::NSTitledWindowMask
+            | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+        // Pass the NSUInteger itself: cocoa's bitflags struct has no guaranteed C layout.
+        let _: () = msg_send![window, setStyleMask: mask.bits()];
         let _: () = msg_send![
             window,
             setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
@@ -66,11 +80,18 @@ pub struct Popup {
     content: PopupContent,
     current_monitor: Option<MonitorHandle>,
     enabled: bool,
+    /// The latest state from `update_with_camera`.
+    mic_muted: bool,
+    camera_in_use: bool,
+    /// What the title and content show; `redraw` leaves them alone while this is current.
+    shown: PopupState,
 }
 
 impl Popup {
     pub fn new(event_loop: &EventLoopMessage, mic_muted: bool, enabled: bool) -> Result<Self> {
-        let camera_muted = false;
+        // The camera state arrives with the first update; until then the content says
+        // "Camera on", as it always has.
+        let camera_in_use = true;
         let initial_monitor = Popup::get_initial_monitor(event_loop);
         let size = Popup::get_size();
         let scale = initial_monitor
@@ -101,7 +122,12 @@ impl Popup {
         window.set_ignore_cursor_events(true)?;
 
         trace!("Window scale factor {}", scale);
-        let content = PopupContent::new(mic_muted, camera_muted, size, window.theme())?;
+        let shown = PopupState {
+            mic_muted,
+            camera_in_use,
+            theme: window.theme(),
+        };
+        let content = PopupContent::new(shown, size)?;
         unsafe {
             let ns_view = window.ns_view() as id;
             ns_view.addSubview_(content.view);
@@ -115,6 +141,9 @@ impl Popup {
             content,
             current_monitor: initial_monitor,
             enabled,
+            mic_muted,
+            camera_in_use,
+            shown,
         };
         Ok(popup)
     }
@@ -127,34 +156,57 @@ impl Popup {
         self.window.theme()
     }
 
+    /// Redraws what changed, then brings the popup to the front whenever it should show; the
+    /// front-ordering runs on every call, not only on a change. `camera_muted` is
+    /// `CameraController::muted` (`true` while no camera is in use); the device name isn't shown.
     pub fn update_with_camera(
         &mut self,
         mic_muted: bool,
         camera_muted: bool,
-        active_device_name: Option<&str>,
+        _active_device_name: Option<&str>,
     ) -> Result<&mut Self> {
-        self.window.set_title(get_mute_title_text(mic_muted));
+        self.mic_muted = mic_muted;
+        self.camera_in_use = !camera_muted;
         self.update_placement()?;
-        self.content.update(
-            mic_muted,
-            camera_muted,
-            self.get_theme(),
-            active_device_name,
-        )?;
+        self.redraw()?;
         if should_show_popup(self.enabled, mic_muted) {
             self.show_front();
         }
         Ok(self)
     }
 
+    /// Redraws the title and content for the latest state and the current theme, skipping the
+    /// parts that already show it. A failed redraw stays unrecorded, so the next call retries.
+    fn redraw(&mut self) -> Result<()> {
+        let next = PopupState {
+            mic_muted: self.mic_muted,
+            camera_in_use: self.camera_in_use,
+            theme: self.get_theme(),
+        };
+        let redraw = redraw_for(self.shown, next);
+        if redraw.content {
+            self.content.render(next)?;
+            trace!("Redrew popup content for {:?}", next);
+        }
+        if redraw.title {
+            self.window.set_title(get_mute_title_text(next.mic_muted));
+        }
+        self.shown = next;
+        Ok(())
+    }
+
     pub fn hide(&mut self) -> Result<&mut Self> {
         self.window.set_visible(false);
         Ok(self)
     }
+
+    /// Enabling the popup while the mic is muted shows it at once; disabling it hides it.
     pub fn set_enabled(&mut self, enabled: bool) -> Result<&mut Self> {
         self.enabled = enabled;
         if !enabled {
             self.hide()?;
+        } else if should_show_popup(enabled, self.mic_muted) {
+            self.show_front();
         }
         Ok(self)
     }
@@ -180,8 +232,12 @@ impl Popup {
         Ok(self)
     }
 
+    /// Follows the cursor's monitor, and redraws after a light/dark switch even when no state
+    /// update arrives.
     pub fn detect_cursor_monitor(&mut self) -> Result<&mut Self> {
-        self.update_placement()
+        self.update_placement()?;
+        self.redraw()?;
+        Ok(self)
     }
 
     fn get_current_monitor(&self) -> Result<Option<MonitorHandle>> {
@@ -287,5 +343,61 @@ mod tests {
         assert!(should_show_popup(true, true));
         assert!(!should_show_popup(false, true));
         assert!(!should_show_popup(true, false));
+    }
+
+    const MUTED_IDLE_DARK: PopupState = PopupState {
+        mic_muted: true,
+        camera_in_use: false,
+        theme: Theme::Dark,
+    };
+
+    #[test]
+    fn redraw_skips_a_popup_that_already_shows_the_state() {
+        let redraw = redraw_for(MUTED_IDLE_DARK, MUTED_IDLE_DARK);
+        assert_eq!(
+            redraw,
+            Redraw {
+                title: false,
+                content: false
+            }
+        );
+    }
+
+    #[test]
+    fn redraw_retitles_and_redraws_when_the_mic_changes() {
+        let unmuted = PopupState {
+            mic_muted: false,
+            ..MUTED_IDLE_DARK
+        };
+        let redraw = redraw_for(MUTED_IDLE_DARK, unmuted);
+        assert_eq!(
+            redraw,
+            Redraw {
+                title: true,
+                content: true
+            }
+        );
+    }
+
+    #[test]
+    fn redraw_keeps_the_title_when_only_the_camera_or_theme_changes() {
+        let camera_on = PopupState {
+            camera_in_use: true,
+            ..MUTED_IDLE_DARK
+        };
+        let light = PopupState {
+            theme: Theme::Light,
+            ..MUTED_IDLE_DARK
+        };
+        for next in [camera_on, light] {
+            assert_eq!(
+                redraw_for(MUTED_IDLE_DARK, next),
+                Redraw {
+                    title: false,
+                    content: true
+                },
+                "{next:?}"
+            );
+        }
     }
 }
