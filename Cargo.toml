@@ -15,8 +15,8 @@ anyhow = "1"
 tao = "0.35"
 tray-icon = "0.24"
 muda = "0.19"
-image = "0.25"
-resvg = "0.47"
+image = { version = "0.25", default-features = false, features = ["png"] }
+resvg = { version = "0.47", default-features = false }
 global-hotkey = "0.8"
 async-std = "1"
 libc = "0.2"

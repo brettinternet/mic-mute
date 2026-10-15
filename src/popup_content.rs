@@ -263,4 +263,32 @@ mod tests {
     fn test_mic_mute_description_unmuted() {
         assert_eq!(get_mic_mute_description_text(false), "Mic on");
     }
+
+    #[test]
+    fn svg_to_png_encodes_every_popup_icon_as_a_decodable_png() {
+        const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let icons: [(&str, &[u8]); 4] = [
+            ("mic.svg", include_bytes!("../assets/mic.svg")),
+            ("mic-off.svg", include_bytes!("../assets/mic-off.svg")),
+            ("video.svg", include_bytes!("../assets/video.svg")),
+            ("video-off.svg", include_bytes!("../assets/video-off.svg")),
+        ];
+        for (name, svg) in icons {
+            for theme in [Theme::Light, Theme::Dark] {
+                for muted in [true, false] {
+                    let case = format!("{name} (muted: {muted}, theme: {theme:?})");
+                    let (png, w, h) = svg_to_png(svg, muted, theme)
+                        .unwrap_or_else(|e| panic!("{case} failed to encode: {e:#}"));
+                    assert!(
+                        png.starts_with(PNG_SIGNATURE),
+                        "{case} lacks the PNG signature"
+                    );
+                    let decoded =
+                        image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                            .unwrap_or_else(|e| panic!("{case} is not a valid PNG: {e}"));
+                    assert_eq!((decoded.width(), decoded.height()), (w, h), "{case}");
+                }
+            }
+        }
+    }
 }
