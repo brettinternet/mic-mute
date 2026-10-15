@@ -65,6 +65,15 @@ Pass flags after `--`, for example `task install -- --user`:
 | `--bundle-only` | Stop after building, signing, and verifying the bundle |
 | `--dry-run` | Run only the read-only checks; print every other command |
 
+### Uninstall
+
+```sh
+task uninstall              # stop the app; remove it and its Launch at Login agent
+task uninstall -- --purge   # also delete the settings
+```
+
+[`scripts/uninstall.sh`](./scripts/uninstall.sh) stops Mic Mute with SIGTERM, then deletes `Mic Mute.app` from `/Applications` and `~/Applications` (only copies whose bundle identifier is `com.brettinternet.mic-mute`) and `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. It keeps `~/Library/Application Support/mic-mute` unless you pass `--purge`; `--dry-run` prints the commands instead of running them.
+
 ### Bundle only
 
 Build and bundle the app without installing it:

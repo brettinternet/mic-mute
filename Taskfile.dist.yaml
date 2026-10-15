@@ -93,6 +93,11 @@ tasks:
     cmds:
       - ./scripts/install.sh {{.CLI_ARGS}}
 
+  uninstall:
+    desc: Stop Mic Mute, then remove the app and its login item (-- --purge also deletes settings)
+    cmds:
+      - ./scripts/uninstall.sh {{.CLI_ARGS}}
+
   release:
     desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
     cmds:
