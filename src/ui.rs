@@ -32,12 +32,10 @@ impl UI {
         let event_loop = create();
         let popup = Popup::new(&event_loop, mic_muted, settings.show_popup)
             .context("Failed to setup popup window")?;
-        let theme = popup.get_theme();
         let shortcuts =
             Shortcuts::new(&settings.mic_shortcut).context("Failed to setup shortcuts")?;
         let tray = Tray::new(
             mic_muted,
-            theme,
             app_vars,
             settings.launch_at_login,
             settings.show_in_dock,
@@ -76,7 +74,7 @@ impl UI {
         trace!("Updating UI mic state {}", muted);
         self.mic_muted = muted;
         self.tray
-            .update(muted, self.popup.get_theme())
+            .update(muted)
             .context("Failed to update UI tray")?;
         self.popup
             .update_with_camera(muted, self.camera_muted, active_device_name)

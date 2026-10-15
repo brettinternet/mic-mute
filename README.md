@@ -18,7 +18,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] Provide global hotkey muting
   - [x] Poll new devices to mute while microphones should be off
 - Visual confirmation of mute status
-  - [x] Show microphone mute status in system tray
+  - [x] Show microphone mute status in system tray: a monochrome icon that follows light and dark menu bars, red while muted
   - [x] Show microphone mute status in small popup window
   - [x] Popup window shouldn't appear in screenshots or recordings and ignores mouse events
   - [x] Popup follows screens and monitors with cursor

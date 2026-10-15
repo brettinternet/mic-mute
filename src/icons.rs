@@ -11,40 +11,31 @@ struct IconColor {
     b: u8,
 }
 
+/// #ef4444: muted, or no camera in use, on a light background; the muted tray icon.
+const RED: IconColor = IconColor {
+    r: 239,
+    g: 68,
+    b: 68,
+};
+/// #f87171: muted, or no camera in use, on a dark background.
+const LIGHT_RED: IconColor = IconColor {
+    r: 248,
+    g: 113,
+    b: 113,
+};
+const BLACK: IconColor = IconColor { r: 0, g: 0, b: 0 };
+const WHITE: IconColor = IconColor {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
 fn popup_icon_color(muted: bool, theme: Theme) -> IconColor {
     match theme {
-        Theme::Light if muted => IconColor {
-            r: 239,
-            g: 68,
-            b: 68,
-        }, // #ef4444
-        Theme::Light => IconColor { r: 0, g: 0, b: 0 },
-        Theme::Dark if muted => IconColor {
-            r: 248,
-            g: 113,
-            b: 113,
-        }, // #f87171
-        _ => IconColor {
-            r: 255,
-            g: 255,
-            b: 255,
-        },
-    }
-}
-
-fn tray_icon_color(muted: bool) -> IconColor {
-    if muted {
-        IconColor {
-            r: 239,
-            g: 68,
-            b: 68,
-        } // #ef4444
-    } else {
-        IconColor {
-            r: 255,
-            g: 255,
-            b: 255,
-        }
+        Theme::Light if muted => RED,
+        Theme::Light => BLACK,
+        Theme::Dark if muted => LIGHT_RED,
+        _ => WHITE,
     }
 }
 
@@ -76,19 +67,32 @@ impl Glyph {
     }
 }
 
-/// One icon in one color. Only `tray_mic`, `popup_mic`, and `popup_camera` build variants, so
-/// there are at most 4 glyphs × 4 colors of them.
+/// One icon in one color. Only `tray_mic`, `popup_mic`, and `popup_camera` build variants: 8
+/// distinct ones, as the tray's icons are the light-theme popup's mic icons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IconVariant {
     glyph: Glyph,
     color: IconColor,
 }
 
-/// The tray's mic icon: red while muted, else white.
-pub fn tray_mic(muted: bool) -> IconVariant {
-    IconVariant {
-        glyph: Glyph::mic(muted),
-        color: tray_icon_color(muted),
+/// An icon variant as the tray shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrayImage {
+    pub variant: IconVariant,
+    /// AppKit draws a template image from its alpha alone, in the menu bar's text color.
+    pub is_template: bool,
+}
+
+/// The tray's mic icon. Unmuted, it's a black template image, which macOS tints for light and
+/// dark menu bars and for the highlight while the menu is open. Muted, it's red and no
+/// template: red reads on both.
+pub fn tray_mic(muted: bool) -> TrayImage {
+    TrayImage {
+        variant: IconVariant {
+            glyph: Glyph::mic(muted),
+            color: if muted { RED } else { BLACK },
+        },
+        is_template: !muted,
     }
 }
 
@@ -125,8 +129,8 @@ pub struct RenderedIcon {
 
 /// Every variant rendered so far. Holds plain bytes, never AppKit objects, so nothing in it
 /// needs a retain or a release; callers build `NSImage`s and tray icons from it when the shown
-/// variant changes. Bounded by the variant count (at most 16 entries of a few KB each), so it
-/// never evicts.
+/// variant changes. Bounded by the variant count (8 entries of a few KB each), so it never
+/// evicts.
 static RENDERED: Mutex<Vec<(IconVariant, Arc<RenderedIcon>)>> = Mutex::new(Vec::new());
 
 impl IconVariant {
@@ -223,9 +227,10 @@ mod tests {
 
     /// Every variant the tray and the popup can show.
     fn every_variant() -> Vec<IconVariant> {
-        let mut variants = vec![tray_mic(true), tray_mic(false)];
-        for theme in [Theme::Light, Theme::Dark] {
-            for state in [true, false] {
+        let mut variants = Vec::new();
+        for state in [true, false] {
+            variants.push(tray_mic(state).variant);
+            for theme in [Theme::Light, Theme::Dark] {
                 variants.push(popup_mic(state, theme));
                 variants.push(popup_camera(state, theme));
             }
@@ -243,11 +248,10 @@ mod tests {
             );
         }
 
-        let color = tray_icon_color(true);
         for path in &paths {
             let name = path.display();
             let svg = std::fs::read(path).expect("SVG should be readable");
-            let (rgba, w, h) = rasterize_svg(&svg, &color)
+            let (rgba, w, h) = rasterize_svg(&svg, &RED)
                 .unwrap_or_else(|e| panic!("{name} failed to rasterize: {e:#}"));
             assert!(w > 0 && h > 0, "{name} rasterized to {w}x{h}");
             assert_eq!(rgba.len(), w as usize * h as usize * 4, "{name}");
@@ -292,8 +296,6 @@ mod tests {
             b: 255,
         };
         let cases = [
-            (tray_mic(true), Glyph::MicOff, red),
-            (tray_mic(false), Glyph::Mic, white),
             (popup_mic(true, Theme::Light), Glyph::MicOff, red),
             (popup_mic(false, Theme::Light), Glyph::Mic, black),
             (popup_mic(true, Theme::Dark), Glyph::MicOff, light_red),
@@ -305,6 +307,18 @@ mod tests {
         ];
         for (variant, glyph, color) in cases {
             assert_eq!(variant, IconVariant { glyph, color });
+        }
+
+        let tray_cases = [
+            (true, Glyph::MicOff, red, false),
+            (false, Glyph::Mic, black, true),
+        ];
+        for (muted, glyph, color, is_template) in tray_cases {
+            let expected = TrayImage {
+                variant: IconVariant { glyph, color },
+                is_template,
+            };
+            assert_eq!(tray_mic(muted), expected, "muted {muted}");
         }
     }
 
@@ -344,6 +358,26 @@ mod tests {
                 *decoded.as_raw() == icon.rgba,
                 "{variant:?}: the PNG's pixels differ from the RGBA"
             );
+        }
+    }
+
+    #[test]
+    fn rendered_caches_only_the_variants_the_tray_and_popup_show() {
+        let mut distinct: Vec<IconVariant> = Vec::new();
+        for variant in every_variant() {
+            if !distinct.contains(&variant) {
+                distinct.push(variant);
+            }
+        }
+        assert_eq!(distinct.len(), 8, "update the variant count in the docs");
+        for variant in &distinct {
+            variant.rendered().expect("every variant renders");
+        }
+
+        let cached = RENDERED.lock();
+        assert!(cached.len() <= distinct.len(), "{} cached", cached.len());
+        for (variant, _) in cached.iter() {
+            assert!(distinct.contains(variant), "{variant:?} is cached");
         }
     }
 }

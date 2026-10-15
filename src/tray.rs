@@ -1,12 +1,11 @@
 use crate::config::AppVars;
-use crate::icons::{self, IconVariant};
+use crate::icons::{self, IconVariant, TrayImage};
 use crate::shortcuts::Shortcut;
 use anyhow::{Context, Result};
 use log::trace;
 use muda::accelerator::{Key, KeyAccelerator};
 use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use std::fmt;
-use tao::window::Theme;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const MUTE_TEXT: &str = "Mute";
@@ -20,18 +19,19 @@ pub fn get_mute_menu_text(muted: bool) -> &'static str {
     }
 }
 
-/// What the tray shows: its icon and the Mute item's text.
+/// What the tray shows: its icon with its template flag, and the Mute item's text. Light and
+/// dark menu bars need no state: macOS tints the unmuted template icon, and the muted red icon
+/// reads on both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TrayView {
-    icon: IconVariant,
+    image: TrayImage,
     menu_text: &'static str,
 }
 
 impl TrayView {
-    /// The theme doesn't change the tray yet: its icon is white, or red while muted.
-    fn new(muted: bool, _theme: Theme) -> Self {
+    fn new(muted: bool) -> Self {
         Self {
-            icon: icons::tray_mic(muted),
+            image: icons::tray_mic(muted),
             menu_text: get_mute_menu_text(muted),
         }
     }
@@ -77,15 +77,14 @@ pub struct Tray {
 impl Tray {
     pub fn new(
         muted: bool,
-        theme: Theme,
         app_vars: AppVars,
         login_enabled: bool,
         dock_visible: bool,
         popup_visible: bool,
     ) -> Result<Self> {
         trace!("Creating tray icon");
-        let shown = TrayView::new(muted, theme);
-        let icon = get_icon(shown.icon)?;
+        let shown = TrayView::new(muted);
+        let icon = get_icon(shown.image.variant)?;
         let tray_menu = Menu::new();
         // The shortcut label is set later with `update_accelerators`: muda fails to
         // build the whole menu when an item has a key it can't show (e.g. CapsLock).
@@ -114,6 +113,7 @@ impl Tray {
             .with_menu(Box::new(tray_menu.clone()))
             .with_tooltip(&tooltip)
             .with_icon(icon)
+            .with_icon_as_template(shown.image.is_template)
             .with_menu_on_left_click(true)
             .build()
             .context("Failed to create tray icon")?;
@@ -137,20 +137,23 @@ impl Tray {
 
     /// Shows `muted` in the icon and the Mute item, touching only the parts that change, so a
     /// repeated call with the same state costs nothing.
-    pub fn update(&mut self, muted: bool, theme: Theme) -> Result<()> {
-        let next = TrayView::new(muted, theme);
+    pub fn update(&mut self, muted: bool) -> Result<()> {
+        let next = TrayView::new(muted);
         self.update_menu(next.menu_text);
-        self.update_icon(next.icon)
+        self.update_icon(next.image)
     }
 
-    /// A failed icon stays unrecorded, so the next `update` retries it.
-    fn update_icon(&mut self, icon: IconVariant) -> Result<()> {
-        if icon == self.shown.icon {
+    /// Sets the icon and its template flag in one call: tray-icon's `set_icon` always clears the
+    /// flag. A failed icon stays unrecorded, so the next `update` retries it.
+    fn update_icon(&mut self, image: TrayImage) -> Result<()> {
+        if image == self.shown.image {
             return Ok(());
         }
-        self.systray.set_icon(Some(get_icon(icon)?))?;
-        self.shown.icon = icon;
-        trace!("Updated tray icon");
+        let icon = get_icon(image.variant)?;
+        self.systray
+            .set_icon_with_as_template(Some(icon), image.is_template)?;
+        self.shown.image = image;
+        trace!("Updated tray icon: {:?}", image);
         Ok(())
     }
 
@@ -282,12 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn tray_view_follows_the_mute_state_but_not_the_theme() {
-        let muted = TrayView::new(true, Theme::Light);
-        assert_eq!(muted, TrayView::new(true, Theme::Dark));
-
-        let unmuted = TrayView::new(false, Theme::Light);
-        assert_ne!(muted.icon, unmuted.icon);
+    fn tray_view_shows_a_template_icon_only_while_unmuted() {
+        let muted = TrayView::new(true);
+        let unmuted = TrayView::new(false);
+        assert!(!muted.image.is_template);
+        assert!(unmuted.image.is_template);
+        assert_ne!(muted.image.variant, unmuted.image.variant);
         assert_eq!(
             (muted.menu_text, unmuted.menu_text),
             (UNMUTE_TEXT, MUTE_TEXT)
