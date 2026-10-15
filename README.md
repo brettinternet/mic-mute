@@ -14,7 +14,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
 
 - CoreAudio API mute input devices
   - [x] Mute input devices
-    - Note: If native CoreAudio mute is unavailable, Mic Mute falls back to input volume controls, including virtual main volume. Devices exposing neither are skipped.
+    - Note: If native CoreAudio mute is unavailable or ignores changes, Mic Mute falls back to input volume controls, including virtual main volume. Devices exposing neither are skipped.
   - [x] Provide global hotkey muting
   - [x] Poll new devices to mute while microphones should be off
 - Visual confirmation of mute status
@@ -32,6 +32,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 
 - Mutes CoreAudio-controllable devices only.
 - Skips devices without mute/volume controls, such as iPhone Continuity Microphone.
+- Skips devices that accept mute and volume changes but ignore them, such as Microsoft Teams Audio, with a warning in the log. Mic Mute tries such a device again every minute and when it reconnects; until it responds, the tray and popup show the state of the other microphones.
 - Polling can leave brief mute gaps.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 - Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.
