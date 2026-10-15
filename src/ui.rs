@@ -22,9 +22,6 @@ pub struct UI {
     camera_muted: bool,
 }
 
-unsafe impl Send for UI {}
-unsafe impl Sync for UI {}
-
 impl UI {
     pub fn new(
         mic_muted: bool,

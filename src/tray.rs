@@ -40,9 +40,6 @@ fn accelerator_for(shortcut: Shortcut) -> Accelerator {
     Accelerator::new(Some(shortcut.modifiers()), shortcut.code())
 }
 
-unsafe impl Send for Tray {}
-unsafe impl Sync for Tray {}
-
 impl fmt::Debug for Tray {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "TrayIcon ID: {:?}", self.systray.id())
