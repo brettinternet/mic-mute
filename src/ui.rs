@@ -68,18 +68,14 @@ impl UI {
         Ok((ui, event_loop, event_ids))
     }
 
-    pub fn update_mic(
-        &mut self,
-        muted: bool,
-        active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
+    pub fn update_mic(&mut self, muted: bool) -> Result<&mut Self> {
         trace!("Updating UI mic state {}", muted);
         self.mic_muted = muted;
         self.tray
             .update(muted, self.popup.get_theme())
             .context("Failed to update UI tray")?;
         self.popup
-            .update_with_camera(muted, self.camera_muted, active_device_name)
+            .update_with_camera(muted, self.camera_muted)
             .context("Failed to update UI popup")?;
         Ok(self)
     }
@@ -88,7 +84,7 @@ impl UI {
         trace!("Updating UI camera state {}", muted);
         self.camera_muted = muted;
         self.popup
-            .update_with_camera(self.mic_muted, muted, None)
+            .update_with_camera(self.mic_muted, muted)
             .context("Failed to update UI popup for camera")?;
         Ok(self)
     }

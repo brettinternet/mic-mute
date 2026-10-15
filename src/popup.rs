@@ -158,13 +158,8 @@ impl Popup {
 
     /// Redraws what changed, then brings the popup to the front whenever it should show; the
     /// front-ordering runs on every call, not only on a change. `camera_muted` is
-    /// `CameraController::muted` (`true` while no camera is in use); the device name isn't shown.
-    pub fn update_with_camera(
-        &mut self,
-        mic_muted: bool,
-        camera_muted: bool,
-        _active_device_name: Option<&str>,
-    ) -> Result<&mut Self> {
+    /// `CameraController::muted` (`true` while no camera is in use).
+    pub fn update_with_camera(&mut self, mic_muted: bool, camera_muted: bool) -> Result<&mut Self> {
         self.mic_muted = mic_muted;
         self.camera_in_use = !camera_muted;
         self.update_placement()?;
