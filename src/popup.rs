@@ -44,15 +44,13 @@ fn monitor_contains_physical_position(
 
 fn setup_window(window: id) {
     unsafe {
-        window.setHasShadow_(true);
+        window.setHasShadow_(YES);
         // Rounded edges hack: https://stackoverflow.com/a/37418915
-        let mask = window.styleMask();
-        let _: () = msg_send![
-            window,
-            setStyleMask: mask
-                | NSWindowStyleMask::NSTitledWindowMask
-                | NSWindowStyleMask::NSFullSizeContentViewWindowMask
-        ];
+        let mask = window.styleMask()
+            | NSWindowStyleMask::NSTitledWindowMask
+            | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+        // Pass the NSUInteger itself: cocoa's bitflags struct has no guaranteed C layout.
+        let _: () = msg_send![window, setStyleMask: mask.bits()];
         let _: () = msg_send![
             window,
             setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden

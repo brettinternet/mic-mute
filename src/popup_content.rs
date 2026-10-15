@@ -66,7 +66,7 @@ fn get_text_color(muted: bool, theme: Theme) -> id {
 fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
-        let _: () = msg_send![label, initWithFrame: frame];
+        let label: id = msg_send![label, initWithFrame: frame];
         let label_str = NSString::alloc(nil).init_str(text);
         label.setStringValue_(label_str);
         let _: () = msg_send![label_str, release];
@@ -129,7 +129,7 @@ fn get_camera_image(muted: bool, theme: Theme) -> Result<id> {
 fn make_image_view(image: id, frame: NSRect) -> id {
     unsafe {
         let view = NSImageView::alloc(nil);
-        let _: () = msg_send![view, initWithFrame: frame];
+        let view: id = msg_send![view, initWithFrame: frame];
         view.setImage_(image);
         view
     }
@@ -150,6 +150,8 @@ unsafe fn make_separator_view(line_height: f64) -> id {
     let cg_color: *const std::os::raw::c_void = msg_send![color, CGColor];
     let _: () = msg_send![layer, setBackgroundColor: cg_color];
     // Size constraints without position constraints — NSStackView controls position.
+    // NSLayoutConstraint.h, all NSInteger: NSLayoutAttributeWidth = 7, NSLayoutAttributeHeight = 8,
+    // NSLayoutAttributeNotAnAttribute = 0, NSLayoutRelationEqual = 0.
     let _: () = msg_send![sep, setTranslatesAutoresizingMaskIntoConstraints: NO];
     let w: id = msg_send![class!(NSLayoutConstraint),
         constraintWithItem: sep attribute: 7i64 relatedBy: 0i64
@@ -203,7 +205,7 @@ impl PopupContent {
 
         let view = unsafe {
             let stack: *mut Object = msg_send![class!(NSStackView), alloc];
-            let _: () = msg_send![stack, initWithFrame: frame];
+            let stack: id = msg_send![stack, initWithFrame: frame];
             let gravity = NS_STACK_VIEW_GRAVITY_CENTER;
             let _: () = msg_send![stack, addView: mic_image inGravity: gravity];
             let _: () = msg_send![mic_image, release];
