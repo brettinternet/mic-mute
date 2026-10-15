@@ -53,8 +53,9 @@ fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool)
         }
         let device_name = controller.active_device_name();
         let mut ui = ui.write();
-        ui.update_mic(controller.muted, device_name.as_deref())
-            .unwrap();
+        if let Err(err) = ui.update_mic(controller.muted, device_name.as_deref()) {
+            log::error!("Failed to update microphone UI: {:#}", err);
+        }
     } else {
         controller.watch_unmuted();
     }
@@ -138,7 +139,9 @@ pub fn start(
             let muted = !active;
             if muted != camera.read().muted {
                 camera.write().muted = muted;
-                ui.write().update_camera(muted).unwrap();
+                if let Err(err) = ui.write().update_camera(muted) {
+                    log::error!("Failed to update camera UI: {:#}", err);
+                }
             }
         }
 
@@ -243,8 +246,9 @@ pub fn start(
         if last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
             update_mic(&ui, &controller, false);
-            let mut ui_w = ui.write();
-            ui_w.detect().unwrap();
+            if let Err(err) = ui.write().detect() {
+                log::error!("Failed to update popup placement: {:#}", err);
+            }
         }
 
         // Hide the popup a moment after an unmute, unless the mic was muted again.
