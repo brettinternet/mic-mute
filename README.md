@@ -51,13 +51,12 @@ Install the build dependencies, build and bundle the app.
 task build
 ```
 
-Once the build is complete, a finder window should open to the built bundle in the the folder `./target/aarch64-apple-darwin/release/bundle/osx`.
+Once the build is complete, a finder window should open to the built bundle in the folder `./target/aarch64-apple-darwin/release/bundle/osx`.
 
 ## Develop
 
 [![CI](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml/badge.svg)](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml)
-[![CI](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml/badge.svg)](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml)
-[![CI](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml/badge.svg)](https://github.com/brettinternet/mic-mute/actions/workflows/ci.yaml)
+[![Audit](https://github.com/brettinternet/mic-mute/actions/workflows/audit.yaml/badge.svg)](https://github.com/brettinternet/mic-mute/actions/workflows/audit.yaml)
 
 ### Setup
 
