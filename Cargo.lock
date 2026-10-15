@@ -1309,6 +1309,7 @@ name = "mic-mute"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "block2",
  "cocoa",
  "coreaudio-rs",
  "dirs",
@@ -1325,6 +1326,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-service-management",
+ "objc2-user-notifications",
  "parking_lot",
  "resvg",
  "serde",
@@ -1667,6 +1669,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.11.1",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]

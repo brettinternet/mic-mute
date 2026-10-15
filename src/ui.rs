@@ -1,7 +1,8 @@
 use crate::config::AppVars;
 use crate::event_loop::{EventIds, EventLoopTarget};
+use crate::feedback::{Feedback, MicUpdate};
 use crate::mic::DeviceState;
-use crate::popup::Popup;
+use crate::popup::{Popup, PopupLayout};
 use crate::settings::{ExcludedDevice, Settings};
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
@@ -10,6 +11,22 @@ use log::trace;
 use muda::MenuId;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// The popup's position and size from `settings`.
+fn popup_layout(settings: &Settings) -> PopupLayout {
+    PopupLayout {
+        position: settings.popup_position.value(),
+        size: settings.popup_size.value(),
+    }
+}
+
+/// Logs each feedback setting whose value in the file isn't used as written.
+fn log_feedback_problems(settings: &Settings) {
+    for problem in settings.feedback_problems() {
+        log::warn!("settings.json: {}", problem);
+    }
+}
 
 /// Event loop must remain on the main thread and doesn't implement Copy
 #[allow(dead_code)]
@@ -22,6 +39,10 @@ pub struct UI {
     shortcut_mic: Arc<AtomicU32>,
     mic_muted: bool,
     camera_muted: bool,
+    /// The sound and notification on a mute change.
+    feedback: Feedback,
+    /// How long the popup shows "Mic on" after the user unmutes (`popup_mic_on_ms`).
+    mic_on_flash: Duration,
 }
 
 impl UI {
@@ -35,8 +56,14 @@ impl UI {
         app_vars: AppVars,
         settings: &Settings,
     ) -> Result<(Self, EventIds)> {
-        let popup = Popup::new(target, mic_muted, settings.show_popup)
-            .context("Failed to setup popup window")?;
+        log_feedback_problems(settings);
+        let popup = Popup::new(
+            target,
+            mic_muted,
+            settings.show_popup,
+            popup_layout(settings),
+        )
+        .context("Failed to setup popup window")?;
         let shortcuts =
             Shortcuts::new(&settings.mic_shortcut).context("Failed to setup shortcuts")?;
         let tray = Tray::new(
@@ -68,6 +95,8 @@ impl UI {
             shortcut_mic,
             mic_muted,
             camera_muted,
+            feedback: Feedback::new(settings.play_sound, settings.show_notification),
+            mic_on_flash: settings.popup_mic_on_ms.value().duration(),
         };
         ui.show_launch_at_login(settings.launch_at_login);
         ui.sync_shortcut();
@@ -134,6 +163,9 @@ impl UI {
         }
         self.sync_shortcut();
 
+        // Before the steps that can return early: it logs its own errors.
+        self.apply_feedback(settings);
+
         // Sync popup visibility with the persisted setting
         self.set_popup_enabled(settings.show_popup)?;
 
@@ -144,6 +176,30 @@ impl UI {
         self.set_launch_at_login(settings.launch_at_login);
 
         Ok(())
+    }
+
+    /// Applies the sound, the notification, and the popup's position, size, and "Mic on" flash,
+    /// logging the values the file sets that aren't used as written.
+    fn apply_feedback(&mut self, settings: &Settings) {
+        log_feedback_problems(settings);
+        self.feedback
+            .set_options(settings.play_sound, settings.show_notification);
+        self.mic_on_flash = settings.popup_mic_on_ms.value().duration();
+        if let Err(e) = self.popup.set_layout(popup_layout(settings)) {
+            log::error!("Failed to apply the popup's position and size: {:#}", e);
+        }
+    }
+
+    /// Plays the sound and posts the notification the settings ask for after `update` took the
+    /// microphones from `was_muted` to `muted`: only a request that changed the state gives
+    /// either (`feedback::change_to_report`).
+    pub fn give_feedback(&mut self, update: MicUpdate, was_muted: bool, muted: bool) {
+        self.feedback.on_mic_update(update, was_muted, muted);
+    }
+
+    /// How long the popup stays up showing "Mic on" after the user unmutes.
+    pub fn mic_on_flash(&self) -> Duration {
+        self.mic_on_flash
     }
 
     /// Registers or removes the login item (a LaunchAgent on macOS 11 and 12), then shows the

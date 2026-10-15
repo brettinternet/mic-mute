@@ -2,6 +2,7 @@ use crate::about::{self, AboutWindow};
 use crate::camera::CameraController;
 use crate::config::AppVars;
 use crate::device_changes::DeviceChangeSignal;
+use crate::feedback::MicUpdate;
 use crate::launch_at_login;
 use crate::mic::{FailureLog, MicController};
 use crate::mic_command::MicCommand;
@@ -38,8 +39,6 @@ const CURSOR_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// controls keep changing, as when another app fights the mute, can't make the loop poll more
 /// often than this.
 const DEVICE_CHANGE_POLL_SPACING: Duration = Duration::from_millis(50);
-/// How long the popup stays up after an unmute.
-const HIDE_POPUP_DELAY: Duration = Duration::from_secs(1);
 /// How long a `status` URL shows the popup.
 const STATUS_POPUP_DURATION: Duration = Duration::from_secs(2);
 /// The exit code when the tray, popup, or hotkey can't be created.
@@ -98,15 +97,17 @@ pub struct EventIds {
     pub shortcut_mic: Arc<AtomicU32>,
 }
 
-/// Runs `request`. Without one, it is the poll: re-mutes while the user wants mute, otherwise
+/// Runs `request`, with the sound and notification the settings ask for when it changes the
+/// state. Without one, it is the poll: re-mutes, silently, while the user wants mute, otherwise
 /// watches unmuted devices. Returns whether a request just unmuted, so the popup should hide
-/// after a delay.
+/// after its "Mic on" flash.
 fn update_mic(
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
     request: Option<MicCommand>,
 ) -> bool {
     let mut controller = controller.write();
+    let was_muted = controller.muted;
     let state = match request {
         Some(command) => command.mute_state(),
         None if controller.should_enforce_mute() => Some(true),
@@ -120,15 +121,24 @@ fn update_mic(
         Ok(()) => controller.update_failures.clear(),
         Err(err) => controller.update_failures.report(&err, Instant::now()),
     }
-    if let Err(err) = ui.write().update_mic(controller.muted) {
-        log::error!("Failed to update microphone UI: {:#}", err);
+    {
+        let mut ui = ui.write();
+        if let Err(err) = ui.update_mic(controller.muted) {
+            log::error!("Failed to update microphone UI: {:#}", err);
+        }
+        let update = match request {
+            Some(_) => MicUpdate::Request,
+            None => MicUpdate::Enforcement,
+        };
+        ui.give_feedback(update, was_muted, controller.muted);
     }
     controller.save_input_levels_if_due();
     request.is_some() && !controller.muted
 }
 
 /// Runs a change the user asked for, and records the resulting intent for
-/// `launch_state: "last"`. Returns when to hide the popup: a moment after an unmute.
+/// `launch_state: "last"`. Returns when to hide the popup: when the "Mic on" flash after an
+/// unmute ends (`popup_mic_on_ms`).
 fn request_mic(
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
@@ -138,7 +148,7 @@ fn request_mic(
     let has_unmuted = update_mic(ui, controller, Some(command));
     let intent = controller.read().should_enforce_mute();
     last_state.record(intent);
-    has_unmuted.then(|| Instant::now() + HIDE_POPUP_DELAY)
+    has_unmuted.then(|| Instant::now() + ui.read().mic_on_flash())
 }
 
 /// Keeps the popup up until the later of `hide_at` and `until`; `None` sorts before every
@@ -687,8 +697,9 @@ pub fn start(
             }
         }
 
-        // Hide the popup a moment after an unmute or a status URL, unless it stays up while
-        // muted.
+        // Hide the popup when the "Mic on" flash after an unmute or a status URL's flash ends,
+        // unless it stays up while muted. A 0 ms flash ends in the pass that unmuted, before
+        // AppKit draws "Mic on".
         if hide_popup_at.is_some_and(|deadline| Instant::now() >= deadline) {
             hide_popup_at = None;
             if let Err(err) = ui.write().hide_popup_unless_pinned() {
@@ -742,7 +753,7 @@ mod tests {
     #[test]
     fn the_popup_stays_up_until_the_latest_deadline() {
         let now = Instant::now();
-        let soon = now + HIDE_POPUP_DELAY;
+        let soon = now + crate::settings::MicOnFlash::default().duration();
         let later = now + STATUS_POPUP_DURATION;
 
         let mut hide_at = None;

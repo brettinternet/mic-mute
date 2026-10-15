@@ -58,6 +58,13 @@ fn reset_settings(current: &Settings) -> Settings {
         mute_on_lock: defaults.mute_on_lock,
         mute_on_sleep: defaults.mute_on_sleep,
         mute_on_display_sleep: defaults.mute_on_display_sleep,
+        // Feedback on a mute change: sound and notification off, the popup as it has always
+        // been. macOS keeps its own answer about notifications.
+        play_sound: defaults.play_sound,
+        show_notification: defaults.show_notification,
+        popup_position: defaults.popup_position,
+        popup_size: defaults.popup_size,
+        popup_mic_on_ms: defaults.popup_mic_on_ms,
         ..current.clone()
     }
 }
@@ -363,6 +370,11 @@ mod tests {
                 "mute_on_lock": true,
                 "mute_on_sleep": true,
                 "mute_on_display_sleep": true,
+                "play_sound": true,
+                "show_notification": true,
+                "popup_position": "top_right",
+                "popup_size": "large",
+                "popup_mic_on_ms": 3000,
                 "future_setting": {{ "nested": [1, "two"] }}
             }}"#
         ))
@@ -396,6 +408,33 @@ mod tests {
     }
 
     #[test]
+    fn reset_turns_sound_and_notification_off() {
+        let reset = reset_settings(&customized_settings(true));
+        assert!(!reset.play_sound);
+        assert!(!reset.show_notification);
+    }
+
+    #[test]
+    fn reset_restores_the_popup_layout_and_flash() {
+        let reset = reset_settings(&customized_settings(true));
+        let defaults = Settings::default();
+        assert_eq!(reset.popup_position, defaults.popup_position);
+        assert_eq!(reset.popup_size, defaults.popup_size);
+        assert_eq!(reset.popup_mic_on_ms, defaults.popup_mic_on_ms);
+    }
+
+    #[test]
+    fn reset_replaces_popup_values_this_build_does_not_accept() {
+        let mut current = customized_settings(true);
+        current.popup_position = serde_json::from_str("\"middle\"").unwrap();
+        assert!(current.popup_position.problem().is_some());
+        let reset = reset_settings(&current);
+        assert!(reset.feedback_problems().is_empty());
+        let saved = serde_json::to_value(&reset).unwrap();
+        assert_eq!(saved["popup_position"], serde_json::json!("bottom_center"));
+    }
+
+    #[test]
     fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
         let reset_fields = [
             "mic_shortcut",
@@ -408,6 +447,11 @@ mod tests {
             "mute_on_lock",
             "mute_on_sleep",
             "mute_on_display_sleep",
+            "play_sound",
+            "show_notification",
+            "popup_position",
+            "popup_size",
+            "popup_mic_on_ms",
         ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);
