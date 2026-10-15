@@ -41,6 +41,13 @@ I have not elected to sign the app by joining the Apple Developer Program. The r
 
 [View releases](https://github.com/brettinternet/mic-mute/releases)
 
+Pushing a version tag that matches `Cargo.toml` (for example `0.6.0`) runs the [Release workflow](./.github/workflows/release.yaml) on a macOS runner: the `task install` checks, an ad-hoc signed build, and a GitHub release with a DMG, `SHA256SUMS`, and a build provenance attestation. Running the workflow by hand with an existing tag republishes that release; without a tag, it only uploads the files as a workflow artifact. These builds aren't notarized, so macOS blocks the first launch until you choose **Open Anyway** in System Settings → Privacy & Security. To verify a download:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+gh attestation verify mic-mute-<version>-aarch64-apple-darwin.dmg --repo <owner>/mic-mute
+```
+
 ## Build
 
 Install dependencies with `mise`. Or you may [install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.

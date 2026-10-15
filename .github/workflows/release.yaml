@@ -1,0 +1,155 @@
+name: Release
+
+# A version tag (e.g. 0.6.0) builds Mic Mute.app with scripts/install.sh
+# --bundle-only, ad-hoc signs it, packages a DMG with SHA256SUMS, attests its
+# build provenance, and publishes a GitHub release. A manual run with an
+# existing tag rebuilds and republishes it; without one it only builds and
+# uploads the files as a workflow artifact.
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish; empty only builds the selected branch
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build, sign, and attest
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      artifact: ${{ steps.version.outputs.artifact }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy \
+            --target aarch64-apple-darwin --no-self-update
+          rustup default stable
+
+      - name: Resolve the version
+        id: version
+        env:
+          TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "mic-mute") | .version')"
+          if [[ -n "$TAG" ]]; then
+            if [[ "${TAG#v}" != "$version" ]]; then
+              echo "::error::Tag $TAG doesn't match the Cargo.toml version $version"
+              exit 1
+            fi
+            label="$version"
+          else
+            label="$version-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "artifact=mic-mute-$label-aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
+
+      # Preflight, fmt/clippy/test gates, pinned cargo-bundle, ad-hoc codesign.
+      - name: Check, build, and sign
+        run: scripts/install.sh --bundle-only
+
+      - name: Package the DMG
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+        run: |
+          app="target/aarch64-apple-darwin/release/bundle/osx/Mic Mute.app"
+          staging="$RUNNER_TEMP/dmg"
+          mount="$RUNNER_TEMP/mount"
+          mkdir -p dist "$staging" "$mount"
+          ditto "$app" "$staging/Mic Mute.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Mic Mute" -srcfolder "$staging" -fs HFS+ -format UDZO \
+            -ov "dist/$ARTIFACT.dmg"
+          hdiutil verify "dist/$ARTIFACT.dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "dist/$ARTIFACT.dmg"
+          codesign --verify --deep --strict --verbose=2 "$mount/Mic Mute.app"
+          hdiutil detach "$mount"
+          (cd dist && shasum -a 256 "$ARTIFACT.dmg" > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.dmg
+
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish the GitHub release
+    needs: build
+    if: needs.build.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the workflow artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          DMG: ${{ needs.build.outputs.artifact }}.dmg
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          notes="$(printf '%s\n' \
+            "This build is ad-hoc signed and not notarized, so macOS blocks its first launch:" \
+            "" \
+            "1. Drag Mic Mute to Applications and open it." \
+            "2. In System Settings → Privacy & Security, choose Open Anyway." \
+            "" \
+            "Verify the download:" \
+            "" \
+            '```sh' \
+            "shasum -a 256 -c SHA256SUMS" \
+            "gh attestation verify $DMG --repo $GH_REPO" \
+            '```')"
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes \
+            --notes "$notes" "${prerelease[@]}"
