@@ -8,7 +8,7 @@ A system-wide mute for macOS microphones with a global shortcut and visual confi
 
 ![popup window screenshot indicating the microphone is off](./screenshot.png)
 
-Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray dropdown. See the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
+Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray dropdown, or switch the shortcut to [push-to-talk](./docs/settings.md#mode): hold it to talk. See the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
 
 ## Features
 
@@ -16,6 +16,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] Mute input devices
     - Note: If native CoreAudio mute is unavailable or ignores changes, Mic Mute falls back to input volume controls, including virtual main volume. Devices exposing neither are skipped.
   - [x] Provide global hotkey muting
+  - [x] Push-to-talk: hold the shortcut to unmute, release it to mute again
   - [x] Poll new devices to mute while microphones should be off
 - Visual confirmation of mute status
   - [x] Show microphone mute status in system tray: a monochrome icon that follows light and dark menu bars, red while muted

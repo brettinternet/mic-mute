@@ -50,6 +50,7 @@ fn reset_settings(current: &Settings) -> Settings {
         show_in_dock: defaults.show_in_dock,
         show_popup: defaults.show_popup,
         // Inputs besides the tray menu.
+        mode: defaults.mode,
         allow_url_unmute: defaults.allow_url_unmute,
         ..current.clone()
     }
@@ -349,6 +350,7 @@ mod tests {
                 "show_in_dock": true,
                 "launch_at_login": {launch_at_login},
                 "show_popup": false,
+                "mode": "push_to_talk",
                 "allow_url_unmute": true,
                 "excluded_devices": ["Teams Audio"]
             }}"#
@@ -366,8 +368,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_turns_url_unmute_off() {
+    fn reset_restores_toggle_mode_and_turns_url_unmute_off() {
         let reset = reset_settings(&customized_settings(true));
+        assert_eq!(reset.mode, Settings::default().mode);
         assert!(!reset.allow_url_unmute);
     }
 
@@ -377,6 +380,7 @@ mod tests {
             "mic_shortcut",
             "show_in_dock",
             "show_popup",
+            "mode",
             "allow_url_unmute",
         ];
         for launch_at_login in [true, false] {

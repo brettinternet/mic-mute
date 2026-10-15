@@ -4,6 +4,8 @@ use crate::config::AppVars;
 use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::mic_command::MicCommand;
+use crate::push_to_talk::{self, PushToTalk};
+use crate::session_events::SessionEvents;
 use crate::settings::Settings;
 use crate::ui::UI;
 use crate::url_scheme::{UrlAction, UrlActions};
@@ -174,6 +176,10 @@ pub fn start(
     let mut about_window = AboutWindow::default();
     // Actions of opened URLs, run once the UI exists.
     let mut url_actions = UrlActions::default();
+    // The shortcut's hold in push_to_talk mode.
+    let mut push_to_talk = PushToTalk::default();
+    // Screen lock and sleep, watched from Init on; they end a push-to-talk hold.
+    let mut session_events: Option<SessionEvents> = None;
 
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
@@ -236,6 +242,7 @@ pub fn start(
         if let Event::Opened { urls } = &event {
             url_actions.push_urls(urls.iter().map(|url| url.as_str()));
         }
+        let mut is_launching = false;
         if ui_and_ids.is_none() {
             // Until Init, tao delivers at most `Event::Opened` (a launch by URL), queued above.
             if !is_loop_start(&event) {
@@ -251,10 +258,24 @@ pub fn start(
                     return;
                 }
             }
+            match SessionEvents::new() {
+                Ok(events) => session_events = Some(events),
+                Err(err) => log::error!(
+                    "Failed to watch for screen lock and sleep, which end a push-to-talk hold: \
+                     {:#}",
+                    err
+                ),
+            }
+            is_launching = true;
         }
         let Some((ui, event_ids)) = &ui_and_ids else {
             return;
         };
+        // Push-to-talk rests muted, so a launch in that mode mutes.
+        if is_launching && push_to_talk::mutes_at_launch(settings.read().mode) {
+            log::info!("Muting at launch: the shortcut is in push_to_talk mode");
+            request_mic(ui, &controller, MicCommand::Mute);
+        }
         let EventIds {
             button_toggle_mute,
             button_launch_at_login,
@@ -333,8 +354,9 @@ pub fn start(
             trace!("About → {} clicked", button.title());
             let changed = {
                 let mut s = settings.write();
+                let old_mode = s.mode;
                 match about::run_action(button, &mut s) {
-                    Ok(true) => Some(s.clone()),
+                    Ok(true) => Some((old_mode, s.clone())),
                     Ok(false) => None,
                     Err(e) => {
                         log::error!("About → {} failed: {:#}", button.title(), e);
@@ -343,25 +365,44 @@ pub fn start(
                 }
             };
             // Reset Settings: apply every setting at once.
-            if let Some(new_settings) = changed {
-                let mut ui = ui.write();
-                if let Err(e) = ui.apply_settings(&new_settings) {
-                    log::error!("Failed to apply settings: {}", e);
-                } else {
-                    shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
+            if let Some((old_mode, new_settings)) = changed {
+                let hotkey_before = shortcut_mic.load(Ordering::Relaxed);
+                {
+                    let mut ui = ui.write();
+                    if let Err(e) = ui.apply_settings(&new_settings) {
+                        log::error!("Failed to apply settings: {}", e);
+                    } else {
+                        shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
+                    }
+                }
+                let is_hotkey_replaced = shortcut_mic.load(Ordering::Relaxed) != hotkey_before;
+                let mute = push_to_talk.on_settings_change(
+                    old_mode,
+                    new_settings.mode,
+                    is_hotkey_replaced,
+                );
+                if let Some(command) = mute {
+                    log::info!("Muting: the reset changed the shortcut's mode or hotkey");
+                    request_mic(ui, &controller, command);
                 }
             }
         }
 
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            // Only act on key-down; global-hotkey fires both Pressed and Released
-            if event.state() == global_hotkey::HotKeyState::Pressed {
-                let id = event.id();
-                if shortcut_mic.load(Ordering::Relaxed) == id {
-                    trace!("Toggle mic shortcut activated");
-                    let hide_at = request_mic(ui, &controller, MicCommand::Toggle);
-                    keep_popup_until(&mut hide_popup_at, hide_at);
-                }
+        // Every queued shortcut event, in order: push-to-talk needs the press and the release.
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if shortcut_mic.load(Ordering::Relaxed) != event.id() {
+                continue;
+            }
+            let mode = settings.read().mode;
+            if let Some(command) = push_to_talk.on_key(mode, event.state()) {
+                trace!(
+                    "Mute shortcut {:?} in {:?} mode: {:?}",
+                    event.state(),
+                    mode,
+                    command
+                );
+                let hide_at = request_mic(ui, &controller, command);
+                keep_popup_until(&mut hide_popup_at, hide_at);
             }
         }
 
@@ -370,6 +411,20 @@ pub fn start(
             let allow_url_unmute = settings.read().allow_url_unmute;
             let hide_at = run_url_action(action, ui, &controller, allow_url_unmute);
             keep_popup_until(&mut hide_popup_at, hide_at);
+        }
+
+        // After the shortcut and URLs, so a mute here wins. Each event can swallow a held
+        // shortcut's release, so in push_to_talk mode it mutes.
+        let received = session_events.as_ref().map(SessionEvents::take);
+        for event in received.unwrap_or_default() {
+            let mode = settings.read().mode;
+            match push_to_talk.interrupt(mode) {
+                Some(command) => {
+                    log::info!("{}: muting for push to talk", event.description());
+                    request_mic(ui, &controller, command);
+                }
+                None => trace!("{}", event.description()),
+            }
         }
 
         // Once: settings.json was unusable at startup, so main() fell back to the defaults.
@@ -395,14 +450,31 @@ pub fn start(
                     trace!("settings.json changed on disk — reloading");
                     match Settings::load() {
                         Ok(new_settings) => {
+                            let old_mode = settings.read().mode;
                             *settings.write() = new_settings.clone();
                             settings_fallback = Fallback::Previous;
-                            let mut ui_w = ui.write();
-                            if let Err(e) = ui_w.apply_settings(&new_settings) {
-                                log::error!("Failed to apply reloaded settings: {}", e);
-                            } else {
-                                shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
-                                trace!("Settings reloaded from settings.json");
+                            let hotkey_before = shortcut_mic.load(Ordering::Relaxed);
+                            {
+                                let mut ui_w = ui.write();
+                                if let Err(e) = ui_w.apply_settings(&new_settings) {
+                                    log::error!("Failed to apply reloaded settings: {}", e);
+                                } else {
+                                    shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
+                                    trace!("Settings reloaded from settings.json");
+                                }
+                            }
+                            let is_hotkey_replaced =
+                                shortcut_mic.load(Ordering::Relaxed) != hotkey_before;
+                            let mute = push_to_talk.on_settings_change(
+                                old_mode,
+                                new_settings.mode,
+                                is_hotkey_replaced,
+                            );
+                            if let Some(command) = mute {
+                                log::info!(
+                                    "Muting: settings.json changed the shortcut's mode or hotkey"
+                                );
+                                request_mic(ui, &controller, command);
                             }
                             None
                         }

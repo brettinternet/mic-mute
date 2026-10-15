@@ -19,6 +19,7 @@ The file is JSON. The complete default configuration is:
   "show_in_dock": false,
   "launch_at_login": false,
   "show_popup": true,
+  "mode": "toggle",
   "allow_url_unmute": false
 }
 ```
@@ -72,6 +73,21 @@ Controls the small on-screen mute-status popup.
 - `false`: keep the popup hidden while retaining the tray indicator.
 
 The tray menu can also toggle this setting. A `status` URL shows the popup for two seconds either way.
+
+### `mode`
+
+Controls what the mute shortcut does.
+
+- `"toggle"` (default): each press mutes or unmutes.
+- `"push_to_talk"`: holding the shortcut unmutes the microphones, and releasing it mutes them again.
+
+In push-to-talk mode the microphones rest muted:
+
+- Launching Mic Mute in this mode mutes them, and so does switching to it.
+- A release can get lost, for example when the screen locks while you hold the shortcut. So Mic Mute also mutes when the screen locks, the screen saver starts, the Mac or its displays go to sleep, or another user's session becomes active; when the shortcut changes while held; and when the mode changes back to `"toggle"` while held. To talk again after one of these, press the shortcut again.
+- The tray menu's Mute item and the URL actions work as in toggle mode. An unmute from either lasts until the next release of the shortcut, or one of the events above.
+
+Any shortcut works; one you can hold with one hand, such as `F13` without modifiers, is easiest.
 
 ### `allow_url_unmute`
 

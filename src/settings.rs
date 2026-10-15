@@ -34,7 +34,11 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
-    // Inputs besides the tray menu: URLs (`url_scheme`).
+    // Inputs besides the tray menu: the shortcut's mode (`push_to_talk`) and URLs
+    // (`url_scheme`).
+    /// What the mute shortcut does: toggle, or unmute only while held.
+    #[serde(default)]
+    pub mode: ShortcutMode,
     /// Whether `unmute` and `toggle` URLs may run. Off by default: any app or web page can open
     /// a URL, so by default URLs can only mute and show the state.
     #[serde(default)]
@@ -53,6 +57,7 @@ impl Default for Settings {
             launch_at_login: false,
             show_popup: true,
             // Inputs besides the tray menu.
+            mode: ShortcutMode::Toggle,
             allow_url_unmute: false,
             extra: serde_json::Map::new(),
         }
@@ -61,6 +66,19 @@ impl Default for Settings {
 
 fn default_show_popup() -> bool {
     true
+}
+
+// Inputs besides the tray menu.
+
+/// What the mute shortcut does (`mode`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutMode {
+    /// Each press mutes or unmutes.
+    #[default]
+    Toggle,
+    /// Holding the shortcut unmutes; releasing it mutes again.
+    PushToTalk,
 }
 
 /// Why settings.json can't be used.
@@ -335,6 +353,7 @@ mod tests {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: false,
+            mode: ShortcutMode::PushToTalk,
             allow_url_unmute: true,
             extra: serde_json::Map::new(),
         };
@@ -346,6 +365,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(!loaded.show_popup);
+        assert_eq!(loaded.mode, ShortcutMode::PushToTalk);
         assert!(loaded.allow_url_unmute);
 
         let _ = fs::remove_file(&tmp_path);
@@ -412,6 +432,7 @@ mod tests {
             "show_in_dock",
             "launch_at_login",
             "show_popup",
+            "mode",
             "allow_url_unmute",
         ] {
             assert!(
@@ -447,6 +468,7 @@ mod tests {
                 "allow_url_unmute",
                 "launch_at_login",
                 "mic_shortcut",
+                "mode",
                 "show_in_dock",
                 "show_popup"
             ]
@@ -768,5 +790,40 @@ mod tests {
         assert_eq!(json["allow_url_unmute"], serde_json::json!(true));
         let loaded: Settings = serde_json::from_value(json).unwrap();
         assert!(loaded.allow_url_unmute);
+    }
+
+    #[test]
+    fn mode_is_toggle_by_default_and_when_missing() {
+        assert_eq!(Settings::default().mode, ShortcutMode::Toggle);
+        let loaded: Settings = serde_json::from_str(r#"{ "show_popup": false }"#).unwrap();
+        assert_eq!(loaded.mode, ShortcutMode::Toggle);
+    }
+
+    #[test]
+    fn mode_round_trips_in_snake_case() {
+        for (mode, text) in [
+            (ShortcutMode::Toggle, "toggle"),
+            (ShortcutMode::PushToTalk, "push_to_talk"),
+        ] {
+            let settings = Settings {
+                mode,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["mode"], serde_json::json!(text));
+            let loaded: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(loaded.mode, mode);
+        }
+    }
+
+    #[test]
+    fn an_unknown_mode_makes_the_file_invalid() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{\n  \"mode\": \"hold\"\n}\n");
+
+        let err = Settings::load_from(&path).unwrap_err();
+
+        assert!(matches!(err, LoadError::Parse { .. }));
+        assert_eq!(err.position().map(|(line, _)| line), Some(2));
     }
 }

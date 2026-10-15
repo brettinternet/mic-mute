@@ -9,6 +9,8 @@ mod mic;
 mod mic_command;
 mod popup;
 mod popup_content;
+mod push_to_talk;
+mod session_events;
 mod settings;
 mod shortcuts;
 mod store;

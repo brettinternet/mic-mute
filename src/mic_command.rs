@@ -1,5 +1,5 @@
-//! A change to the microphones that the user asks for, from the tray, the shortcut, or a URL.
-//! The event loop runs it through `MicController::toggle`.
+//! A change to the microphones that the user asks for, from the tray, the shortcut, or a URL,
+//! or that a session event calls for. The event loop runs it through `MicController::toggle`.
 
 /// What to do with the user's mute intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
