@@ -81,8 +81,9 @@ fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool)
     let mut controller = controller.write();
     if toggle || controller.should_enforce_mute() {
         let state = if toggle { None } else { Some(true) };
-        if let Err(err) = controller.toggle(state) {
-            log::error!("Failed to update microphone mute state: {}", err);
+        match controller.toggle(state).map(|_| ()) {
+            Ok(()) => controller.update_failures.clear(),
+            Err(err) => controller.update_failures.report(&err, Instant::now()),
         }
         let mut ui = ui.write();
         if let Err(err) = ui.update_mic(controller.muted) {

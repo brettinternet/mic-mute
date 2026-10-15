@@ -16,17 +16,23 @@ use objc2_core_audio::{
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_foundation::{CFRetained, CFString};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::mem;
 use std::ptr::{null, NonNull};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const VOLUME_MUTED_EPSILON: f32 = 0.000_001;
 /// Unmute level for a volume-controlled device Mic Mute has never seen audible.
 const UNMUTE_FALLBACK_VOLUME: f32 = 0.5;
+/// Native mute readbacks after a write, [`AudioBackend::readback_retry_delay`] apart.
+const NATIVE_READBACK_ATTEMPTS: u32 = 5;
+/// How often a device whose accepted writes never take effect is written to again.
+const IGNORED_WRITES_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// Identical repeats of a failure stay at `trace!` this long before an `error!` counts them.
+const FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
     0x766d7663; // 'vmvc'
 
@@ -107,6 +113,10 @@ pub trait AudioBackend {
     fn is_mute_settable(&self, audio_device_id: AudioDeviceID) -> Result<bool>;
     fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>>;
     fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>>;
+    /// How long to wait between native mute readbacks while a write takes effect.
+    fn readback_retry_delay(&self) -> Duration {
+        Duration::from_millis(10)
+    }
     fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>>;
     fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>>;
 }
@@ -396,8 +406,10 @@ impl AudioBackend for CoreAudioBackend {
     }
 }
 
-/// The control the app mutes a device with: native mute when it is settable, else input
-/// volume. Chosen from capabilities alone, never from device names.
+/// The control the app mutes a device with and reads its state from: native mute when it is
+/// settable, else input volume. A native mute that can be read but not set counts as absent.
+/// [`mute_control`] picks it from capabilities, and [`WriteBehavior`] adjusts it for devices
+/// whose writes don't take effect; device names never play a part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MuteControl {
     Native,
@@ -414,6 +426,56 @@ fn mute_control<B: AudioBackend>(
     Ok(backend
         .get_volume(audio_device_id)?
         .map(|_| MuteControl::Volume))
+}
+
+/// How a device took one mute or unmute write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteOutcome {
+    /// The control reads the requested state: it already did, or the write took effect.
+    Confirmed,
+    /// The control turned out not to be settable; nothing was written.
+    NotSettable,
+    /// The device accepted the write, but the control still reads the other state.
+    Ignored,
+}
+
+/// What writes showed about a device whose controls don't do what they advertise.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WriteBehavior {
+    /// Native mute accepts writes but never changes, while input volume works: the app mutes
+    /// the device by volume and reads its state there.
+    IgnoresNativeMute,
+    /// Accepted writes take effect on no control: the device is left out of the mute state
+    /// and of enforcement, like a device without controls, until its retry is due.
+    IgnoresWrites(WriteRetry),
+}
+
+/// When to write again to a device that ignores writes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WriteRetry {
+    /// The device's ID at the last attempt; another ID means it reconnected.
+    audio_device_id: AudioDeviceID,
+    /// Whether a poll has missed the device since; it reconnected once it is back.
+    has_disconnected: bool,
+    attempted_at: Instant,
+}
+
+impl WriteRetry {
+    fn new(audio_device_id: AudioDeviceID, now: Instant) -> Self {
+        Self {
+            audio_device_id,
+            has_disconnected: false,
+            attempted_at: now,
+        }
+    }
+
+    /// Whether to write again: [`IGNORED_WRITES_RETRY_INTERVAL`] has passed, or the device
+    /// reconnected.
+    fn is_due(&self, audio_device_id: AudioDeviceID, now: Instant) -> bool {
+        self.has_disconnected
+            || self.audio_device_id != audio_device_id
+            || now.saturating_duration_since(self.attempted_at) >= IGNORED_WRITES_RETRY_INTERVAL
+    }
 }
 
 fn device_key<B: AudioBackend>(backend: &B, audio_device_id: AudioDeviceID) -> DeviceKey {
@@ -452,43 +514,31 @@ fn input_device_ids<B: AudioBackend>(backend: &B) -> Result<Vec<AudioDeviceID>> 
     Ok(input_device_ids)
 }
 
+/// The device's state as `control` reads it: its native mute, or whether its input volume is
+/// at zero. `None` when the control can't be read.
 fn read_muted<B: AudioBackend>(
     backend: &B,
     audio_device_id: AudioDeviceID,
+    control: MuteControl,
 ) -> Result<Option<bool>> {
-    let name = backend.device_name(audio_device_id)?;
-    trace!(
-        "Reading mute state for device {} - {}",
-        audio_device_id,
-        name
-    );
-
-    match backend.get_mute(audio_device_id)? {
-        Some(muted) => Ok(Some(muted)),
-        None => match backend.get_volume(audio_device_id)? {
-            Some(volume) => Ok(Some(is_volume_muted(volume))),
-            None => {
-                trace!(
-                    "Audio device {} has no supported mute or input volume control",
-                    audio_device_id
-                );
-                Ok(None)
-            }
-        },
+    match control {
+        MuteControl::Native => backend.get_mute(audio_device_id),
+        MuteControl::Volume => Ok(backend.get_volume(audio_device_id)?.map(is_volume_muted)),
     }
 }
 
-fn wait_for_state<B: AudioBackend>(
+/// Reads the native mute until it shows `state`; a write can take a moment to show.
+fn wait_for_native_mute<B: AudioBackend>(
     backend: &B,
     audio_device_id: AudioDeviceID,
     state: bool,
 ) -> Result<bool> {
-    for attempt in 0..5 {
-        if read_muted(backend, audio_device_id)? == Some(state) {
+    for attempt in 1..=NATIVE_READBACK_ATTEMPTS {
+        if backend.get_mute(audio_device_id)? == Some(state) {
             return Ok(true);
         }
-        if attempt != 4 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        if attempt < NATIVE_READBACK_ATTEMPTS {
+            std::thread::sleep(backend.readback_retry_delay());
         }
     }
     Ok(false)
@@ -520,7 +570,7 @@ fn restore_native_mute<B: AudioBackend>(
             audio_device_id
         ));
     }
-    if !wait_for_state(backend, audio_device_id, false)? {
+    if !wait_for_native_mute(backend, audio_device_id, false)? {
         return Err(anyhow!(
             "audio device {} remained muted after native unmute",
             audio_device_id
@@ -649,9 +699,117 @@ pub fn restore_from_journal_file() {
     journal.save_logged();
 }
 
+/// Logs an operation that can fail on every poll without flooding the log: the first failure
+/// at `error!`, identical repeats at `trace!` for [`FAILURE_REPORT_INTERVAL`], then one
+/// `error!` with their count, and `info!` once the operation succeeds again.
+pub struct FailureLog {
+    /// Starts every failure line, e.g. "Failed to update microphone mute state".
+    failure_text: &'static str,
+    /// The line for the first success after failures.
+    recovery_text: &'static str,
+    streak: Option<FailureStreak>,
+}
+
+/// The failures since the last success.
+struct FailureStreak {
+    message: String,
+    /// When `message` was last logged at `error!`.
+    reported_at: Instant,
+    /// Identical failures since then, logged at `trace!`.
+    unreported: u32,
+    /// Every failure since the last success.
+    failures: u32,
+}
+
+/// What [`FailureLog`] logs for one failure.
+#[derive(Debug, PartialEq, Eq)]
+enum FailureReport {
+    /// `error!`: a failure unlike the one before.
+    New,
+    /// `error!`: an identical failure after the quiet period, with the identical failures
+    /// since the last report, this one included.
+    Repeated { count: u32, since: Duration },
+    /// `trace!`: an identical failure inside the quiet period.
+    Suppressed,
+}
+
+impl FailureLog {
+    pub fn new(failure_text: &'static str, recovery_text: &'static str) -> Self {
+        Self {
+            failure_text,
+            recovery_text,
+            streak: None,
+        }
+    }
+
+    /// Logs a failure that happened at `now`.
+    pub fn report(&mut self, err: &anyhow::Error, now: Instant) {
+        let message = format!("{:#}", err);
+        match self.record_failure(&message, now) {
+            FailureReport::New => error!("{}: {}", self.failure_text, message),
+            FailureReport::Repeated { count, since } => error!(
+                "{}: {} (repeated {} times in the last {} s)",
+                self.failure_text,
+                message,
+                count,
+                since.as_secs()
+            ),
+            FailureReport::Suppressed => trace!("{} again: {}", self.failure_text, message),
+        }
+    }
+
+    /// Notes a success, and logs the recovery when it ends a run of failures.
+    pub fn clear(&mut self) {
+        if let Some(failures) = self.record_success() {
+            info!(
+                "{} after {} failed attempt(s)",
+                self.recovery_text, failures
+            );
+        }
+    }
+
+    fn record_failure(&mut self, message: &str, now: Instant) -> FailureReport {
+        let failures = self
+            .streak
+            .as_ref()
+            .map_or(0, |streak| streak.failures)
+            .saturating_add(1);
+        if let Some(streak) = self
+            .streak
+            .as_mut()
+            .filter(|streak| streak.message == message)
+        {
+            streak.failures = failures;
+            let since = now.saturating_duration_since(streak.reported_at);
+            if since < FAILURE_REPORT_INTERVAL {
+                streak.unreported = streak.unreported.saturating_add(1);
+                return FailureReport::Suppressed;
+            }
+            let count = streak.unreported.saturating_add(1);
+            streak.reported_at = now;
+            streak.unreported = 0;
+            return FailureReport::Repeated { count, since };
+        }
+        self.streak = Some(FailureStreak {
+            message: message.to_string(),
+            reported_at: now,
+            unreported: 0,
+            failures,
+        });
+        FailureReport::New
+    }
+
+    /// Ends a run of failures; returns how many there were.
+    fn record_success(&mut self) -> Option<u32> {
+        self.streak.take().map(|streak| streak.failures)
+    }
+}
+
 pub struct MicController<B = CoreAudioBackend> {
     pub muted: bool,
     desired_muted: bool,
+    /// Rate-limits the log of failed updates; the event loop reports each `toggle` outcome.
+    pub update_failures: FailureLog,
     /// What the app changed per device and must undo, keyed by device UID and mirrored to
     /// `restore.json`.
     journal: RestoreJournal,
@@ -661,6 +819,9 @@ pub struct MicController<B = CoreAudioBackend> {
     /// Journaled devices that were connected at the last unmuted poll. A journaled device that
     /// joins this set gets restored once; later failures wait for the next unmute or exit.
     connected_journaled: HashSet<DeviceKey>,
+    /// What writes showed about devices whose controls don't do what they advertise, keyed
+    /// like the journal. Kept for the session, also while a device is disconnected.
+    write_behavior: HashMap<DeviceKey, WriteBehavior>,
     backend: B,
 }
 
@@ -690,9 +851,14 @@ impl<B: AudioBackend> MicController<B> {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
+            update_failures: FailureLog::new(
+                "Failed to update microphone mute state",
+                "Microphone mute state updates work again",
+            ),
             journal,
             levels,
             connected_journaled: HashSet::new(),
+            write_behavior: HashMap::new(),
             backend,
         };
         trace!("Creating audio controller");
@@ -760,8 +926,36 @@ impl<B: AudioBackend> MicController<B> {
         input_device_ids(&self.backend)
     }
 
+    /// What writes showed about the device. Reads its UID only when anything is known.
+    fn write_behavior_of(&self, audio_device_id: AudioDeviceID) -> Option<WriteBehavior> {
+        if self.write_behavior.is_empty() {
+            return None;
+        }
+        self.write_behavior
+            .get(&device_key(&self.backend, audio_device_id))
+            .copied()
+    }
+
+    /// The control the app mutes the device with and reads its state from, or `None` when it
+    /// leaves the device out: nothing is settable, or accepted writes never take effect.
+    fn state_control(&self, audio_device_id: AudioDeviceID) -> Result<Option<MuteControl>> {
+        let Some(control) = mute_control(&self.backend, audio_device_id)? else {
+            return Ok(None);
+        };
+        Ok(match self.write_behavior_of(audio_device_id) {
+            None => Some(control),
+            Some(WriteBehavior::IgnoresNativeMute) => Some(MuteControl::Volume),
+            Some(WriteBehavior::IgnoresWrites(_)) => None,
+        })
+    }
+
+    /// The device's state, read from the control the app mutes it with. `None` for a device
+    /// the app leaves out.
     fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
-        read_muted(&self.backend, audio_device_id)
+        match self.state_control(audio_device_id)? {
+            Some(control) => read_muted(&self.backend, audio_device_id, control),
+            None => Ok(None),
+        }
     }
 
     fn is_muted_all(&self) -> Result<bool> {
@@ -776,7 +970,7 @@ impl<B: AudioBackend> MicController<B> {
                     }
                 }
                 None => trace!(
-                    "Input device {} is not controllable by CoreAudio mute or volume",
+                    "Input device {} is left out: nothing settable, or it ignores writes",
                     id
                 ),
             }
@@ -795,60 +989,214 @@ impl<B: AudioBackend> MicController<B> {
         Ok(true)
     }
 
-    fn wait_for_device_state(&self, audio_device_id: AudioDeviceID, state: bool) -> Result<bool> {
-        wait_for_state(&self.backend, audio_device_id, state)
-    }
-
+    /// Mutes or unmutes one device. Returns `None` when the device is left out: nothing is
+    /// settable, or its accepted writes never take effect.
     fn mute(
         &mut self,
         audio_device_id: AudioDeviceID,
         name: &str,
         state: bool,
+        now: Instant,
     ) -> Result<Option<AudioDeviceID>> {
-        let control = mute_control(&self.backend, audio_device_id)?;
-        let mut is_handled = false;
-        if let Some(control) = control {
-            let key = device_key(&self.backend, audio_device_id);
-            if control == MuteControl::Native {
-                is_handled = self.mute_native(audio_device_id, name, &key, state)?;
-            }
-            if !is_handled {
-                trace!(
-                    "Device {} doesn't support mute property; falling back to input volume",
-                    audio_device_id
-                );
-                is_handled = self.mute_via_volume(audio_device_id, name, &key, state)?;
-            }
-        }
-        if !is_handled {
+        let Some(control) = mute_control(&self.backend, audio_device_id)? else {
             trace!(
                 "Skipping audio device {} because neither native mute nor input volume is controllable",
                 audio_device_id
             );
+            return Ok(None);
+        };
+        let key = device_key(&self.backend, audio_device_id);
+        let is_handled = if state {
+            self.mute_device(audio_device_id, name, &key, control, now)?
+        } else {
+            self.unmute_device(audio_device_id, name, &key, control)?
+        };
+        if !is_handled {
             return Ok(None);
         }
 
         let state_text = match self.is_muted(audio_device_id)? {
             Some(true) => "muted",
             Some(false) => "unmuted",
-            None => "uncontrollable",
+            None => "left out",
         };
         trace!("Device {} now registers as {}", audio_device_id, state_text);
         Ok(Some(audio_device_id))
     }
 
-    /// Sets native mute and confirms it by readback. Returns false when native mute turns out
-    /// not to be settable.
+    /// Mutes a device and learns from the readback. When native mute ignores an accepted write,
+    /// input volume takes over for the session; when every control ignores its writes, the
+    /// device is left out until its retry is due. Returns false when it is left out.
+    fn mute_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        name: &str,
+        key: &DeviceKey,
+        control: MuteControl,
+        now: Instant,
+    ) -> Result<bool> {
+        let known = self.write_behavior.get(key).copied();
+        if let Some(WriteBehavior::IgnoresWrites(retry)) = known {
+            if !retry.is_due(audio_device_id, now) {
+                trace!(
+                    "Leaving out audio device {}: {} until its next write retry",
+                    audio_device_id,
+                    name
+                );
+                return Ok(false);
+            }
+        }
+        let skips_native = known == Some(WriteBehavior::IgnoresNativeMute);
+        let mut ignored = Vec::new();
+        if control == MuteControl::Native && !skips_native {
+            match self.mute_native(audio_device_id, name, key, true)? {
+                WriteOutcome::Confirmed => {
+                    self.learn(audio_device_id, name, key, None, &ignored);
+                    return Ok(true);
+                }
+                WriteOutcome::NotSettable => trace!(
+                    "Device {} doesn't support mute property; falling back to input volume",
+                    audio_device_id
+                ),
+                WriteOutcome::Ignored => ignored.push("native mute"),
+            }
+        }
+        match self.mute_via_volume(audio_device_id, name, key)? {
+            WriteOutcome::Confirmed => {
+                let behavior = (skips_native || !ignored.is_empty())
+                    .then_some(WriteBehavior::IgnoresNativeMute);
+                self.learn(audio_device_id, name, key, behavior, &ignored);
+                return Ok(true);
+            }
+            WriteOutcome::Ignored => ignored.push("input volume"),
+            WriteOutcome::NotSettable if skips_native => {
+                // Its input volume is gone: try native mute again on the next poll.
+                self.write_behavior.remove(key);
+            }
+            WriteOutcome::NotSettable => {}
+        }
+        if ignored.is_empty() {
+            trace!(
+                "Skipping audio device {} because neither native mute nor input volume is controllable",
+                audio_device_id
+            );
+            return Ok(false);
+        }
+        let behavior = WriteBehavior::IgnoresWrites(WriteRetry::new(audio_device_id, now));
+        self.learn(audio_device_id, name, key, Some(behavior), &ignored);
+        Ok(false)
+    }
+
+    /// Remembers what a mute showed about the device and logs what changed. `ignored` names
+    /// the controls whose accepted writes didn't take effect.
+    fn learn(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        name: &str,
+        key: &DeviceKey,
+        behavior: Option<WriteBehavior>,
+        ignored: &[&str],
+    ) {
+        let previous = match behavior {
+            Some(behavior) => self.write_behavior.insert(key.clone(), behavior),
+            None => self.write_behavior.remove(key),
+        };
+        let was_ignoring_writes = matches!(previous, Some(WriteBehavior::IgnoresWrites(_)));
+        let retry_secs = IGNORED_WRITES_RETRY_INTERVAL.as_secs();
+        match behavior {
+            Some(WriteBehavior::IgnoresWrites(_)) if was_ignoring_writes => trace!(
+                "Audio device {}: {} still ignores {} writes; trying again in {} s",
+                audio_device_id,
+                name,
+                ignored.join(" and "),
+                retry_secs
+            ),
+            Some(WriteBehavior::IgnoresWrites(_)) => warn!(
+                "Leaving out audio device {}: {}: it accepts {} writes, but they don't take effect; trying again every {} s and when it reconnects",
+                audio_device_id,
+                name,
+                ignored.join(" and "),
+                retry_secs
+            ),
+            _ if was_ignoring_writes => info!(
+                "Audio device {}: {} responds to mute writes again",
+                audio_device_id, name
+            ),
+            Some(WriteBehavior::IgnoresNativeMute) if previous.is_none() => info!(
+                "Audio device {}: {} ignores native mute writes; muting it by input volume",
+                audio_device_id, name
+            ),
+            _ => {}
+        }
+    }
+
+    /// Unmutes a device on every control the app may have muted it with: native mute when it
+    /// is settable, and input volume when that is the device's control or the journal holds a
+    /// saved level. A failure on one control doesn't stop the other.
+    fn unmute_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        name: &str,
+        key: &DeviceKey,
+        control: MuteControl,
+    ) -> Result<bool> {
+        let mut uses_volume = control == MuteControl::Volume
+            || self.write_behavior.get(key) == Some(&WriteBehavior::IgnoresNativeMute)
+            || self.journal.saved_volume(key).is_some();
+        let mut is_handled = false;
+        let mut failures = Vec::new();
+        if control == MuteControl::Native {
+            match self.mute_native(audio_device_id, name, key, false) {
+                Ok(WriteOutcome::Confirmed) => is_handled = true,
+                Ok(WriteOutcome::NotSettable) => {
+                    trace!(
+                        "Device {} doesn't support mute property; falling back to input volume",
+                        audio_device_id
+                    );
+                    uses_volume = true;
+                }
+                Ok(WriteOutcome::Ignored) => failures.push(anyhow!(
+                    "audio device {} remained muted after native unmute",
+                    audio_device_id
+                )),
+                Err(err) => failures.push(err),
+            }
+        }
+        if uses_volume {
+            match self.unmute_via_volume(audio_device_id, name, key) {
+                Ok(is_settable) => is_handled |= is_settable,
+                Err(err) => failures.push(err),
+            }
+        }
+        match failures
+            .into_iter()
+            .reduce(|first, next| anyhow!("{}; {}", first, next))
+        {
+            Some(err) => Err(err),
+            None => Ok(is_handled),
+        }
+    }
+
+    /// Sets native mute unless it already reads `state`, and confirms a write by readback. A
+    /// mute is journaled before the write and stays journaled when the device ignores it, so
+    /// unmute and exit undo it should it take effect late.
     fn mute_native(
         &mut self,
         audio_device_id: AudioDeviceID,
         name: &str,
         key: &DeviceKey,
         state: bool,
-    ) -> Result<bool> {
-        let is_recorded = state
-            && self.is_muted(audio_device_id)? == Some(false)
-            && self.journal.record_native_mute(key, name);
+    ) -> Result<WriteOutcome> {
+        let current = self.backend.get_mute(audio_device_id)?;
+        if current == Some(state) {
+            // Nothing to write; an unmuted device has no mute of the app's left to undo.
+            if !state {
+                self.journal.clear_native_mute(key);
+            }
+            return Ok(WriteOutcome::Confirmed);
+        }
+        let is_recorded =
+            state && current == Some(false) && self.journal.record_native_mute(key, name);
         if is_recorded {
             // Journal the change before making it, so a crash can't leave it unrecorded.
             self.journal.save_logged();
@@ -857,62 +1205,58 @@ impl<B: AudioBackend> MicController<B> {
             if is_recorded {
                 self.journal.clear_native_mute(key);
             }
-            return Ok(false);
+            return Ok(WriteOutcome::NotSettable);
         }
-        if !self.wait_for_device_state(audio_device_id, state)? {
-            return Err(anyhow!(
-                "audio device {} did not reach requested mute state {} after native mute set",
-                audio_device_id,
-                state
-            ));
+        if !wait_for_native_mute(&self.backend, audio_device_id, state)? {
+            return Ok(WriteOutcome::Ignored);
         }
         if !state {
             self.journal.clear_native_mute(key);
         }
-        Ok(true)
+        Ok(WriteOutcome::Confirmed)
     }
 
-    /// Mutes by setting input volume to 0, or unmutes by restoring a level. Returns false when
-    /// the device has no settable input volume.
+    /// Mutes by setting input volume to 0 unless it already reads 0, and confirms the write by
+    /// readback. The level is saved first and stays journaled when the device ignores the
+    /// write, so unmute and exit restore it should the write take effect late.
     fn mute_via_volume(
         &mut self,
         audio_device_id: AudioDeviceID,
         name: &str,
         key: &DeviceKey,
-        state: bool,
-    ) -> Result<bool> {
-        if !state {
-            return self.unmute_via_volume(audio_device_id, name, key);
-        }
+    ) -> Result<WriteOutcome> {
         let Some(current_vol) = self.backend.get_volume(audio_device_id)? else {
-            return Ok(false);
+            return Ok(WriteOutcome::NotSettable);
         };
-        if !is_volume_muted(current_vol) {
-            self.levels.record(key, name, current_vol);
-            if self.journal.record_saved_volume(key, name, current_vol) {
-                trace!(
-                    "Saving volume {:.3} for device {} before muting",
-                    current_vol,
-                    audio_device_id
-                );
-                // Journal the level before changing it, so a crash can't lose it.
-                self.journal.save_logged();
-            }
+        if is_volume_muted(current_vol) {
+            // Muted already, by the app or before it ran: nothing to save or write.
+            return Ok(WriteOutcome::Confirmed);
+        }
+        self.levels.record(key, name, current_vol);
+        if self.journal.record_saved_volume(key, name, current_vol) {
+            trace!(
+                "Saving volume {:.3} for device {} before muting",
+                current_vol,
+                audio_device_id
+            );
+            // Journal the level before changing it, so a crash can't lose it.
+            self.journal.save_logged();
         }
         if self.backend.set_volume(audio_device_id, 0.0)?.is_none() {
-            return Ok(false);
+            return Ok(WriteOutcome::NotSettable);
         }
-        let Some(volume) = self.backend.get_volume(audio_device_id)? else {
-            return Ok(false);
-        };
-        if !is_volume_muted(volume) {
-            return Err(anyhow!(
-                "audio device {} input volume remained {:.3} after fallback mute",
-                audio_device_id,
-                volume
-            ));
+        match self.backend.get_volume(audio_device_id)? {
+            Some(volume) if is_volume_muted(volume) => Ok(WriteOutcome::Confirmed),
+            Some(volume) => {
+                trace!(
+                    "Audio device {} input volume remained {:.3} after fallback mute",
+                    audio_device_id,
+                    volume
+                );
+                Ok(WriteOutcome::Ignored)
+            }
+            None => Ok(WriteOutcome::NotSettable),
         }
-        Ok(true)
     }
 
     fn unmute_via_volume(
@@ -976,25 +1320,33 @@ impl<B: AudioBackend> MicController<B> {
     }
 
     pub fn mute_all(&mut self, state: bool) -> Result<&Self> {
+        self.mute_all_at(state, Instant::now())
+    }
+
+    /// [`Self::mute_all`] at `now`, which decides whether devices that ignore writes are due
+    /// another write.
+    fn mute_all_at(&mut self, state: bool, now: Instant) -> Result<&Self> {
         self.desired_muted = state;
         let ids = self.get_input_device_ids()?;
+        self.note_input_devices(&ids);
         let action = action_name(state);
         let end_state = state_name(state);
         let mut failures = Vec::new();
         for id in &ids {
             let name = self.backend.device_name(*id)?;
             trace!("Setting mute={} for {}", state, name);
-            match self.mute(*id, &name, state) {
+            match self.mute(*id, &name, state, now) {
                 Ok(Some(_)) => trace!("Successfully {} audio device {}: {}", end_state, id, name),
-                Ok(None) => trace!(
-                    "Skipped audio device {}: {} because it has no supported mute control",
-                    id,
-                    name
-                ),
+                Ok(None) => trace!("Skipped audio device {}: {}", id, name),
                 Err(err) => {
-                    error!(
+                    // The combined error below carries this failure, and the event loop logs
+                    // it through `update_failures`; per poll, this line is detail.
+                    trace!(
                         "Failed to {} audio device {}: {}: {}",
-                        action, id, name, err
+                        action,
+                        id,
+                        name,
+                        err
                     );
                     failures.push(format!("{} ({})", name, err));
                 }
@@ -1093,6 +1445,21 @@ impl<B: AudioBackend> MicController<B> {
         self.journal.save_logged();
     }
 
+    /// Notes which input devices a poll found, so a device that ignores writes gets its next
+    /// write as soon as it reconnects.
+    fn note_input_devices(&mut self, ids: &[AudioDeviceID]) {
+        // A device without a UID comes back under a new session key; its old entry is dead.
+        self.write_behavior
+            .retain(|key, _| !matches!(key, DeviceKey::Session(id) if !ids.contains(id)));
+        for behavior in self.write_behavior.values_mut() {
+            if let WriteBehavior::IgnoresWrites(retry) = behavior {
+                if !ids.contains(&retry.audio_device_id) {
+                    retry.has_disconnected = true;
+                }
+            }
+        }
+    }
+
     /// Records the level of every volume-controlled device that is audible now.
     fn record_audible_levels(&mut self) {
         let ids = match self.get_input_device_ids() {
@@ -1102,6 +1469,8 @@ impl<B: AudioBackend> MicController<B> {
                 return;
             }
         };
+        // Reconnects while unmuted count too: the next mute retries such a device at once.
+        self.note_input_devices(&ids);
         for id in ids {
             if let Err(err) = self.record_audible_level(id) {
                 trace!("Could not record the input level of device {}: {}", id, err);
@@ -1110,9 +1479,11 @@ impl<B: AudioBackend> MicController<B> {
     }
 
     fn record_audible_level(&mut self, audio_device_id: AudioDeviceID) -> Result<()> {
-        // Same test as `mute_control`, reading the volume only once. Devices with native
-        // mute keep their level, so they need no record.
-        if self.backend.is_mute_settable(audio_device_id)? {
+        // Same test as `state_control`, reading the volume only once. Devices muted natively
+        // keep their level, so they need no record.
+        if self.backend.is_mute_settable(audio_device_id)?
+            && self.write_behavior_of(audio_device_id) != Some(WriteBehavior::IgnoresNativeMute)
+        {
             return Ok(());
         }
         let Some(volume) = self.backend.get_volume(audio_device_id)? else {
@@ -1154,6 +1525,8 @@ mod tests {
         uid: String,
         input: bool,
         mute: Option<bool>,
+        /// Whether `mute` can be set; a readable native mute may still be read-only.
+        mute_settable: bool,
         volume: Option<f32>,
         fail_uid: bool,
         fail_input_channels: bool,
@@ -1170,6 +1543,7 @@ mod tests {
                 uid: uid_of(name),
                 input: true,
                 mute,
+                mute_settable: mute.is_some(),
                 volume,
                 fail_uid: false,
                 fail_input_channels: false,
@@ -1191,6 +1565,39 @@ mod tests {
         fn no_control(name: &str) -> Self {
             Self::new(name, None, None)
         }
+
+        /// Reports a native mute that can be read but not set.
+        fn read_only_mute(name: &str, muted: bool, volume: Option<f32>) -> Self {
+            Self {
+                mute_settable: false,
+                ..Self::new(name, Some(muted), volume)
+            }
+        }
+
+        /// Accepts native mute and input volume writes without an error, but neither changes,
+        /// like Microsoft Teams Audio.
+        fn ignoring_writes(name: &str) -> Self {
+            Self {
+                ignore_set_mute: true,
+                ignore_set_volume: true,
+                ..Self::native(name, false)
+            }
+        }
+    }
+
+    /// A write that reached a settable control.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Write {
+        Mute(AudioDeviceID, bool),
+        Volume(AudioDeviceID, f32),
+    }
+
+    impl Write {
+        fn device(self) -> AudioDeviceID {
+            match self {
+                Write::Mute(id, _) | Write::Volume(id, _) => id,
+            }
+        }
     }
 
     fn uid_of(name: &str) -> String {
@@ -1208,6 +1615,8 @@ mod tests {
         /// When set, each device write records whether this journal store named the device.
         journal_probe: Option<MemoryStore>,
         journaled_at_write: Vec<(AudioDeviceID, bool)>,
+        /// Every write that reached a settable control, in order.
+        writes: Vec<Write>,
     }
 
     impl FakeBackend {
@@ -1244,7 +1653,9 @@ mod tests {
             self.devices.insert(id, device);
         }
 
-        fn observe_write(&mut self, id: AudioDeviceID) {
+        fn observe_write(&mut self, write: Write) {
+            self.writes.push(write);
+            let id = write.device();
             if let Some(store) = &self.journal_probe {
                 let uid = self.devices[&id].uid.clone();
                 let is_journaled = store
@@ -1281,7 +1692,8 @@ mod tests {
         }
 
         fn is_mute_settable(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
-            Ok(self.device(audio_device_id)?.mute.is_some())
+            let device = self.device(audio_device_id)?;
+            Ok(device.mute.is_some() && device.mute_settable)
         }
 
         fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
@@ -1289,7 +1701,11 @@ mod tests {
         }
 
         fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>> {
-            self.observe_write(audio_device_id);
+            // Like CoreAudioBackend, which checks AudioObjectIsPropertySettable first.
+            if !self.is_mute_settable(audio_device_id)? {
+                return Ok(None);
+            }
+            self.observe_write(Write::Mute(audio_device_id, state));
             let device = self.device_mut(audio_device_id)?;
             if device.fail_set_mute {
                 return Err(anyhow!("fake native mute failure"));
@@ -1304,6 +1720,11 @@ mod tests {
             }
         }
 
+        /// Fake writes show at once or never, so tests don't sleep between readbacks.
+        fn readback_retry_delay(&self) -> Duration {
+            Duration::ZERO
+        }
+
         fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>> {
             Ok(self.device(audio_device_id)?.volume)
         }
@@ -1313,13 +1734,13 @@ mod tests {
             audio_device_id: AudioDeviceID,
             volume: f32,
         ) -> Result<Option<()>> {
-            self.observe_write(audio_device_id);
+            if self.device(audio_device_id)?.volume.is_none() {
+                return Ok(None);
+            }
+            self.observe_write(Write::Volume(audio_device_id, volume));
             let device = self.device_mut(audio_device_id)?;
             if device.fail_set_volume {
                 return Err(anyhow!("fake volume failure"));
-            }
-            if device.volume.is_none() {
-                return Ok(None);
             }
             if !device.ignore_set_volume {
                 device.volume = Some(volume);
@@ -1467,17 +1888,408 @@ mod tests {
     }
 
     #[test]
-    fn native_mute_readback_mismatch_does_not_claim_muted() {
+    fn native_mute_that_ignores_writes_falls_back_to_volume() {
         let mut device = Device::native("Built-in", false);
         device.ignore_set_mute = true;
-        let backend = FakeBackend::with_devices(vec![(1, device)]);
+        let stores = Stores::default();
+        let mut controller = stores.launch(FakeBackend::with_devices(vec![(1, device)]));
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(0.0));
+        // Both accepted writes stay journaled, so exit undoes whichever takes effect.
+        let journal = stores.journal_json();
+        assert_eq!(journal["devices"]["Built-in UID"]["native_mute"], true);
+        assert_eq!(journal["devices"]["Built-in UID"]["saved_volume"], 1.0);
+    }
+
+    #[test]
+    fn device_whose_native_mute_ignores_writes_stays_muted_by_volume() {
+        let mut device = Device::native("Built-in", false);
+        device.ignore_set_mute = true;
+        let mut controller = controller(FakeBackend::with_devices(vec![(1, device)]));
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(1).unwrap().volume = Some(0.4);
+        controller.backend.writes.clear();
+
+        controller.toggle(Some(true)).unwrap();
+
+        assert_eq!(controller.backend.writes, vec![Write::Volume(1, 0.0)]);
+
+        controller.mute_all(false).unwrap();
+
+        assert!(!controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().volume, Some(1.0));
+        assert!(controller.journal.is_empty());
+    }
+
+    #[test]
+    fn device_ignoring_writes_is_left_out_and_does_not_block_muted() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::ignoring_writes("Teams Audio")),
+        ]);
         let mut controller = controller(backend);
 
-        let result = controller.mute_all(true);
+        controller.mute_all(true).unwrap();
 
-        assert!(result.is_err());
+        assert!(controller.muted);
+        assert!(controller.should_enforce_mute());
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn only_a_device_ignoring_writes_does_not_claim_muted() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::ignoring_writes("Teams Audio"))]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
         assert!(!controller.muted);
         assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn volume_controlled_device_ignoring_writes_is_left_out() {
+        let mut continuity = Device::fallback("Continuity", 0.65);
+        continuity.ignore_set_volume = true;
+        let backend = FakeBackend::with_devices(vec![
+            (1, continuity),
+            (2, Device::native("Built-in", false)),
+        ]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    /// The writes a device seemed to ignore took effect after all, too late for the readback.
+    fn apply_late(device: &mut Device) {
+        device.ignore_set_mute = false;
+        device.ignore_set_volume = false;
+        device.mute = Some(true);
+        device.volume = Some(0.0);
+    }
+
+    #[test]
+    fn writes_a_device_ignored_stay_journaled_so_exit_undoes_a_late_change() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(FakeBackend::with_devices(vec![(
+            1,
+            Device::ignoring_writes("Teams Audio"),
+        )]));
+        controller.mute_all(true).unwrap();
+        let journal = stores.journal_json();
+        assert_eq!(journal["devices"]["Teams Audio UID"]["native_mute"], true);
+        assert_eq!(journal["devices"]["Teams Audio UID"]["saved_volume"], 1.0);
+        apply_late(controller.backend.device_mut(1).unwrap());
+
+        controller.restore_on_exit().unwrap();
+
+        let teams = controller.backend.device(1).unwrap();
+        assert_eq!(teams.mute, Some(false));
+        assert_eq!(teams.volume, Some(1.0));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn exit_restore_of_a_device_that_still_ignores_writes_is_harmless() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::ignoring_writes("Teams Audio")),
+        ]));
+        controller.mute_all(true).unwrap();
+
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        let teams = controller.backend.device(2).unwrap();
+        assert_eq!(teams.mute, Some(false));
+        assert_eq!(teams.volume, Some(1.0));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn unmute_undoes_a_late_change_on_a_device_that_ignored_writes() {
+        let mut controller = controller(FakeBackend::with_devices(vec![(
+            1,
+            Device::ignoring_writes("Teams Audio"),
+        )]));
+        controller.mute_all(true).unwrap();
+        apply_late(controller.backend.device_mut(1).unwrap());
+
+        controller.mute_all(false).unwrap();
+
+        let teams = controller.backend.device(1).unwrap();
+        assert_eq!(teams.mute, Some(false));
+        assert_eq!(teams.volume, Some(1.0));
+        assert!(controller.journal.is_empty());
+    }
+
+    #[test]
+    fn unmuting_a_device_that_ignores_writes_writes_nothing_and_clears_its_journal() {
+        let mut controller = controller(FakeBackend::with_devices(vec![(
+            1,
+            Device::ignoring_writes("Teams Audio"),
+        )]));
+        controller.mute_all(true).unwrap();
+        controller.backend.writes.clear();
+
+        controller.mute_all(false).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(controller.journal.is_empty());
+    }
+
+    fn built_in_and_teams() -> FakeBackend {
+        FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::ignoring_writes("Teams Audio")),
+        ])
+    }
+
+    fn failure_log() -> FailureLog {
+        FailureLog::new("Failed to test", "Tests work again")
+    }
+
+    #[test]
+    fn failure_log_reports_a_new_failure_at_once() {
+        let mut log = failure_log();
+
+        assert_eq!(
+            log.record_failure("boom", Instant::now()),
+            FailureReport::New
+        );
+    }
+
+    #[test]
+    fn failure_log_suppresses_identical_repeats_then_reports_their_count() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        log.record_failure("boom", start);
+        let mut poll = start;
+        for _ in 0..299 {
+            poll += Duration::from_millis(200);
+            assert_eq!(log.record_failure("boom", poll), FailureReport::Suppressed);
+        }
+
+        let report_at = start + FAILURE_REPORT_INTERVAL;
+        assert_eq!(
+            log.record_failure("boom", report_at),
+            FailureReport::Repeated {
+                count: 300,
+                since: FAILURE_REPORT_INTERVAL
+            }
+        );
+        // The quiet period starts over.
+        assert_eq!(
+            log.record_failure("boom", report_at + Duration::from_secs(1)),
+            FailureReport::Suppressed
+        );
+    }
+
+    #[test]
+    fn failure_log_reports_a_different_failure_at_once() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        log.record_failure("boom", start);
+
+        assert_eq!(
+            log.record_failure("bang", start + Duration::from_secs(1)),
+            FailureReport::New
+        );
+        assert_eq!(
+            log.record_failure("bang", start + Duration::from_secs(2)),
+            FailureReport::Suppressed
+        );
+    }
+
+    #[test]
+    fn failure_log_ends_a_run_of_failures_once_with_its_count() {
+        let start = Instant::now();
+        let mut log = failure_log();
+        assert_eq!(log.record_success(), None);
+        log.record_failure("boom", start);
+        log.record_failure("boom", start + Duration::from_secs(1));
+        log.record_failure("bang", start + Duration::from_secs(2));
+
+        assert_eq!(log.record_success(), Some(3));
+        assert_eq!(log.record_success(), None);
+        assert_eq!(
+            log.record_failure("boom", start + Duration::from_secs(3)),
+            FailureReport::New
+        );
+    }
+
+    #[test]
+    fn failure_log_report_and_clear_drive_the_same_run_of_failures() {
+        let start = Instant::now();
+        let mut log = failure_log();
+
+        log.report(&anyhow!("boom"), start);
+        assert_eq!(
+            log.record_failure("boom", start + Duration::from_secs(1)),
+            FailureReport::Suppressed
+        );
+        log.clear();
+
+        assert_eq!(log.record_success(), None);
+    }
+
+    #[test]
+    fn write_retry_is_due_after_the_interval_or_a_reconnect() {
+        let start = Instant::now();
+        let retry = WriteRetry::new(2, start);
+
+        assert!(!retry.is_due(2, start + Duration::from_secs(59)));
+        assert!(retry.is_due(2, start + IGNORED_WRITES_RETRY_INTERVAL));
+        assert!(retry.is_due(9, start));
+        let reconnected = WriteRetry {
+            has_disconnected: true,
+            ..retry
+        };
+        assert!(reconnected.is_due(2, start));
+    }
+
+    #[test]
+    fn device_ignoring_writes_gets_no_writes_until_its_retry_is_due() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        controller.backend.writes.clear();
+
+        controller
+            .mute_all_at(true, start + Duration::from_secs(30))
+            .unwrap();
+        assert!(controller.backend.writes.is_empty());
+
+        controller
+            .mute_all_at(true, start + IGNORED_WRITES_RETRY_INTERVAL)
+            .unwrap();
+
+        assert_eq!(
+            controller.backend.writes,
+            vec![Write::Mute(2, true), Write::Volume(2, 0.0)]
+        );
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn device_that_starts_responding_is_muted_at_its_next_retry() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        let teams = controller.backend.device_mut(2).unwrap();
+        teams.ignore_set_mute = false;
+        teams.ignore_set_volume = false;
+
+        controller
+            .mute_all_at(true, start + Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(false));
+
+        let retry_at = start + IGNORED_WRITES_RETRY_INTERVAL;
+        controller.mute_all_at(true, retry_at).unwrap();
+
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+        assert!(controller.muted);
+
+        // From now on it is enforced like any other device.
+        controller.backend.device_mut(2).unwrap().mute = Some(false);
+        controller
+            .mute_all_at(true, retry_at + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn device_that_ignored_writes_is_retried_when_it_reconnects_under_a_new_id() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        let mut teams = controller.backend.unplug(2);
+        teams.ignore_set_mute = false;
+        controller.backend.plug(9, teams);
+
+        controller
+            .mute_all_at(true, start + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(controller.backend.device(9).unwrap().mute, Some(true));
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn device_that_ignored_writes_is_retried_when_it_returns_under_the_same_id() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        let mut teams = controller.backend.unplug(2);
+        controller
+            .mute_all_at(true, start + Duration::from_secs(1))
+            .unwrap();
+        teams.ignore_set_mute = false;
+        controller.backend.plug(2, teams);
+
+        controller
+            .mute_all_at(true, start + Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn device_that_ignored_writes_and_returned_while_unmuted_is_retried_at_the_next_mute() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        controller.mute_all(false).unwrap();
+        let mut teams = controller.backend.unplug(2);
+        controller.watch_unmuted();
+        teams.ignore_set_mute = false;
+        controller.backend.plug(2, teams);
+        controller.watch_unmuted();
+
+        controller
+            .mute_all_at(true, start + Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn device_still_ignoring_writes_at_its_retry_waits_for_the_next_one() {
+        let start = Instant::now();
+        let mut controller = controller(built_in_and_teams());
+        controller.mute_all_at(true, start).unwrap();
+        let retry_at = start + IGNORED_WRITES_RETRY_INTERVAL;
+        controller.mute_all_at(true, retry_at).unwrap();
+        controller.backend.writes.clear();
+
+        controller
+            .mute_all_at(true, retry_at + Duration::from_secs(30))
+            .unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn levels_are_recorded_for_a_device_muted_by_volume_after_its_native_mute_ignored_writes() {
+        let mut device = Device::native("Built-in", false);
+        device.ignore_set_mute = true;
+        let mut controller = controller(FakeBackend::with_devices(vec![(1, device)]));
+        controller.mute_all(true).unwrap();
+        controller.mute_all(false).unwrap();
+        controller.backend.device_mut(1).unwrap().volume = Some(0.4);
+
+        controller.watch_unmuted();
+
+        assert_eq!(controller.levels.get(&key("Built-in")), Some(0.4));
     }
 
     #[test]
@@ -1598,6 +2410,60 @@ mod tests {
         assert!(controller.should_enforce_mute());
     }
 
+    #[test]
+    fn read_only_native_mute_is_muted_and_read_by_volume() {
+        let backend = FakeBackend::with_devices(vec![(
+            1,
+            Device::read_only_mute("Virtual Mic", false, Some(0.65)),
+        )]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        let device = controller.backend.device(1).unwrap();
+        assert_eq!(device.volume, Some(0.0));
+        assert_eq!(device.mute, Some(false));
+    }
+
+    #[test]
+    fn read_only_native_mute_without_volume_does_not_block_other_devices() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::read_only_mute("Virtual Mic", false, None)),
+            (2, Device::native("Built-in", false)),
+        ]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn only_a_read_only_native_mute_does_not_claim_muted() {
+        let backend =
+            FakeBackend::with_devices(vec![(1, Device::read_only_mute("Virtual Mic", true, None))]);
+        let mut controller = controller(backend);
+
+        controller.mute_all(true).unwrap();
+
+        assert!(!controller.muted);
+        assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn startup_reads_a_read_only_native_mute_device_by_its_volume() {
+        let backend = FakeBackend::with_devices(vec![(
+            1,
+            Device::read_only_mute("Virtual Mic", false, Some(0.0)),
+        )]);
+
+        let controller = controller(backend);
+
+        assert!(controller.muted);
+    }
+
     fn native_and_volume_devices() -> FakeBackend {
         FakeBackend::with_devices(vec![
             (1, Device::native("Built-in", false)),
@@ -1649,6 +2515,73 @@ mod tests {
         }
 
         assert_eq!(stores.journal.saves(), 2);
+    }
+
+    #[test]
+    fn mute_polls_do_not_write_to_devices_that_already_read_muted() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.writes.clear();
+
+        for _ in 0..3 {
+            controller.toggle(Some(true)).unwrap();
+        }
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn muting_devices_that_already_read_muted_writes_and_journals_nothing() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", true)),
+            (2, Device::fallback("USB Mic", 0.0)),
+        ]));
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert_eq!(stores.journal.saves(), 0);
+        assert!(controller.muted);
+    }
+
+    #[test]
+    fn unmuting_devices_that_already_read_unmuted_writes_nothing() {
+        let mut controller = controller(native_and_volume_devices());
+
+        controller.mute_all(false).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(!controller.muted);
+    }
+
+    #[test]
+    fn mute_polls_re_mute_devices_someone_else_unmuted_and_exit_restores_them() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(1).unwrap().mute = Some(false);
+        controller.backend.device_mut(2).unwrap().volume = Some(0.4);
+        controller.backend.writes.clear();
+
+        controller.toggle(Some(true)).unwrap();
+
+        assert_eq!(
+            controller.backend.writes,
+            vec![Write::Mute(1, true), Write::Volume(2, 0.0)]
+        );
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        let journal = stores.journal_json();
+        assert_eq!(journal["devices"]["Built-in UID"]["native_mute"], true);
+        assert_eq!(journal["devices"]["USB Mic UID"]["saved_volume"], 0.65);
+
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
     }
 
     #[test]
