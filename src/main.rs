@@ -20,11 +20,9 @@ mod utils;
 extern crate objc;
 
 use crate::camera::CameraController;
-use crate::config::AppVars;
 use crate::event_loop::{restore_microphone_on_exit, start};
 use crate::mic::MicController;
 use crate::settings::Settings;
-use crate::ui::UI;
 use crate::utils::arc_lock;
 use env_logger::{Builder, Env};
 use log::{info, trace};
@@ -96,10 +94,7 @@ fn main() {
         }
     }
 
-    let app_vars = AppVars::new();
-
     let controller = MicController::new().unwrap();
-    let mic_muted = controller.muted;
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
@@ -131,10 +126,8 @@ fn main() {
     let camera = arc_lock(camera);
     trace!("Camera controller initialized, muted={}", camera_muted);
 
-    let (ui, event_loop, event_ids) =
-        UI::new(mic_muted, camera_muted, app_vars, &settings).unwrap();
-    trace!("UI initialized");
-    let ui = arc_lock(ui);
+    // The loop creates the tray, popup, and hotkey once it runs: tray-icon requires that.
+    let event_loop = event_loop::create();
     let settings = arc_lock(settings);
-    start(event_loop, event_ids, ui, controller, camera, settings);
+    start(event_loop, controller, camera, settings);
 }

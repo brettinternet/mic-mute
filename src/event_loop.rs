@@ -1,9 +1,11 @@
 use crate::about::show_about;
 use crate::camera::CameraController;
+use crate::config::AppVars;
 use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::settings::Settings;
 use crate::ui::UI;
+use anyhow::Result;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
 use muda::{MenuEvent, MenuId};
@@ -13,13 +15,15 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
-use tao::event::Event;
-use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
+use tao::event::{Event, StartCause};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowTarget};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
 const POLL_INTERVAL_MILLIS: u64 = 200;
 /// How long the popup stays up after an unmute.
 const HIDE_POPUP_DELAY: Duration = Duration::from_secs(1);
+/// The exit code when the tray, popup, or hotkey can't be created.
+const UI_FAILURE_EXIT_CODE: i32 = 1;
 
 #[derive(Debug)]
 pub enum Message {
@@ -27,9 +31,38 @@ pub enum Message {
 }
 
 pub type EventLoopMessage = EventLoop<Message>;
+/// What the running loop hands its closure in place of the `EventLoop`; windows are built on it.
+pub type EventLoopTarget = EventLoopWindowTarget<Message>;
 
 pub fn create() -> EventLoopMessage {
     EventLoopBuilder::<Message>::with_user_event().build()
+}
+
+/// Whether `event` starts the running loop: the earliest point at which tray-icon may create
+/// the tray icon on macOS. Created before, a fullscreen app can show the icon twice.
+fn is_loop_start(event: &Event<Message>) -> bool {
+    matches!(event, Event::NewEvents(StartCause::Init))
+}
+
+/// Creates the popup, the hotkey, and the tray icon from the current state. Call it only once
+/// the loop runs (`is_loop_start`).
+fn create_ui(
+    target: &EventLoopTarget,
+    controller: &RwLock<MicController>,
+    camera: &RwLock<CameraController>,
+    settings: &RwLock<Settings>,
+) -> Result<(RwLock<UI>, EventIds)> {
+    let mic_muted = controller.read().muted;
+    let camera_muted = camera.read().muted;
+    let (ui, event_ids) = UI::new(
+        target,
+        mic_muted,
+        camera_muted,
+        AppVars::new(),
+        &settings.read(),
+    )?;
+    trace!("UI initialized");
+    Ok((RwLock::new(ui), event_ids))
 }
 
 pub struct EventIds {
@@ -68,23 +101,16 @@ pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
     }
 }
 
+/// Runs the event loop until the app quits. The loop creates the tray, popup, and hotkey
+/// itself, on `StartCause::Init`.
 pub fn start(
     mut event_loop: EventLoop<Message>,
-    event_ids: EventIds,
-    ui: Arc<RwLock<UI>>,
     controller: Arc<RwLock<MicController>>,
     camera: Arc<RwLock<CameraController>>,
     settings: Arc<RwLock<Settings>>,
 ) {
-    let EventIds {
-        button_toggle_mute,
-        button_launch_at_login,
-        button_show_in_dock,
-        button_show_popup,
-        button_about,
-        button_quit,
-        shortcut_mic,
-    } = event_ids;
+    // `None` until the loop runs; see `is_loop_start`.
+    let mut ui_and_ids: Option<(RwLock<UI>, EventIds)> = None;
 
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
@@ -131,7 +157,7 @@ pub fn start(
     } else {
         ActivationPolicy::Accessory
     });
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
         // Every NSApp terminate: path (Dock → Quit, ⌘Q, logout, AppleScript `quit`) and
         // ControlFlow::Exit end the loop here. After tray → Exit, restoring again is a no-op.
         if let Event::LoopDestroyed = event {
@@ -143,6 +169,35 @@ pub fn start(
             *control_flow = ControlFlow::Exit;
             return;
         }
+        if ui_and_ids.is_none() {
+            // Until Init, tao delivers at most `Event::Opened` (a launch by URL), which the
+            // app ignores.
+            if !is_loop_start(&event) {
+                return;
+            }
+            match create_ui(target, &controller, &camera, &settings) {
+                Ok(created) => ui_and_ids = Some(created),
+                Err(err) => {
+                    log::error!("Failed to create the tray, popup, or hotkey: {:#}", err);
+                    is_exiting = true;
+                    restore_microphone_on_exit(&controller);
+                    *control_flow = ControlFlow::ExitWithCode(UI_FAILURE_EXIT_CODE);
+                    return;
+                }
+            }
+        }
+        let Some((ui, event_ids)) = &ui_and_ids else {
+            return;
+        };
+        let EventIds {
+            button_toggle_mute,
+            button_launch_at_login,
+            button_show_in_dock,
+            button_show_popup,
+            button_about,
+            button_quit,
+            shortcut_mic,
+        } = event_ids;
         let mut exit_requested = false;
 
         if let Event::UserEvent(Message::CameraStateChanged(active)) = event {
@@ -162,7 +217,7 @@ pub fn start(
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
-                if update_mic(&ui, &controller, true) {
+                if update_mic(ui, &controller, true) {
                     hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
                 }
             } else if event.id == button_launch_at_login {
@@ -224,7 +279,7 @@ pub fn start(
                 let id = event.id();
                 if shortcut_mic.load(Ordering::Relaxed) == id {
                     trace!("Toggle mic shortcut activated");
-                    if update_mic(&ui, &controller, true) {
+                    if update_mic(ui, &controller, true) {
                         hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
                     }
                 }
@@ -282,7 +337,7 @@ pub fn start(
         // Poll mic state and cursor-monitor position on a 200 ms interval.
         if last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
-            update_mic(&ui, &controller, false);
+            update_mic(ui, &controller, false);
             if let Err(err) = ui.write().detect() {
                 log::error!("Failed to update popup placement: {:#}", err);
             }
@@ -314,4 +369,23 @@ pub fn start(
             *control_flow = ControlFlow::WaitUntil(next_wake);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_is_created_when_the_loop_starts_and_not_before() {
+        assert!(is_loop_start(&Event::NewEvents(StartCause::Init)));
+        let later_events = [
+            Event::NewEvents(StartCause::Poll),
+            Event::MainEventsCleared,
+            Event::UserEvent(Message::CameraStateChanged(true)),
+            Event::LoopDestroyed,
+        ];
+        for event in later_events {
+            assert!(!is_loop_start(&event), "{event:?}");
+        }
+    }
 }
