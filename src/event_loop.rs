@@ -242,25 +242,33 @@ pub fn start(
             let current_mtime = Settings::mtime();
             if current_mtime != last_settings_mtime {
                 last_settings_mtime = current_mtime;
-                trace!("settings.json changed on disk — reloading");
-                let notice = match Settings::load() {
-                    Ok(new_settings) => {
-                        *settings.write() = new_settings.clone();
-                        settings_fallback = Fallback::Previous;
-                        let mut ui_w = ui.write();
-                        if let Err(e) = ui_w.apply_settings(&new_settings) {
-                            log::error!("Failed to apply reloaded settings: {}", e);
-                        } else {
-                            shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
-                            trace!("Settings reloaded from settings.json");
+                let notice = if Settings::take_own_save(current_mtime) {
+                    // Saved by the app itself (a tray toggle or About): memory already
+                    // matches the file, and the app only ever writes a valid file.
+                    trace!("settings.json changed by the app's own save");
+                    settings_fallback = Fallback::Previous;
+                    None
+                } else {
+                    trace!("settings.json changed on disk — reloading");
+                    match Settings::load() {
+                        Ok(new_settings) => {
+                            *settings.write() = new_settings.clone();
+                            settings_fallback = Fallback::Previous;
+                            let mut ui_w = ui.write();
+                            if let Err(e) = ui_w.apply_settings(&new_settings) {
+                                log::error!("Failed to apply reloaded settings: {}", e);
+                            } else {
+                                shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
+                                trace!("Settings reloaded from settings.json");
+                            }
+                            None
                         }
-                        None
-                    }
-                    Err(err) => {
-                        // Apply nothing from a broken file. Only a new mtime triggers a
-                        // reload, so this warns once per change to the file.
-                        log::warn!("{}; keeping the current settings", err);
-                        Some(err.notice(settings_fallback))
+                        Err(err) => {
+                            // Apply nothing from a broken file. Only a new mtime triggers a
+                            // reload, so this warns once per change to the file.
+                            log::warn!("{}; keeping the current settings", err);
+                            Some(err.notice(settings_fallback))
+                        }
                     }
                 };
                 if let Err(e) = ui.write().set_settings_notice(notice.as_deref()) {

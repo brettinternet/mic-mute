@@ -1,9 +1,11 @@
 use crate::utils::write_atomically;
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutConfig {
@@ -145,11 +147,24 @@ pub enum Fallback {
 /// What `Settings::save` did.
 #[derive(Debug)]
 pub enum SaveOutcome {
-    /// The file now holds these settings.
-    Saved,
+    /// The file now holds these settings; `mtime` is its new modification time.
+    Saved { mtime: Option<SystemTime> },
     /// The file on disk is invalid, so it was left untouched. The change applies only in
     /// memory, until the file is fixed or the app quits.
     KeptInMemory(LoadError),
+}
+
+/// Modification time of settings.json right after this process last saved it, until the
+/// settings poll sees it (`Settings::take_own_save`).
+static OWN_SAVE_MTIME: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Two modification times match only when both are known.
+fn is_same_mtime(a: Option<SystemTime>, b: Option<SystemTime>) -> bool {
+    a.is_some() && a == b
 }
 
 impl Settings {
@@ -185,18 +200,30 @@ impl Settings {
     }
 
     /// Returns the last-modified time of the settings file, or None if it doesn't exist.
-    pub fn mtime() -> Option<std::time::SystemTime> {
-        Self::config_path()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok())
+    pub fn mtime() -> Option<SystemTime> {
+        Self::config_path().and_then(|p| file_mtime(&p))
     }
 
-    /// Saves to settings.json; see `save_to`.
+    /// Whether `mtime`, a changed value of `Settings::mtime()`, is this process's last
+    /// `save()`: the in-memory settings already match the file, so there is nothing to
+    /// reload. Forgets that save either way, so only the first change after it can match.
+    pub fn take_own_save(mtime: Option<SystemTime>) -> bool {
+        let own_save = OWN_SAVE_MTIME.lock().take();
+        is_same_mtime(mtime, own_save)
+    }
+
+    /// Saves to settings.json (see `save_to`) and remembers the file's new mtime so the
+    /// settings poll doesn't reload the app's own write.
     pub fn save(&self) -> Result<SaveOutcome> {
         let path = Self::config_path().context("Failed to resolve the settings directory")?;
         let outcome = self.save_to(&path)?;
-        if let SaveOutcome::KeptInMemory(err) = &outcome {
-            log::warn!("Keeping the settings change in memory only: {}", err);
+        match &outcome {
+            SaveOutcome::Saved { mtime } => {
+                *OWN_SAVE_MTIME.lock() = *mtime;
+            }
+            SaveOutcome::KeptInMemory(err) => {
+                log::warn!("Keeping the settings change in memory only: {}", err);
+            }
         }
         Ok(outcome)
     }
@@ -214,7 +241,9 @@ impl Settings {
         data.push(b'\n');
         write_atomically(path, &data)
             .with_context(|| format!("Failed to write {}", path.display()))?;
-        Ok(SaveOutcome::Saved)
+        Ok(SaveOutcome::Saved {
+            mtime: file_mtime(path),
+        })
     }
 }
 
@@ -652,7 +681,52 @@ mod tests {
         std::fs::write(&path, "{ \"show_popup\": false }").unwrap();
         let outcome = settings.save_to(&path).unwrap();
 
-        assert!(matches!(outcome, SaveOutcome::Saved));
+        assert!(matches!(outcome, SaveOutcome::Saved { .. }));
         assert!(Settings::load_from(&path).unwrap().show_in_dock);
+    }
+
+    #[test]
+    fn save_to_reports_the_written_files_mtime() {
+        let dir = TempDir::new();
+        let path = dir.settings_path();
+
+        let outcome = Settings::default().save_to(&path).unwrap();
+
+        let SaveOutcome::Saved { mtime } = outcome else {
+            panic!("expected Saved, got {outcome:?}");
+        };
+        assert!(mtime.is_some());
+        assert_eq!(mtime, file_mtime(&path));
+    }
+
+    #[test]
+    fn mtimes_match_only_when_both_are_known_and_equal() {
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let later = t + std::time::Duration::from_nanos(1);
+
+        assert!(is_same_mtime(Some(t), Some(t)));
+        assert!(!is_same_mtime(Some(t), Some(later)));
+        assert!(!is_same_mtime(Some(t), None));
+        assert!(!is_same_mtime(None, Some(t)));
+        assert!(!is_same_mtime(None, None));
+    }
+
+    // The only test that touches OWN_SAVE_MTIME; save() itself never runs in tests.
+    #[test]
+    fn own_save_matches_only_the_first_change_after_it() {
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        *OWN_SAVE_MTIME.lock() = Some(t);
+
+        assert!(Settings::take_own_save(Some(t)));
+        assert!(!Settings::take_own_save(Some(t)), "a match is forgotten");
+
+        *OWN_SAVE_MTIME.lock() = Some(t);
+        assert!(!Settings::take_own_save(Some(
+            t + std::time::Duration::from_secs(1)
+        )));
+        assert!(
+            !Settings::take_own_save(Some(t)),
+            "a mismatch is forgotten too"
+        );
     }
 }
