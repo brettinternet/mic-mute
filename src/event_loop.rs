@@ -4,7 +4,6 @@ use crate::launch_at_login;
 use crate::mic::MicController;
 use crate::settings::Settings;
 use crate::ui::UI;
-use async_std::task;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
 use muda::{MenuEvent, MenuId};
@@ -19,15 +18,15 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
 const POLL_INTERVAL_MILLIS: u64 = 200;
+/// How long the popup stays up after an unmute.
+const HIDE_POPUP_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum Message {
-    HidePopup,
     CameraStateChanged(bool),
 }
 
 pub type EventLoopMessage = EventLoop<Message>;
-pub type EventLoopProxyMessage = tao::event_loop::EventLoopProxy<Message>;
 
 pub fn create() -> EventLoopMessage {
     EventLoopBuilder::<Message>::with_user_event().build()
@@ -43,12 +42,9 @@ pub struct EventIds {
     pub shortcut_mic: Arc<AtomicU32>,
 }
 
-fn update_mic(
-    ui: Arc<RwLock<UI>>,
-    controller: Arc<RwLock<MicController>>,
-    proxy: EventLoopProxyMessage,
-    toggle: bool,
-) {
+/// Toggles, or re-enforces mute while the user wants it; otherwise watches unmuted devices.
+/// Returns whether a toggle just unmuted, so the popup should hide after a delay.
+fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool) -> bool {
     let mut controller = controller.write();
     if toggle || controller.should_enforce_mute() {
         let state = if toggle { None } else { Some(true) };
@@ -63,12 +59,7 @@ fn update_mic(
         controller.watch_unmuted();
     }
     controller.save_input_levels_if_due();
-    if toggle && !controller.muted {
-        task::spawn(async move {
-            task::sleep(Duration::from_secs(1)).await;
-            proxy.send_event(Message::HidePopup).unwrap();
-        });
-    }
+    toggle && !controller.muted
 }
 
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
@@ -98,6 +89,7 @@ pub fn start(
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
     let mut last_poll = Instant::now() - poll_interval;
+    let mut hide_popup_at: Option<Instant> = None;
 
     // Poll the settings file for changes every 2 seconds so edits to
     // settings.json take effect without restarting the app.
@@ -120,7 +112,6 @@ pub fn start(
     });
 
     trace!("Starting event loop");
-    let proxy = event_loop.create_proxy();
     // Set activation policy based on persisted show_in_dock before the loop starts.
     let initial_show_in_dock = settings.read().show_in_dock;
     event_loop.set_activation_policy(if initial_show_in_dock {
@@ -131,23 +122,13 @@ pub fn start(
     event_loop.run(move |event, _, control_flow| {
         let mut exit_requested = false;
 
-        match event {
-            Event::UserEvent(Message::HidePopup) => {
-                let mic_controller = controller.read();
-                if !mic_controller.muted {
-                    let mut ui = ui.write();
-                    ui.hide_popup().unwrap();
-                }
+        if let Event::UserEvent(Message::CameraStateChanged(active)) = event {
+            let muted = !active;
+            if muted != camera.read().muted {
+                camera.write().muted = muted;
+                ui.write().update_camera(muted).unwrap();
             }
-            Event::UserEvent(Message::CameraStateChanged(active)) => {
-                let muted = !active;
-                if muted != camera.read().muted {
-                    camera.write().muted = muted;
-                    ui.write().update_camera(muted).unwrap();
-                }
-            }
-            _ => {}
-        };
+        }
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             trace!("Tray menu event: {:?}", event);
@@ -156,7 +137,9 @@ pub fn start(
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
-                update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
+                if update_mic(&ui, &controller, true) {
+                    hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
+                }
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
                 let mut s = settings.write();
@@ -216,7 +199,9 @@ pub fn start(
                 let id = event.id();
                 if shortcut_mic.load(Ordering::Relaxed) == id {
                     trace!("Toggle mic shortcut activated");
-                    update_mic(ui.clone(), controller.clone(), proxy.clone(), true);
+                    if update_mic(&ui, &controller, true) {
+                        hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
+                    }
                 }
             }
         }
@@ -245,9 +230,20 @@ pub fn start(
         // Poll mic state and cursor-monitor position on a 200 ms interval.
         if last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
-            update_mic(ui.clone(), controller.clone(), proxy.clone(), false);
+            update_mic(&ui, &controller, false);
             let mut ui_w = ui.write();
             ui_w.detect().unwrap();
+        }
+
+        // Hide the popup a moment after an unmute, unless the mic was muted again.
+        if hide_popup_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            hide_popup_at = None;
+            let mic_controller = controller.read();
+            if !mic_controller.muted {
+                if let Err(err) = ui.write().hide_popup() {
+                    log::error!("Failed to hide popup: {:#}", err);
+                }
+            }
         }
 
         if exit_requested {
@@ -257,7 +253,11 @@ pub fn start(
             // Sleep until the next scheduled check rather than spinning.
             let next_poll = last_poll + poll_interval;
             let next_settings = last_settings_check + settings_poll_interval;
-            *control_flow = ControlFlow::WaitUntil(next_poll.min(next_settings));
+            let mut next_wake = next_poll.min(next_settings);
+            if let Some(deadline) = hide_popup_at {
+                next_wake = next_wake.min(deadline);
+            }
+            *control_flow = ControlFlow::WaitUntil(next_wake);
         }
     });
 }
