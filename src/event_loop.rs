@@ -175,9 +175,7 @@ pub fn start(
                     log::error!("Failed to save settings: {}", e);
                 }
                 drop(s);
-                if let Err(e) = launch_at_login::set(enabled) {
-                    log::error!("Launch at login error: {}", e);
-                }
+                ui.write().set_launch_at_login(enabled);
             } else if event.id == button_show_in_dock {
                 trace!("Show in dock toggled");
                 let mut s = settings.write();

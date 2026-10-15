@@ -24,7 +24,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] Popup follows screens and monitors with cursor
 - [x] Report whether camera is in use (disabling cameras appears to be impossible or too difficult for the scope of this project)
 - [x] Add configurable settings (hotkey, startup, popup visibility)
-- [x] Open app on system startup
+- [x] Open app at login: a login item on macOS 13 and later, a LaunchAgent on macOS 11 and 12 (see [Launch at Login](#launch-at-login))
 
 ## Limitations
 
@@ -36,6 +36,23 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
 - Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.
 - Microphones without native mute are muted by setting their input volume to 0. Unmuting restores the level they had; a microphone Mic Mute has never seen audible comes back at 50%.
+
+## Launch at Login
+
+Turn it on from the tray menu, or with the [`launch_at_login`](./docs/settings.md#launch_at_login) setting.
+
+- **macOS 13 and later:** Mic Mute registers itself as a login item with `SMAppService`. It's listed in System Settings → General → Login Items under Open at Login, where you can also remove it, and macOS finds the app wherever you move it. If the login item can't be registered, Mic Mute logs a warning and uses a LaunchAgent instead.
+- **macOS 11 and 12:** Mic Mute writes the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist` and points it at the app's current location at each launch.
+- **Upgrading** on macOS 13 and later: the first launch replaces the LaunchAgent an earlier version wrote with a login item, then deletes the plist. While the login item can't be registered or waits for approval, the LaunchAgent stays.
+
+macOS (Background Task Management) records a login item against the app's code signature, and these builds are signed ad hoc, not with a Developer ID:
+
+- macOS may notify you that a login item was added, and Login Items may list entries for earlier builds until macOS cleans up its records.
+- Every `task install` signs a new build, and macOS may stop opening a re-signed build at login while Login Items still shows it. If Mic Mute doesn't open at your next login after a reinstall, turn Launch at Login off and on in the tray: that registers the new build.
+- If macOS waits for your approval, the tray item reads "Launch at Login (Approve in System Settings)": allow Mic Mute in System Settings → General → Login Items.
+- Only an app bundle in a stable place, such as `/Applications`, changes the login item. A copy opened from a download without moving it (App Translocation) and a development build from `cargo run` leave it alone.
+- Deleting the app doesn't remove its login item: turn Launch at Login off first, or remove Mic Mute in Login Items afterwards.
+- `sudo sfltool dumpbtm` prints the records macOS keeps (search for `com.brettinternet.mic-mute`); without `sudo` it waits for an administrator to authorize it.
 
 ## Releases
 

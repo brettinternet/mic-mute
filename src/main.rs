@@ -78,21 +78,17 @@ fn main() {
         }
     };
 
-    // On first run (or after upgrading from a version without launch_at_login in
-    // settings), adopt the existing plist state so we don't silently disable it.
-    let plist_enabled = launch_at_login::is_enabled();
-    if plist_enabled != settings.launch_at_login {
-        settings.launch_at_login = plist_enabled;
-        if is_settings_file_valid {
-            if let Err(e) = settings.save() {
-                log::error!("Failed to save settings: {}", e);
+    // What macOS starts at login wins over the setting: mirror it, so the tray shows the truth
+    // and a stale setting doesn't silently remove the login item. `reconcile` also moves a
+    // LaunchAgent from an earlier version to a login item (macOS 13+).
+    if let Some(state) = launch_at_login::reconcile() {
+        if state.is_on() != settings.launch_at_login {
+            settings.launch_at_login = state.is_on();
+            if is_settings_file_valid {
+                if let Err(e) = settings.save() {
+                    log::error!("Failed to save settings: {}", e);
+                }
             }
-        }
-    }
-    // The app may have moved since the LaunchAgent was written; repoint it at this bundle.
-    if settings.launch_at_login {
-        if let Err(e) = launch_at_login::refresh() {
-            log::error!("Failed to refresh launch at login: {}", e);
         }
     }
 
