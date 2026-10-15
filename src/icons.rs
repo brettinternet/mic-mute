@@ -73,9 +73,9 @@ impl Glyph {
 /// stroke-only.
 const CAMERA_BADGE_SVG: &[u8] = include_bytes!("../assets/camera-badge.svg");
 
-/// Pixels per SVG unit in the popup's icons: 48 px, so its 16 pt icons stay sharp on a 2x
-/// display, which shows them at 32 px; the SVGs' own 24 px were scaled up there. AppKit scales
-/// them down. The tray's icons keep the SVGs' 24 px.
+/// Pixels per SVG unit in the popup's icons: 48 px, so the large popup's 24 pt icons stay sharp
+/// on a 2x display, and AppKit scales them down for the smaller sizes. The tray's icons keep the
+/// SVGs' own 24 px.
 const POPUP_PIXELS_PER_UNIT: u32 = 2;
 
 /// One icon in one color and resolution, with or without the camera badge. Only `tray_mic`,

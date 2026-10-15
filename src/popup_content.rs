@@ -21,6 +21,38 @@ const NS_TEXT_ALIGNMENT_CENTER: i64 = if cfg!(target_arch = "x86_64") { 2 } else
 /// `NSStackViewGravityCenter = 2`, an `NSInteger` (AppKit `NSStackView.h`).
 const NS_STACK_VIEW_GRAVITY_CENTER: i64 = 2;
 
+/// The medium popup's measurements, which it has always had; the other sizes scale them
+/// (`Metrics::at`). The labels' line height:
+const LINE_HEIGHT: f64 = 18.;
+/// The icons' height.
+const ICON_HEIGHT: f64 = 16.;
+/// How much larger than the system font the labels are.
+const FONT_SIZE_INCREASE: f64 = 3.;
+/// The space between the stack's views: NSStackView's default.
+const STACK_SPACING: f64 = 8.;
+
+/// The content's measurements in points at a popup size's scale (`popup::size_scale`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Metrics {
+    line_height: f64,
+    icon_height: f64,
+    spacing: f64,
+    font_size: f64,
+}
+
+impl Metrics {
+    /// The measurements at `scale`, with labels `FONT_SIZE_INCREASE` above `system_font_size`
+    /// before scaling.
+    fn at(scale: f64, system_font_size: f64) -> Self {
+        Self {
+            line_height: LINE_HEIGHT * scale,
+            icon_height: ICON_HEIGHT * scale,
+            spacing: STACK_SPACING * scale,
+            font_size: (system_font_size + FONT_SIZE_INCREASE) * scale,
+        }
+    }
+}
+
 pub fn get_mic_mute_description_text(muted: bool) -> &'static str {
     if muted {
         MUTED_DESCRIPTION
@@ -37,14 +69,13 @@ pub fn get_camera_mute_description_text(muted: bool) -> &'static str {
     }
 }
 
-/// Vertically-centered 18pt-tall rect spanning the full width.
-/// Matches the original layout so the NSStackView stays at a fixed size
-/// and does not activate Auto Layout resizing on the window.
-fn get_frame_rect(size: LogicalSize<f64>) -> NSRect {
-    const LINE_HEIGHT: f64 = 18.;
+/// A vertically centered rect `line_height` tall spanning the full width. Matches the original
+/// layout so the NSStackView stays at a fixed size and does not activate Auto Layout resizing
+/// on the window.
+fn get_frame_rect(size: LogicalSize<f64>, line_height: f64) -> NSRect {
     NSRect::new(
-        NSPoint::new(0., (size.height - LINE_HEIGHT) / 2.),
-        NSSize::new(size.width, LINE_HEIGHT),
+        NSPoint::new(0., (size.height - line_height) / 2.),
+        NSSize::new(size.width, line_height),
     )
 }
 
@@ -72,7 +103,7 @@ unsafe fn set_label(label: id, text: &str, color: id) {
     let _: () = msg_send![label, setTextColor: color];
 }
 
-fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
+fn get_textfield(text: &str, color: id, frame: NSRect, font_size: f64) -> id {
     unsafe {
         let label = NSTextField::alloc(nil);
         let label: id = msg_send![label, initWithFrame: frame];
@@ -82,18 +113,21 @@ fn get_textfield(text: &str, color: id, frame: NSRect) -> id {
         let _: () = msg_send![label, setDrawsBackground: NO];
         let _: () = msg_send![label, setSelectable: NO];
         let _: () = msg_send![label, setAlignment: NS_TEXT_ALIGNMENT_CENTER];
-        let ns_font = class!(NSFont);
-        let default_size: f64 = msg_send![ns_font, systemFontSize];
-        let custom_font: *mut Object = msg_send![ns_font, systemFontOfSize: default_size + 3.0_f64];
+        let custom_font: *mut Object = msg_send![class!(NSFont), systemFontOfSize: font_size];
         let _: () = msg_send![label, setFont: custom_font];
         label
     }
 }
 
-/// A new `NSImage` of `icon`'s cached PNG, 16 pt tall; the caller owns it (+1) and releases it.
-fn ns_image(icon: &RenderedIcon) -> id {
-    const ICON_HEIGHT: f64 = 16.;
-    let icon_width = f64::from(icon.width) / (f64::from(icon.height) / ICON_HEIGHT);
+/// `+[NSFont systemFontSize]`, the size the labels scale from.
+fn system_font_size() -> f64 {
+    unsafe { msg_send![class!(NSFont), systemFontSize] }
+}
+
+/// A new `NSImage` of `icon`'s cached PNG, `height` points tall; the caller owns it (+1) and
+/// releases it.
+fn ns_image(icon: &RenderedIcon, height: f64) -> id {
+    let icon_width = f64::from(icon.width) / (f64::from(icon.height) / height);
     unsafe {
         let nsdata = NSData::dataWithBytes_length_(
             nil,
@@ -101,24 +135,25 @@ fn ns_image(icon: &RenderedIcon) -> id {
             icon.png.len() as u64,
         );
         let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
-        let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, ICON_HEIGHT)];
+        let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, height)];
         let _: () = msg_send![ns_image, setTemplate: NO];
         ns_image
     }
 }
 
-/// Shows `icon` in `image_view`, which then holds the only reference to the new `NSImage`.
-unsafe fn set_image(image_view: id, icon: &RenderedIcon) {
-    let image = ns_image(icon);
+/// Shows `icon`, `height` points tall, in `image_view`, which then holds the only reference to
+/// the new `NSImage`.
+unsafe fn set_image(image_view: id, icon: &RenderedIcon, height: f64) {
+    let image = ns_image(icon, height);
     image_view.setImage_(image);
     let _: () = msg_send![image, release];
 }
 
-fn make_image_view(icon: &RenderedIcon, frame: NSRect) -> id {
+fn make_image_view(icon: &RenderedIcon, frame: NSRect, height: f64) -> id {
     unsafe {
         let view = NSImageView::alloc(nil);
         let view: id = msg_send![view, initWithFrame: frame];
-        set_image(view, icon);
+        set_image(view, icon, height);
         view
     }
 }
@@ -175,31 +210,38 @@ pub struct PopupContent {
     camera_image: id,
     camera_label: id,
     pub view: id,
+    /// The icons' height in points, for `render`.
+    icon_height: f64,
 }
 
 impl PopupContent {
-    pub fn new(state: PopupState, size: LogicalSize<f64>) -> Result<Self> {
+    /// The content of a popup `size` large, drawn at `scale` (`popup::size_scale`).
+    pub fn new(state: PopupState, size: LogicalSize<f64>, scale: f64) -> Result<Self> {
         // Fetch the icons before allocating any view, so an error leaks none.
         let (mic_icon, camera_icon) = icons_for(state)?;
-        let frame = get_frame_rect(size);
+        let metrics = Metrics::at(scale, system_font_size());
+        let frame = get_frame_rect(size, metrics.line_height);
 
         let mic_label = get_textfield(
             get_mic_mute_description_text(state.mic_muted),
             get_text_color(state.mic_muted, state.theme),
             frame,
+            metrics.font_size,
         );
-        let mic_image = make_image_view(&mic_icon, frame);
-        let camera_image = make_image_view(&camera_icon, frame);
+        let mic_image = make_image_view(&mic_icon, frame, metrics.icon_height);
+        let camera_image = make_image_view(&camera_icon, frame, metrics.icon_height);
         let camera_off = !state.camera_in_use;
         let camera_label = get_textfield(
             get_camera_mute_description_text(camera_off),
             get_text_color(camera_off, state.theme),
             frame,
+            metrics.font_size,
         );
 
         let view = unsafe {
             let stack: *mut Object = msg_send![class!(NSStackView), alloc];
             let stack: id = msg_send![stack, initWithFrame: frame];
+            let _: () = msg_send![stack, setSpacing: metrics.spacing];
             let gravity = NS_STACK_VIEW_GRAVITY_CENTER;
             let _: () = msg_send![stack, addView: mic_image inGravity: gravity];
             let _: () = msg_send![mic_image, release];
@@ -221,6 +263,7 @@ impl PopupContent {
             camera_image,
             camera_label,
             view,
+            icon_height: metrics.icon_height,
         })
     }
 
@@ -234,8 +277,8 @@ impl PopupContent {
                 get_mic_mute_description_text(state.mic_muted),
                 get_text_color(state.mic_muted, state.theme),
             );
-            set_image(self.mic_image, &mic_icon);
-            set_image(self.camera_image, &camera_icon);
+            set_image(self.mic_image, &mic_icon, self.icon_height);
+            set_image(self.camera_image, &camera_icon, self.icon_height);
             set_label(
                 self.camera_label,
                 get_camera_mute_description_text(camera_off),
@@ -258,5 +301,42 @@ mod tests {
     #[test]
     fn test_mic_mute_description_unmuted() {
         assert_eq!(get_mic_mute_description_text(false), "Mic on");
+    }
+
+    #[test]
+    fn medium_metrics_keep_the_original_layout() {
+        let medium = Metrics::at(1., 13.);
+        assert_eq!(
+            medium,
+            Metrics {
+                line_height: 18.,
+                icon_height: 16.,
+                spacing: 8.,
+                font_size: 16.,
+            }
+        );
+    }
+
+    #[test]
+    fn metrics_scale_every_measurement_together() {
+        let small = Metrics::at(0.75, 13.);
+        assert_eq!((small.font_size, small.icon_height), (12., 12.));
+        let large = Metrics::at(1.5, 13.);
+        assert_eq!(
+            large,
+            Metrics {
+                line_height: 27.,
+                icon_height: 24.,
+                spacing: 12.,
+                font_size: 24.,
+            }
+        );
+    }
+
+    #[test]
+    fn the_line_is_centered_vertically_across_the_full_width() {
+        let rect = get_frame_rect(LogicalSize::new(375., 60.), 27.);
+        assert_eq!((rect.origin.x, rect.origin.y), (0., 16.5));
+        assert_eq!((rect.size.width, rect.size.height), (375., 27.));
     }
 }

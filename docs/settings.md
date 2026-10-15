@@ -25,7 +25,10 @@ The file is JSON. The complete default configuration is:
   "launch_state": "keep",
   "mute_on_lock": false,
   "mute_on_sleep": false,
-  "mute_on_display_sleep": false
+  "mute_on_display_sleep": false,
+  "popup_position": "bottom_center",
+  "popup_size": "medium",
+  "popup_mic_on_ms": 1000
 }
 ```
 
@@ -84,6 +87,37 @@ Controls the small on-screen mute-status popup.
 - `false`: keep the popup hidden while retaining the tray indicator.
 
 The tray menu can also toggle this setting. A `status` URL shows the popup for two seconds either way.
+
+### `popup_position`
+
+Controls where the popup appears on the monitor with the mouse pointer.
+
+- `"bottom_center"` (default): centered near the bottom edge, where the popup has always been.
+- `"top_center"`, `"top_left"`, `"top_right"`, `"bottom_left"`, `"bottom_right"`.
+
+The popup keeps 40 points from the monitor's edges and, at the top, 40 points below the menu bar. It can cover part of the Dock, but it never takes a click: clicks go through it.
+
+### `popup_size`
+
+Controls how large the popup is. Its text and icons scale with it.
+
+- `"medium"` (default): 250 × 40 points, the size the popup has always had.
+- `"small"`: three quarters of medium.
+- `"large"`: one and a half times medium.
+
+### `popup_mic_on_ms`
+
+Controls how long the popup stays up showing "Mic on" after you unmute, in milliseconds.
+
+- `1000` (default): one second.
+- `0`: hide the popup as soon as you unmute, without showing "Mic on".
+- At most `10000`, ten seconds; a larger value counts as `10000`.
+
+Muting again while "Mic on" shows keeps the popup up.
+
+### Popup values Mic Mute doesn't accept
+
+A `popup_position`, `popup_size`, or `popup_mic_on_ms` value Mic Mute doesn't accept, such as `"top-right"`, `"huge"`, `-1`, or `1.5`, doesn't make the file invalid: Mic Mute logs a warning naming the value and uses the default instead (`10000` for a `popup_mic_on_ms` above it), while the file's other settings apply. Names are read in any letter case. Saves keep such a value as written, so it stays in the file for you to fix.
 
 ### `mode`
 
@@ -181,3 +215,5 @@ If `settings.json` can't be read or isn't valid settings JSON (a syntax error, a
 - It never writes to the broken file. Changes from the tray menu or from About → Reset Settings apply right away but aren't saved, and the log notes each one.
 
 Fix the file, or delete it to reset every setting to its default. The next check, within two seconds, applies the file and removes the notice, replacing any unsaved changes made in the meantime.
+
+A popup value Mic Mute doesn't accept leaves the file valid: only that setting falls back (see [Popup values Mic Mute doesn't accept](#popup-values-mic-mute-doesnt-accept)).
