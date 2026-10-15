@@ -58,7 +58,7 @@ tasks:
 
   test:
     cmds:
-      - cargo test
+      - cargo test --locked
 
   build:
     cmds:
