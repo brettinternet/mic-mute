@@ -1,6 +1,7 @@
 use crate::about::{self, AboutWindow};
 use crate::camera::CameraController;
 use crate::config::AppVars;
+use crate::feedback::MicUpdate;
 use crate::launch_at_login;
 use crate::mic::{FailureLog, MicController};
 use crate::mic_command::MicCommand;
@@ -83,7 +84,8 @@ pub struct EventIds {
     pub shortcut_mic: Arc<AtomicU32>,
 }
 
-/// Runs `request`. Without one, it is the poll: re-mutes while the user wants mute, otherwise
+/// Runs `request`, with the sound and notification the settings ask for when it changes the
+/// state. Without one, it is the poll: re-mutes, silently, while the user wants mute, otherwise
 /// watches unmuted devices. Returns whether a request just unmuted, so the popup should hide
 /// after its "Mic on" flash.
 fn update_mic(
@@ -92,6 +94,7 @@ fn update_mic(
     request: Option<MicCommand>,
 ) -> bool {
     let mut controller = controller.write();
+    let was_muted = controller.muted;
     let state = match request {
         Some(command) => command.mute_state(),
         None if controller.should_enforce_mute() => Some(true),
@@ -105,8 +108,16 @@ fn update_mic(
         Ok(()) => controller.update_failures.clear(),
         Err(err) => controller.update_failures.report(&err, Instant::now()),
     }
-    if let Err(err) = ui.write().update_mic(controller.muted) {
-        log::error!("Failed to update microphone UI: {:#}", err);
+    {
+        let mut ui = ui.write();
+        if let Err(err) = ui.update_mic(controller.muted) {
+            log::error!("Failed to update microphone UI: {:#}", err);
+        }
+        let update = match request {
+            Some(_) => MicUpdate::Request,
+            None => MicUpdate::Enforcement,
+        };
+        ui.give_feedback(update, was_muted, controller.muted);
     }
     controller.save_input_levels_if_due();
     request.is_some() && !controller.muted

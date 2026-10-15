@@ -26,6 +26,8 @@ The file is JSON. The complete default configuration is:
   "mute_on_lock": false,
   "mute_on_sleep": false,
   "mute_on_display_sleep": false,
+  "play_sound": false,
+  "show_notification": false,
   "popup_position": "bottom_center",
   "popup_size": "medium",
   "popup_mic_on_ms": 1000
@@ -119,6 +121,29 @@ Muting again while "Mic on" shows keeps the popup up.
 
 A `popup_position`, `popup_size`, or `popup_mic_on_ms` value Mic Mute doesn't accept, such as `"top-right"`, `"huge"`, `-1`, or `1.5`, doesn't make the file invalid: Mic Mute logs a warning naming the value and uses the default instead (`10000` for a `popup_mic_on_ms` above it), while the file's other settings apply. Names are read in any letter case. Saves keep such a value as written, so it stays in the file for you to fix.
 
+### `play_sound`
+
+Controls whether Mic Mute plays a sound when the microphones mute or unmute.
+
+- `false` (default)
+- `true`: the system sound Bottle when they mute, Tink when they unmute.
+
+The sound plays through the current output device, and only when a request changes the mute state: the shortcut (in push-to-talk mode, each press and release), the tray's Mute item, a URL action, or an automatic mute such as `mute_on_lock`. A request that changes nothing, such as a mute while muted or a mute that fails, plays nothing, so a sound always means the state changed. The re-mutes Mic Mute makes when another app unmutes a microphone, or one is plugged in, play nothing either.
+
+### `show_notification`
+
+Controls whether Mic Mute posts a macOS notification, "Mic off" or "Mic on", when the microphones mute or unmute, for the same changes as `play_sound`. Each notification replaces the previous one in Notification Center, and none has a sound of its own.
+
+- `false` (default)
+- `true`
+
+macOS limits these notifications:
+
+- Only the installed app (`task install`, or a release) can post them: macOS attributes a notification to an app bundle. A copy that doesn't run from an app bundle, such as `cargo run`, posts none and logs a warning.
+- The first time the setting is on, macOS asks whether Mic Mute may send notifications. Until you allow it, none appear. If you decline, Mic Mute logs a warning; allow them later in System Settings → Notifications → Mic Mute.
+- Focus modes hide them, and so does sharing or mirroring the screen unless System Settings → Notifications allows notifications then. During a screen-shared call, rely on the popup or the sound.
+- macOS shows no banner while Mic Mute is the active app, for example while its About window has focus.
+
 ### `mode`
 
 Controls what the mute shortcut does.
@@ -195,7 +220,7 @@ The tray menu's About item shows the mute shortcut in use, the settings file's l
 The About window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Choosing About again brings the open window to the front, updated if the shortcut in use has changed. Each button closes the window.
 
 - **Open Settings** opens `settings.json` in the default text editor. If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
-- **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. It also empties `excluded_devices`, so Mic Mute mutes every microphone again. The defaults apply at once and are saved like any other settings change.
+- **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. It also empties `excluded_devices`, so Mic Mute mutes every microphone again, and turns `play_sound` and `show_notification` off; macOS keeps its own answer about Mic Mute's notifications. The defaults apply at once and are saved like any other settings change.
 
 ## Editing settings
 

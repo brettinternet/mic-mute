@@ -1,5 +1,6 @@
 use crate::config::AppVars;
 use crate::event_loop::{EventIds, EventLoopTarget};
+use crate::feedback::{Feedback, MicUpdate};
 use crate::mic::DeviceState;
 use crate::popup::{Popup, PopupLayout};
 use crate::settings::{ExcludedDevice, Settings};
@@ -38,6 +39,8 @@ pub struct UI {
     shortcut_mic: Arc<AtomicU32>,
     mic_muted: bool,
     camera_muted: bool,
+    /// The sound and notification on a mute change.
+    feedback: Feedback,
     /// How long the popup shows "Mic on" after the user unmutes (`popup_mic_on_ms`).
     mic_on_flash: Duration,
 }
@@ -92,6 +95,7 @@ impl UI {
             shortcut_mic,
             mic_muted,
             camera_muted,
+            feedback: Feedback::new(settings.play_sound, settings.show_notification),
             mic_on_flash: settings.popup_mic_on_ms.value().duration(),
         };
         ui.show_launch_at_login(settings.launch_at_login);
@@ -174,14 +178,23 @@ impl UI {
         Ok(())
     }
 
-    /// Applies the popup's position, size, and "Mic on" flash, logging the values the file sets
-    /// that aren't used as written.
+    /// Applies the sound, the notification, and the popup's position, size, and "Mic on" flash,
+    /// logging the values the file sets that aren't used as written.
     fn apply_feedback(&mut self, settings: &Settings) {
         log_feedback_problems(settings);
+        self.feedback
+            .set_options(settings.play_sound, settings.show_notification);
         self.mic_on_flash = settings.popup_mic_on_ms.value().duration();
         if let Err(e) = self.popup.set_layout(popup_layout(settings)) {
             log::error!("Failed to apply the popup's position and size: {:#}", e);
         }
+    }
+
+    /// Plays the sound and posts the notification the settings ask for after `update` took the
+    /// microphones from `was_muted` to `muted`: only a request that changed the state gives
+    /// either (`feedback::change_to_report`).
+    pub fn give_feedback(&mut self, update: MicUpdate, was_muted: bool, muted: bool) {
+        self.feedback.on_mic_update(update, was_muted, muted);
     }
 
     /// How long the popup stays up showing "Mic on" after the user unmutes.

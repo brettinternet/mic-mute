@@ -38,9 +38,11 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "CFString",
 ] }
 # SMAppService.mainApp (macOS 13+) for Launch at Login; NSError describes its failures.
+# NSBundle tells the installed app from a bare executable, which can't post notifications.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
+  "NSBundle",
   "NSError",
   "NSString",
 ] }
@@ -49,6 +51,17 @@ objc2-service-management = { version = "0.3", default-features = false, features
   "SMAppService",
   "objc2",
   "objc2-foundation",
+] }
+# Notifications on a mute change (`show_notification`); the permission request and the post
+# report back through blocks.
+block2 = "0.6"
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+  "std",
+  "bitflags",
+  "block2",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNUserNotificationCenter",
 ] }
 
 [lints.rust]

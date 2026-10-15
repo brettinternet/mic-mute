@@ -63,7 +63,14 @@ pub struct Settings {
     #[serde(default)]
     pub mute_on_display_sleep: bool,
 
-    // Feedback on a mute change: the popup's position, size, and "Mic on" flash.
+    // Feedback on a mute change: a sound, a notification, and the popup's position, size,
+    // and "Mic on" flash.
+    /// Plays a system sound when the user mutes or unmutes.
+    #[serde(default)]
+    pub play_sound: bool,
+    /// Posts a macOS notification when the user mutes or unmutes.
+    #[serde(default)]
+    pub show_notification: bool,
     /// Where the popup sits on the cursor's monitor.
     #[serde(default)]
     pub popup_position: Lenient<PopupPosition>,
@@ -95,6 +102,8 @@ impl Default for Settings {
             mute_on_sleep: false,
             mute_on_display_sleep: false,
             // Feedback on a mute change.
+            play_sound: false,
+            show_notification: false,
             popup_position: Lenient::default(),
             popup_size: Lenient::default(),
             popup_mic_on_ms: Lenient::default(),
@@ -749,6 +758,8 @@ mod tests {
             mute_on_lock: true,
             mute_on_sleep: true,
             mute_on_display_sleep: true,
+            play_sound: true,
+            show_notification: true,
             popup_position: Lenient::new(PopupPosition::TopRight),
             popup_size: Lenient::new(PopupSize::Large),
             popup_mic_on_ms: Lenient::new(MicOnFlash::from_millis(0)),
@@ -767,6 +778,7 @@ mod tests {
         assert!(loaded.allow_url_unmute);
         assert_eq!(loaded.launch_state, LaunchState::Last);
         assert!(loaded.mute_on_lock && loaded.mute_on_sleep && loaded.mute_on_display_sleep);
+        assert!(loaded.play_sound && loaded.show_notification);
         assert_eq!(loaded.popup_position, s.popup_position);
         assert_eq!(loaded.popup_size, s.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, s.popup_mic_on_ms);
@@ -844,6 +856,8 @@ mod tests {
             "mute_on_lock",
             "mute_on_sleep",
             "mute_on_display_sleep",
+            "play_sound",
+            "show_notification",
             "popup_position",
             "popup_size",
             "popup_mic_on_ms",
@@ -868,6 +882,8 @@ mod tests {
         assert_eq!(loaded.launch_at_login, defaults.launch_at_login);
         assert_eq!(loaded.show_popup, defaults.show_popup);
         assert_eq!(loaded.excluded_devices, defaults.excluded_devices);
+        assert_eq!(loaded.play_sound, defaults.play_sound);
+        assert_eq!(loaded.show_notification, defaults.show_notification);
         assert_eq!(loaded.popup_position, defaults.popup_position);
         assert_eq!(loaded.popup_size, defaults.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, defaults.popup_mic_on_ms);
@@ -891,10 +907,12 @@ mod tests {
                 "mute_on_display_sleep",
                 "mute_on_lock",
                 "mute_on_sleep",
+                "play_sound",
                 "popup_mic_on_ms",
                 "popup_position",
                 "popup_size",
                 "show_in_dock",
+                "show_notification",
                 "show_popup"
             ]
         );
@@ -1409,11 +1427,14 @@ mod tests {
         assert_eq!(err.position().map(|(line, _)| line), Some(2));
     }
 
-    // Feedback on a mute change: the popup's position, size, and "Mic on" flash.
+    // Feedback on a mute change: sound, notification, and the popup's position, size, and
+    // "Mic on" flash.
 
     #[test]
     fn feedback_defaults_keep_todays_behavior() {
         let defaults = Settings::default();
+        assert!(!defaults.play_sound);
+        assert!(!defaults.show_notification);
         assert_eq!(defaults.popup_position.value(), PopupPosition::BottomCenter);
         assert_eq!(defaults.popup_size.value(), PopupSize::Medium);
         assert_eq!(
@@ -1430,6 +1451,8 @@ mod tests {
                 .unwrap();
         let defaults = Settings::default();
 
+        assert_eq!(loaded.play_sound, defaults.play_sound);
+        assert_eq!(loaded.show_notification, defaults.show_notification);
         assert_eq!(loaded.popup_position, defaults.popup_position);
         assert_eq!(loaded.popup_size, defaults.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, defaults.popup_mic_on_ms);
@@ -1444,6 +1467,8 @@ mod tests {
             .zip(PopupSize::ALL.into_iter().cycle())
         {
             let settings = Settings {
+                play_sound: true,
+                show_notification: true,
                 popup_position: Lenient::new(position),
                 popup_size: Lenient::new(size),
                 popup_mic_on_ms: Lenient::new(MicOnFlash::from_millis(2_500)),
@@ -1454,8 +1479,11 @@ mod tests {
             assert_eq!(json["popup_position"], serde_json::json!(position.name()));
             assert_eq!(json["popup_size"], serde_json::json!(size.name()));
             assert_eq!(json["popup_mic_on_ms"], serde_json::json!(2_500));
+            assert_eq!(json["play_sound"], serde_json::json!(true));
+            assert_eq!(json["show_notification"], serde_json::json!(true));
 
             let loaded: Settings = serde_json::from_value(json).unwrap();
+            assert!(loaded.play_sound && loaded.show_notification);
             assert_eq!(loaded.popup_position.value(), position);
             assert_eq!(loaded.popup_size.value(), size);
             assert_eq!(loaded.popup_mic_on_ms, settings.popup_mic_on_ms);
