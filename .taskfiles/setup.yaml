@@ -13,7 +13,7 @@ tasks:
   mise:
     desc: Install workstation dependencies
     cmds:
-      - mise trust -q -a
+      - mise trust -q
       - mise install -q
     preconditions:
       - sh: command -v mise
@@ -23,9 +23,9 @@ tasks:
     internal: true
     desc: Project dependencies
     cmds:
-      - cargo install watchexec-cli
+      - cargo install --locked watchexec-cli@{{.WATCHEXEC_CLI_VERSION}}
     status:
-      - test -f $HOME/.cargo/bin/watchexec
+      - ./scripts/check-tool-version.sh watchexec {{.WATCHEXEC_CLI_VERSION}}
 
   lefthook:
     desc: Install Lefthook

@@ -6,6 +6,9 @@ vars:
   PROJECT_DIR:
     sh: git rev-parse --show-toplevel
 
+# Pinned versions of the cargo-installed tools.
+dotenv: [scripts/cargo-tools.env]
+
 env:
   ROOT_DIR: "{{.PROJECT_DIR}}"
 
@@ -14,6 +17,7 @@ includes:
 
 tasks:
   default:
+    desc: List the available tasks
     silent: true
     cmds:
       - task -l
@@ -34,13 +38,16 @@ tasks:
       RUST_LOG: trace
 
   debug:
+    desc: Build and run the debug binary once, with trace logging
     cmds:
-      - ./target/debug/mvcm
+      - cargo build --locked
+      - '"${CARGO_TARGET_DIR:-target}/debug/mic-mute"'
     env:
       RUST_BACKTRACE: 1
       RUST_LOG: trace
 
   check:
+    desc: Lint with clippy and check formatting
     aliases: [lint]
     cmds:
       - cargo clippy --locked --release -- -D warnings
@@ -53,10 +60,12 @@ tasks:
       - cargo fmt
 
   test:
+    desc: Run the tests
     cmds:
-      - cargo test
+      - cargo test --locked
 
   build:
+    desc: Build and bundle Mic Mute.app, then show it in Finder (NO_OPEN=1 skips Finder)
     cmds:
       - task: build-dependencies
       - task: build-target
@@ -65,20 +74,32 @@ tasks:
 
   build-dependencies:
     internal: true
-    desc: Bundle dependencies
+    desc: Install the pinned cargo-bundle
     cmds:
-      - cargo install cargo-bundle
+      - cargo install --locked cargo-bundle@{{.CARGO_BUNDLE_VERSION}}
     status:
-      - test -f $HOME/.cargo/bin/cargo-bundle
+      - ./scripts/check-tool-version.sh cargo-bundle {{.CARGO_BUNDLE_VERSION}}
 
   build-target:
+    internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }}
-      - /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Mic Mute uses camera access to detect and control camera mute status.'" ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app/Contents/Info.plist || true
-      - open ./target/{{ .TARGET }}/release/bundle/osx
+      - cargo bundle --release --target {{ .TARGET }} --format osx
+      - cmd: open "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
+        if: '[ -z "{{.NO_OPEN}}" ]'
+
+  install:
+    desc: Check, build, sign, install, and launch Mic Mute.app (flags after --; see README)
+    cmds:
+      - ./scripts/install.sh {{.CLI_ARGS}}
+
+  uninstall:
+    desc: Stop Mic Mute, then remove the app and its login item (-- --purge also deletes settings)
+    cmds:
+      - ./scripts/uninstall.sh {{.CLI_ARGS}}
 
   release:
+    desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
     cmds:
       - task: release-dependencies
       - cargo clean
@@ -92,25 +113,26 @@ tasks:
     internal: true
     desc: Release dependencies
     cmds:
-      - cargo install apple-codesign
-      - cargo install toml-cli
+      - cargo install --locked apple-codesign@{{.APPLE_CODESIGN_VERSION}}
+      - cargo install --locked toml-cli@{{.TOML_CLI_VERSION}}
     status:
-      - test -f $HOME/.cargo/bin/apple-codesign
-      - test -f $HOME/.cargo/bin/toml-cli
+      - ./scripts/check-tool-version.sh rcodesign {{.APPLE_CODESIGN_VERSION}}
+      - ./scripts/check-tool-version.sh toml {{.TOML_CLI_VERSION}}
 
   release-target:
     internal: true
     cmds:
       - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }}
-      - /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Mic Mute uses camera access to detect and control camera mute status.'" ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app/Contents/Info.plist || true
-      - rcodesign sign --pem-source {{ .PEM_FILE }} ./target/{{ .TARGET }}/release/bundle/osx/Mic\ Mute.app
-      - hdiutil create -volname {{ .TITLE }} -srcfolder ./target/{{ .TARGET }}/release/bundle/osx -ov -format UDZO {{ .TITLE }}.dmg
+      - cargo bundle --release --target {{ .TARGET }} --format osx
+      - rcodesign sign --pem-source {{ .PEM_FILE }} "{{ .BUNDLE_DIR }}/Mic Mute.app"
+      - hdiutil create -volname {{ .TITLE }} -srcfolder "{{ .BUNDLE_DIR }}" -ov -format UDZO {{ .TITLE }}.dmg
       # - rcodesign sign --pem-source {{ .PEM_FILE }} {{ .TITLE }}.dmg
     env:
       RUST_LOG: warn
     vars:
       PEM_FILE: sign.crt
+      BUNDLE_DIR:
+        sh: echo "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
       NAME:
         sh: toml get Cargo.toml package.name --raw
       VERSION:
@@ -118,5 +140,6 @@ tasks:
       TITLE: "{{ .NAME }}-{{ .VERSION }}-{{ .TARGET }}"
 
   clean:
+    desc: Delete the build artifacts (cargo clean)
     cmds:
       - cargo clean
