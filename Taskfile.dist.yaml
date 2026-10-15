@@ -88,6 +88,11 @@ tasks:
       - cmd: open "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
         if: '[ -z "{{.NO_OPEN}}" ]'
 
+  install:
+    desc: Check, build, sign, install, and launch Mic Mute.app (flags after --; see README)
+    cmds:
+      - ./scripts/install.sh {{.CLI_ARGS}}
+
   release:
     desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
     cmds:

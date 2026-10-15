@@ -45,13 +45,35 @@ I have not elected to sign the app by joining the Apple Developer Program. The r
 
 Install dependencies with `mise`. Or you may [install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
 
-Install the build dependencies, build and bundle the app.
+### Install
 
+Build the app, install it to `/Applications`, and launch it:
+
+```sh
+task install
 ```
+
+[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login agent at it, and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
+
+Pass flags after `--`, for example `task install -- --user`:
+
+| Flag | Effect |
+| --- | --- |
+| `--user` | Install to `~/Applications` instead of `/Applications` |
+| `--skip-checks` | Skip the fmt, clippy, and test gates |
+| `--no-launch` | Don't start the app after installing |
+| `--bundle-only` | Stop after building, signing, and verifying the bundle |
+| `--dry-run` | Run only the read-only checks; print every other command |
+
+### Bundle only
+
+Build and bundle the app without installing it:
+
+```sh
 task build
 ```
 
-Once the build is complete, a finder window should open to the built bundle in the folder `./target/aarch64-apple-darwin/release/bundle/osx` (`NO_OPEN=1 task build` skips it).
+Once the build is complete, a Finder window opens to the bundle in `./target/aarch64-apple-darwin/release/bundle/osx` (`NO_OPEN=1 task build` skips it).
 
 ## Develop
 
