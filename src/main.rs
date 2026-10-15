@@ -1,6 +1,7 @@
 mod about;
 mod camera;
 mod config;
+mod device_changes;
 mod device_records;
 mod event_loop;
 mod icons;

@@ -1,3 +1,4 @@
+use crate::device_changes::{self, DeviceChangeSignal};
 use crate::device_records::{
     DeviceKey, InputLevels, RestoreJournal, JOURNAL_FILE_NAME, LEVELS_FILE_NAME,
 };
@@ -8,10 +9,12 @@ use log::{error, info, trace, warn};
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceUID, kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyVolumeScalar,
-    kAudioHardwareNoError, kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyScopeGlobal, AudioDeviceID, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectIsPropertySettable, AudioObjectPropertyAddress,
-    AudioObjectPropertySelector, AudioObjectSetPropertyData,
+    kAudioHardwareNoError, kAudioHardwarePropertyDevices, kAudioHardwareUnknownPropertyError,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    AudioDeviceID, AudioObjectAddPropertyListener, AudioObjectGetPropertyData,
+    AudioObjectGetPropertyDataSize, AudioObjectHasProperty, AudioObjectID,
+    AudioObjectIsPropertySettable, AudioObjectPropertyAddress, AudioObjectPropertyListenerProc,
+    AudioObjectPropertySelector, AudioObjectRemovePropertyListener, AudioObjectSetPropertyData,
 };
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_foundation::{CFRetained, CFString};
@@ -38,6 +41,11 @@ const FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 const DEVICE_STATES_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
     0x766d7663; // 'vmvc'
+/// The object that holds the device list.
+const SYSTEM_OBJECT: AudioObjectID = kAudioObjectSystemObject as AudioObjectID;
+/// The listener proc of every registration. CoreAudio matches a removal by this pointer, so
+/// both take it from here.
+static PROPERTY_LISTENER: AudioObjectPropertyListenerProc = Some(device_changes::property_listener);
 
 fn is_volume_muted(volume: f32) -> bool {
     volume <= VOLUME_MUTED_EPSILON
@@ -74,6 +82,32 @@ fn status_result(status: i32, operation: &str, audio_device_id: AudioDeviceID) -
             status
         ))
     }
+}
+
+/// [`status_result`] for the system object, which holds the device list.
+fn system_status_result(status: i32, operation: &str) -> Result<()> {
+    if status == kAudioHardwareNoError {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{} failed for the audio system object with OSStatus {}",
+            operation,
+            status
+        ))
+    }
+}
+
+/// Joins per-device failures into one error; `None` when nothing failed.
+fn combined_error(failures: Vec<anyhow::Error>) -> Option<anyhow::Error> {
+    failures
+        .into_iter()
+        .reduce(|first, next| anyhow!("{}; {}", first, next))
+}
+
+/// The client data a listener registration passes CoreAudio, which hands it to
+/// [`device_changes::property_listener`].
+fn listener_client_data(signal: &'static DeviceChangeSignal) -> *mut c_void {
+    (signal as *const DeviceChangeSignal).cast_mut().cast()
 }
 
 struct AudioBufferListAllocation {
@@ -122,6 +156,23 @@ pub trait AudioBackend {
     }
     fn get_volume(&self, audio_device_id: AudioDeviceID) -> Result<Option<f32>>;
     fn set_volume(&mut self, audio_device_id: AudioDeviceID, volume: f32) -> Result<Option<()>>;
+    /// Has CoreAudio call `signal` whenever a device comes or goes.
+    fn listen_to_device_list(&mut self, signal: &'static DeviceChangeSignal) -> Result<()>;
+    fn stop_listening_to_device_list(&mut self, signal: &'static DeviceChangeSignal) -> Result<()>;
+    /// Has CoreAudio call `signal` whenever the native mute or an input volume of the device
+    /// changes, on each of those controls it has. Returns the selectors it listens to, which
+    /// [`Self::stop_listening_to_device`] takes back; none for a device without such controls.
+    fn listen_to_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        signal: &'static DeviceChangeSignal,
+    ) -> Result<Vec<AudioObjectPropertySelector>>;
+    fn stop_listening_to_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        selectors: &[AudioObjectPropertySelector],
+        signal: &'static DeviceChangeSignal,
+    ) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -149,6 +200,55 @@ impl CoreAudioBackend {
                 mElement: kAudioObjectPropertyElementMain,
             },
         ]
+    }
+
+    /// The controls a device listener watches: those the app mutes a device with and reads its
+    /// state from.
+    fn listened_addresses() -> [AudioObjectPropertyAddress; 3] {
+        let [volume, virtual_main_volume] = Self::volume_addresses();
+        [Self::mute_address(), volume, virtual_main_volume]
+    }
+
+    fn device_list_address() -> AudioObjectPropertyAddress {
+        // The device list belongs to the system object, so it lives on the global scope.
+        AudioObjectPropertyAddress {
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        }
+    }
+
+    /// Registers [`device_changes::property_listener`] with `signal` on one property of the
+    /// object; returns the OSStatus.
+    fn add_listener(
+        object_id: AudioObjectID,
+        mut property_address: AudioObjectPropertyAddress,
+        signal: &'static DeviceChangeSignal,
+    ) -> i32 {
+        unsafe {
+            AudioObjectAddPropertyListener(
+                object_id,
+                NonNull::from(&mut property_address),
+                PROPERTY_LISTENER,
+                listener_client_data(signal),
+            )
+        }
+    }
+
+    /// Removes what [`Self::add_listener`] registered; returns the OSStatus.
+    fn remove_listener(
+        object_id: AudioObjectID,
+        mut property_address: AudioObjectPropertyAddress,
+        signal: &'static DeviceChangeSignal,
+    ) -> i32 {
+        unsafe {
+            AudioObjectRemovePropertyListener(
+                object_id,
+                NonNull::from(&mut property_address),
+                PROPERTY_LISTENER,
+                listener_client_data(signal),
+            )
+        }
     }
 
     fn is_property_settable(
@@ -406,6 +506,70 @@ impl AudioBackend for CoreAudioBackend {
             }
         }
         Ok(None)
+    }
+
+    fn listen_to_device_list(&mut self, signal: &'static DeviceChangeSignal) -> Result<()> {
+        let status = Self::add_listener(SYSTEM_OBJECT, Self::device_list_address(), signal);
+        system_status_result(status, "listen for device list changes")
+    }
+
+    fn stop_listening_to_device_list(&mut self, signal: &'static DeviceChangeSignal) -> Result<()> {
+        let status = Self::remove_listener(SYSTEM_OBJECT, Self::device_list_address(), signal);
+        system_status_result(status, "stop listening for device list changes")
+    }
+
+    fn listen_to_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        signal: &'static DeviceChangeSignal,
+    ) -> Result<Vec<AudioObjectPropertySelector>> {
+        let mut selectors = Vec::new();
+        for mut property_address in Self::listened_addresses() {
+            // Only a property the device has can change.
+            let has_property = unsafe {
+                AudioObjectHasProperty(audio_device_id, NonNull::from(&mut property_address))
+            };
+            if !has_property {
+                continue;
+            }
+            let status = Self::add_listener(audio_device_id, property_address, signal);
+            let operation = "listen for mute and volume changes";
+            if let Err(err) = status_result(status, operation, audio_device_id) {
+                // Leave nothing half registered: the next poll registers the whole device again.
+                if let Err(undo_err) =
+                    self.stop_listening_to_device(audio_device_id, &selectors, signal)
+                {
+                    trace!(
+                        "Could not undo the listeners of audio device {}: {}",
+                        audio_device_id,
+                        undo_err
+                    );
+                }
+                return Err(err);
+            }
+            selectors.push(property_address.mSelector);
+        }
+        Ok(selectors)
+    }
+
+    fn stop_listening_to_device(
+        &mut self,
+        audio_device_id: AudioDeviceID,
+        selectors: &[AudioObjectPropertySelector],
+        signal: &'static DeviceChangeSignal,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        for property_address in Self::listened_addresses() {
+            if !selectors.contains(&property_address.mSelector) {
+                continue;
+            }
+            let status = Self::remove_listener(audio_device_id, property_address, signal);
+            let operation = "stop listening for mute and volume changes";
+            if let Err(err) = status_result(status, operation, audio_device_id) {
+                failures.push(err);
+            }
+        }
+        combined_error(failures).map_or(Ok(()), Err)
     }
 }
 
@@ -906,6 +1070,39 @@ impl FailureLog {
     }
 }
 
+/// The CoreAudio listeners a controller registered, which wake the event loop on device changes
+/// (`device_changes.rs`).
+struct DeviceListeners {
+    signal: &'static DeviceChangeSignal,
+    is_listening_to_device_list: bool,
+    /// The input devices with registered listeners, and the selectors each listens to.
+    devices: HashMap<AudioDeviceID, Vec<AudioObjectPropertySelector>>,
+    /// Whether the last registration left an input device without listeners.
+    has_unregistered_device: bool,
+    /// Every poll retries a failed registration; this keeps the log quiet meanwhile.
+    failures: FailureLog,
+}
+
+impl DeviceListeners {
+    fn new(signal: &'static DeviceChangeSignal) -> Self {
+        Self {
+            signal,
+            is_listening_to_device_list: false,
+            devices: HashMap::new(),
+            has_unregistered_device: false,
+            failures: FailureLog::new(
+                "Failed to listen for audio device changes",
+                "Listening for audio device changes works again",
+            ),
+        }
+    }
+
+    /// Whether every listener is registered, so each change a poll looks for wakes the loop.
+    fn is_complete(&self) -> bool {
+        self.is_listening_to_device_list && !self.has_unregistered_device
+    }
+}
+
 pub struct MicController<B = CoreAudioBackend> {
     pub muted: bool,
     desired_muted: bool,
@@ -933,6 +1130,9 @@ pub struct MicController<B = CoreAudioBackend> {
     failed_devices: HashSet<DeviceKey>,
     /// What the tray's Microphones menu shows; see [`Self::device_states`].
     snapshot: DeviceSnapshot,
+    /// The CoreAudio listeners that wake the event loop on device changes; `None` until
+    /// [`Self::start_listening`], and again once exit removes them.
+    listeners: Option<DeviceListeners>,
     backend: B,
 }
 
@@ -981,6 +1181,7 @@ impl<B: AudioBackend> MicController<B> {
             released_excluded: HashSet::new(),
             failed_devices: HashSet::new(),
             snapshot: DeviceSnapshot::default(),
+            listeners: None,
             backend,
         };
         trace!("Creating audio controller");
@@ -1426,8 +1627,13 @@ impl<B: AudioBackend> MicController<B> {
     /// another write.
     fn mute_all_at(&mut self, state: bool, now: Instant) -> Result<&Self> {
         self.desired_muted = state;
+        if let Some(listeners) = &self.listeners {
+            listeners.signal.set_enforcing_mute(state);
+        }
         let ids = self.get_input_device_ids()?;
         self.note_input_devices(&ids);
+        // Before any write, so a change from here on wakes the loop.
+        self.sync_listeners(&ids, now);
         let action = action_name(state);
         let end_state = state_name(state);
         let mut failures = Vec::new();
@@ -1658,9 +1864,11 @@ impl<B: AudioBackend> MicController<B> {
         self.journal.save_logged();
     }
 
-    /// Undoes every journaled change on connected devices and saves pending records.
-    /// Restoring twice is a no-op, so every exit path can call it.
+    /// Removes every device listener, then undoes every journaled change on connected devices and
+    /// saves pending records. Restoring twice is a no-op, so every exit path can call it.
     pub fn restore_on_exit(&mut self) -> Result<()> {
+        // First, so the restore's own writes don't wake the event loop.
+        self.stop_listening();
         let failures = restore_journaled_devices(&mut self.backend, &mut self.journal);
         // Deletes restore.json after a clean, complete restore; failed and disconnected
         // devices stay listed for the next launch.
@@ -1688,6 +1896,131 @@ impl<B: AudioBackend> MicController<B> {
         }
     }
 
+    /// Has CoreAudio call `signal` when a device comes or goes, and when an input device's
+    /// native mute or input volume changes while the app enforces mute. From then on, every poll
+    /// adds and removes device listeners as devices come and go, until exit removes them all.
+    pub fn start_listening(&mut self, signal: &'static DeviceChangeSignal) {
+        signal.set_enforcing_mute(self.desired_muted);
+        self.listeners = Some(DeviceListeners::new(signal));
+        let now = Instant::now();
+        match self.get_input_device_ids() {
+            Ok(ids) => self.sync_listeners(&ids, now),
+            Err(err) => {
+                self.sync_listeners(&[], now);
+                if let Some(listeners) = &mut self.listeners {
+                    // The next poll lists the input devices again and listens to them.
+                    listeners.has_unregistered_device = true;
+                    listeners
+                        .failures
+                        .report(&err.context("list input devices to listen to"), now);
+                }
+            }
+        }
+        if self.is_listening() {
+            info!("Listening for audio device changes");
+        }
+    }
+
+    /// Whether CoreAudio listeners report every change a poll looks for: they are all
+    /// registered. The event loop then polls less often.
+    pub fn is_listening(&self) -> bool {
+        self.listeners
+            .as_ref()
+            .is_some_and(DeviceListeners::is_complete)
+    }
+
+    /// Registers the listeners that are missing: on the device list, and on each input device in
+    /// `ids`, which retries those that failed before. Removes the listeners of devices no longer
+    /// in `ids`. Without such changes, it makes no CoreAudio call.
+    fn sync_listeners(&mut self, ids: &[AudioDeviceID], now: Instant) {
+        let Some(listeners) = &mut self.listeners else {
+            return;
+        };
+        let signal = listeners.signal;
+        let gone: Vec<AudioDeviceID> = listeners
+            .devices
+            .keys()
+            .filter(|id| !ids.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            let Some(selectors) = listeners.devices.remove(&id) else {
+                continue;
+            };
+            // A device that went away took its listeners along, so removing them can fail.
+            if let Err(err) = self
+                .backend
+                .stop_listening_to_device(id, &selectors, signal)
+            {
+                trace!(
+                    "Could not remove the listeners of audio device {}: {}",
+                    id,
+                    err
+                );
+            }
+        }
+        let mut failures = Vec::new();
+        if !listeners.is_listening_to_device_list {
+            match self.backend.listen_to_device_list(signal) {
+                Ok(()) => listeners.is_listening_to_device_list = true,
+                Err(err) => failures.push(err),
+            }
+        }
+        let mut has_unregistered_device = false;
+        for id in ids {
+            if listeners.devices.contains_key(id) {
+                continue;
+            }
+            match self.backend.listen_to_device(*id, signal) {
+                Ok(selectors) => {
+                    trace!(
+                        "Listening to {} control(s) of audio device {}",
+                        selectors.len(),
+                        id
+                    );
+                    listeners.devices.insert(*id, selectors);
+                }
+                Err(err) => {
+                    has_unregistered_device = true;
+                    failures.push(err);
+                }
+            }
+        }
+        listeners.has_unregistered_device = has_unregistered_device;
+        match combined_error(failures) {
+            Some(err) => listeners.failures.report(&err, now),
+            None => listeners.failures.clear(),
+        }
+    }
+
+    /// Removes every listener for good. Exit calls it before restoring, so no listener outlives
+    /// the app's last poll.
+    fn stop_listening(&mut self) {
+        let Some(listeners) = self.listeners.take() else {
+            return;
+        };
+        let signal = listeners.signal;
+        let mut failures = Vec::new();
+        if listeners.is_listening_to_device_list {
+            if let Err(err) = self.backend.stop_listening_to_device_list(signal) {
+                failures.push(err);
+            }
+        }
+        for (id, selectors) in &listeners.devices {
+            if let Err(err) = self
+                .backend
+                .stop_listening_to_device(*id, selectors, signal)
+            {
+                failures.push(err);
+            }
+        }
+        match combined_error(failures) {
+            // Harmless: a device that left since the last poll took its listeners along.
+            Some(err) => warn!("Failed to remove every audio device listener: {}", err),
+            None => trace!("Removed every audio device listener"),
+        }
+    }
+
     /// Runs on every poll while the user's intent is unmuted.
     pub fn watch_unmuted(&mut self) {
         self.watch_unmuted_at(Instant::now());
@@ -1705,6 +2038,7 @@ impl<B: AudioBackend> MicController<B> {
         };
         // Reconnects while unmuted count too: the next mute retries such a device at once.
         self.note_input_devices(&ids);
+        self.sync_listeners(&ids, now);
         self.record_audible_levels(&ids);
         self.refresh_device_states_if_due(&ids, now);
     }
@@ -1805,8 +2139,11 @@ impl<B: AudioBackend> MicController<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_changes::DeviceChange;
     use crate::store::MemoryStore;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[derive(Clone)]
     struct Device {
@@ -1825,6 +2162,8 @@ mod tests {
         fail_set_volume: bool,
         ignore_set_mute: bool,
         ignore_set_volume: bool,
+        /// Registering its listeners fails.
+        fail_listen: bool,
     }
 
     impl Device {
@@ -1843,6 +2182,7 @@ mod tests {
                 fail_set_volume: false,
                 ignore_set_mute: false,
                 ignore_set_volume: false,
+                fail_listen: false,
             }
         }
 
@@ -1914,6 +2254,21 @@ mod tests {
         journaled_at_write: Vec<(AudioDeviceID, bool)>,
         /// Every write that reached a settable control, in order.
         writes: Vec<Write>,
+        /// The registered device list listener's signal, which `plug` and `unplug` notify.
+        device_list_listener: Option<&'static DeviceChangeSignal>,
+        /// Per device, the selectors of its registered listeners and their signal, which a
+        /// change of a listened control notifies, as CoreAudio does for any change.
+        device_listeners: HashMap<
+            AudioDeviceID,
+            (
+                Vec<AudioObjectPropertySelector>,
+                &'static DeviceChangeSignal,
+            ),
+        >,
+        /// Makes `listen_to_device_list` fail.
+        fail_device_list_listener: bool,
+        /// Listener registrations and removals that reached the backend.
+        listener_calls: usize,
     }
 
     impl FakeBackend {
@@ -1941,13 +2296,43 @@ mod tests {
 
         fn unplug(&mut self, id: AudioDeviceID) -> Device {
             self.ids.retain(|existing| *existing != id);
-            self.devices.remove(&id).unwrap()
+            let device = self.devices.remove(&id).unwrap();
+            self.report_device_list_change();
+            device
         }
 
         /// Connects a device, e.g. one unplugged earlier, under a new ID.
         fn plug(&mut self, id: AudioDeviceID, device: Device) {
             self.ids.push(id);
             self.devices.insert(id, device);
+            self.report_device_list_change();
+        }
+
+        fn report_device_list_change(&self) {
+            if let Some(signal) = self.device_list_listener {
+                signal.notify(DeviceChange::DeviceList);
+            }
+        }
+
+        /// Reports a change of the device's control `selector` to a listener on it.
+        fn report_control_change(&self, id: AudioDeviceID, selector: AudioObjectPropertySelector) {
+            if let Some((selectors, signal)) = self.device_listeners.get(&id) {
+                if selectors.contains(&selector) {
+                    signal.notify(DeviceChange::Controls);
+                }
+            }
+        }
+
+        /// Another app, or the user in Sound settings, sets the device's native mute.
+        fn change_mute_externally(&mut self, id: AudioDeviceID, state: bool) {
+            self.device_mut(id).unwrap().mute = Some(state);
+            self.report_control_change(id, kAudioDevicePropertyMute);
+        }
+
+        /// Another app, or the user in Sound settings, sets the device's input volume.
+        fn change_volume_externally(&mut self, id: AudioDeviceID, volume: f32) {
+            self.device_mut(id).unwrap().volume = Some(volume);
+            self.report_control_change(id, kAudioDevicePropertyVolumeScalar);
         }
 
         fn observe_write(&mut self, write: Write) {
@@ -2011,14 +2396,14 @@ mod tests {
             if device.fail_set_mute {
                 return Err(anyhow!("fake native mute failure"));
             }
-            if let Some(muted) = &mut device.mute {
-                if !device.ignore_set_mute {
-                    *muted = state;
-                }
-                Ok(Some(()))
-            } else {
-                Ok(None)
+            let Some(muted) = &mut device.mute else {
+                return Ok(None);
+            };
+            if !device.ignore_set_mute && *muted != state {
+                *muted = state;
+                self.report_control_change(audio_device_id, kAudioDevicePropertyMute);
             }
+            Ok(Some(()))
         }
 
         /// Fake writes show at once or never, so tests don't sleep between readbacks.
@@ -2043,10 +2428,64 @@ mod tests {
             if device.fail_set_volume {
                 return Err(anyhow!("fake volume failure"));
             }
-            if !device.ignore_set_volume {
+            if !device.ignore_set_volume && device.volume != Some(volume) {
                 device.volume = Some(volume);
+                self.report_control_change(audio_device_id, kAudioDevicePropertyVolumeScalar);
             }
             Ok(Some(()))
+        }
+
+        fn listen_to_device_list(&mut self, signal: &'static DeviceChangeSignal) -> Result<()> {
+            self.listener_calls += 1;
+            if self.fail_device_list_listener {
+                return Err(anyhow!("fake device list listener failure"));
+            }
+            self.device_list_listener = Some(signal);
+            Ok(())
+        }
+
+        fn stop_listening_to_device_list(
+            &mut self,
+            _signal: &'static DeviceChangeSignal,
+        ) -> Result<()> {
+            self.listener_calls += 1;
+            self.device_list_listener = None;
+            Ok(())
+        }
+
+        /// Listens to the native mute and the input volume, those the device has.
+        fn listen_to_device(
+            &mut self,
+            audio_device_id: AudioDeviceID,
+            signal: &'static DeviceChangeSignal,
+        ) -> Result<Vec<AudioObjectPropertySelector>> {
+            self.listener_calls += 1;
+            let device = self.device(audio_device_id)?;
+            if device.fail_listen {
+                return Err(anyhow!("fake listener failure"));
+            }
+            let mut selectors = Vec::new();
+            if device.mute.is_some() {
+                selectors.push(kAudioDevicePropertyMute);
+            }
+            if device.volume.is_some() {
+                selectors.push(kAudioDevicePropertyVolumeScalar);
+            }
+            self.device_listeners
+                .insert(audio_device_id, (selectors.clone(), signal));
+            Ok(selectors)
+        }
+
+        /// Like CoreAudio, fails for a device that went away, whose listeners went with it.
+        fn stop_listening_to_device(
+            &mut self,
+            audio_device_id: AudioDeviceID,
+            _selectors: &[AudioObjectPropertySelector],
+            _signal: &'static DeviceChangeSignal,
+        ) -> Result<()> {
+            self.listener_calls += 1;
+            self.device_listeners.remove(&audio_device_id);
+            self.device(audio_device_id).map(|_| ())
         }
     }
 
@@ -3661,5 +4100,275 @@ mod tests {
                 status: DeviceStatus::Unmuted,
             }]
         );
+    }
+
+    #[test]
+    fn core_audio_listens_to_the_controls_it_reads_and_to_the_device_list() {
+        let addresses = CoreAudioBackend::listened_addresses();
+        let selectors = addresses.map(|address| address.mSelector);
+        assert_eq!(
+            selectors,
+            [
+                kAudioDevicePropertyMute,
+                kAudioDevicePropertyVolumeScalar,
+                AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME
+            ]
+        );
+        for address in addresses {
+            assert_eq!(address.mScope, kAudioDevicePropertyScopeInput);
+            assert_eq!(address.mElement, kAudioObjectPropertyElementMain);
+        }
+
+        let device_list = CoreAudioBackend::device_list_address();
+        assert_eq!(device_list.mSelector, kAudioHardwarePropertyDevices);
+        assert_eq!(device_list.mScope, kAudioObjectPropertyScopeGlobal);
+        assert_eq!(device_list.mElement, kAudioObjectPropertyElementMain);
+        assert_eq!(SYSTEM_OBJECT, 1);
+    }
+
+    /// A signal for one test, leaked like the app's, and how often it woke the loop.
+    fn counting_signal() -> (&'static DeviceChangeSignal, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = wakes.clone();
+        let signal = Box::leak(Box::new(DeviceChangeSignal::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })));
+        (signal, wakes)
+    }
+
+    /// A controller listening for device changes, its signal, and how often that woke the loop.
+    fn listening(
+        backend: FakeBackend,
+    ) -> (
+        MicController<FakeBackend>,
+        &'static DeviceChangeSignal,
+        Arc<AtomicUsize>,
+    ) {
+        let mut controller = controller(backend);
+        let (signal, wakes) = counting_signal();
+        controller.start_listening(signal);
+        (controller, signal, wakes)
+    }
+
+    /// A built-in mic with native mute, a USB mic muted by volume, and speakers without input.
+    fn listened_devices() -> FakeBackend {
+        let mut speakers = Device::native("Speakers", false);
+        speakers.input = false;
+        let mut backend = native_and_volume_devices();
+        backend.plug(3, speakers);
+        backend
+    }
+
+    fn listened_selectors(
+        controller: &MicController<FakeBackend>,
+        id: AudioDeviceID,
+    ) -> Option<Vec<AudioObjectPropertySelector>> {
+        let (selectors, _) = controller.backend.device_listeners.get(&id)?;
+        Some(selectors.clone())
+    }
+
+    const NATIVE_AND_VOLUME: [AudioObjectPropertySelector; 2] =
+        [kAudioDevicePropertyMute, kAudioDevicePropertyVolumeScalar];
+
+    #[test]
+    fn listening_covers_the_device_list_and_the_controls_of_every_input_device() {
+        let (controller, signal, _) = listening(listened_devices());
+
+        assert!(controller.is_listening());
+        let device_list_listener = controller.backend.device_list_listener;
+        assert!(device_list_listener.is_some_and(|registered| std::ptr::eq(registered, signal)));
+        assert_eq!(
+            listened_selectors(&controller, 1),
+            Some(NATIVE_AND_VOLUME.to_vec())
+        );
+        assert_eq!(
+            listened_selectors(&controller, 2),
+            Some(vec![kAudioDevicePropertyVolumeScalar])
+        );
+        assert_eq!(listened_selectors(&controller, 3), None, "no input");
+    }
+
+    #[test]
+    fn a_device_without_controls_has_nothing_to_listen_to_and_counts_as_listened() {
+        let backend = FakeBackend::with_devices(vec![(1, Device::no_control("Virtual"))]);
+
+        let (controller, _, _) = listening(backend);
+
+        assert!(controller.is_listening());
+        assert_eq!(listened_selectors(&controller, 1), Some(Vec::new()));
+    }
+
+    #[test]
+    fn listeners_follow_devices_that_come_and_go() {
+        let (mut controller, signal, wakes) = listening(listened_devices());
+
+        controller.backend.unplug(1);
+        controller.backend.plug(5, Device::native("Headset", false));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1, "one wake-up for both");
+        assert!(signal.take());
+        controller.watch_unmuted();
+
+        assert_eq!(listened_selectors(&controller, 1), None);
+        assert_eq!(
+            listened_selectors(&controller, 5),
+            Some(NATIVE_AND_VOLUME.to_vec())
+        );
+        // Removing the listeners of a device that went away fails, which is fine.
+        assert!(controller.is_listening());
+    }
+
+    #[test]
+    fn an_external_unmute_while_muted_wakes_the_loop_once_and_its_poll_mutes_again() {
+        let (mut controller, signal, wakes) = listening(listened_devices());
+        controller.mute_all(true).unwrap();
+        // The poll after the app's own writes takes the changes they reported.
+        signal.take();
+        let woken = wakes.load(Ordering::Relaxed);
+
+        controller.backend.change_mute_externally(1, false);
+        controller.backend.change_volume_externally(2, 0.4);
+        assert_eq!(wakes.load(Ordering::Relaxed), woken + 1);
+        assert!(signal.take());
+        // The poll the wake-up runs: `update_mic` enforcing mute.
+        controller.toggle(Some(true)).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+    }
+
+    #[test]
+    fn the_poll_after_the_apps_own_writes_writes_nothing_and_wakes_nothing() {
+        let (mut controller, signal, wakes) = listening(listened_devices());
+
+        controller.mute_all(true).unwrap();
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "own writes report changes"
+        );
+        assert!(signal.take());
+        controller.backend.writes.clear();
+        controller.toggle(Some(true)).unwrap();
+
+        assert!(controller.backend.writes.is_empty());
+        assert!(!signal.take(), "no write, so no change to report");
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn control_changes_while_unmuted_wake_nothing_but_a_new_device_does() {
+        let (mut controller, signal, wakes) = listening(listened_devices());
+        controller.mute_all(true).unwrap();
+        controller.mute_all(false).unwrap();
+        signal.take();
+        let woken = wakes.load(Ordering::Relaxed);
+
+        controller.backend.change_mute_externally(1, true);
+        controller.backend.change_volume_externally(2, 0.2);
+        assert_eq!(wakes.load(Ordering::Relaxed), woken);
+        assert!(!signal.take());
+
+        controller.backend.plug(5, Device::native("Headset", false));
+        assert_eq!(wakes.load(Ordering::Relaxed), woken + 1);
+    }
+
+    #[test]
+    fn exit_removes_every_listener_before_it_restores() {
+        let (mut controller, signal, wakes) = listening(listened_devices());
+        controller.mute_all(true).unwrap();
+        signal.take();
+        let woken = wakes.load(Ordering::Relaxed);
+
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
+        assert!(controller.backend.device_list_listener.is_none());
+        assert!(controller.backend.device_listeners.is_empty());
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            woken,
+            "the restore woke nothing"
+        );
+        assert!(!controller.is_listening());
+    }
+
+    #[test]
+    fn listening_ends_for_good_at_exit() {
+        let (mut controller, _, _) = listening(listened_devices());
+        controller.restore_on_exit().unwrap();
+        let calls = controller.backend.listener_calls;
+
+        controller.backend.plug(5, Device::native("Headset", false));
+        controller.watch_unmuted();
+        controller.mute_all(true).unwrap();
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.listener_calls, calls);
+        assert!(controller.backend.device_listeners.is_empty());
+    }
+
+    #[test]
+    fn a_device_whose_listeners_fail_leaves_listening_incomplete_until_a_poll_registers_it() {
+        let mut backend = listened_devices();
+        backend.device_mut(2).unwrap().fail_listen = true;
+
+        let (mut controller, _, _) = listening(backend);
+        assert!(!controller.is_listening());
+        assert_eq!(
+            listened_selectors(&controller, 1),
+            Some(NATIVE_AND_VOLUME.to_vec()),
+            "the other devices are listened to"
+        );
+        controller.watch_unmuted();
+        assert!(!controller.is_listening(), "it still fails");
+
+        controller.backend.device_mut(2).unwrap().fail_listen = false;
+        controller.watch_unmuted();
+        assert!(controller.is_listening());
+        assert_eq!(
+            listened_selectors(&controller, 2),
+            Some(vec![kAudioDevicePropertyVolumeScalar])
+        );
+    }
+
+    #[test]
+    fn a_failed_device_list_listener_is_registered_by_a_later_poll() {
+        let mut backend = listened_devices();
+        backend.fail_device_list_listener = true;
+
+        let (mut controller, _, _) = listening(backend);
+        assert!(!controller.is_listening());
+
+        controller.backend.fail_device_list_listener = false;
+        controller.mute_all(true).unwrap();
+        assert!(controller.is_listening());
+        assert!(controller.backend.device_list_listener.is_some());
+    }
+
+    #[test]
+    fn polls_without_device_changes_make_no_listener_calls() {
+        let (mut controller, _, _) = listening(listened_devices());
+        let calls = controller.backend.listener_calls;
+
+        controller.mute_all(true).unwrap();
+        controller.toggle(Some(true)).unwrap();
+        controller.mute_all(false).unwrap();
+        controller.watch_unmuted();
+
+        assert_eq!(controller.backend.listener_calls, calls);
+    }
+
+    #[test]
+    fn a_controller_that_never_listens_registers_nothing() {
+        let mut controller = controller(listened_devices());
+
+        controller.mute_all(true).unwrap();
+        controller.watch_unmuted();
+        controller.restore_on_exit().unwrap();
+
+        assert_eq!(controller.backend.listener_calls, 0);
+        assert!(!controller.is_listening());
     }
 }

@@ -1,6 +1,7 @@
 use crate::about::{self, AboutWindow};
 use crate::camera::CameraController;
 use crate::config::AppVars;
+use crate::device_changes::DeviceChangeSignal;
 use crate::launch_at_login;
 use crate::mic::{FailureLog, MicController};
 use crate::mic_command::MicCommand;
@@ -27,6 +28,10 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowT
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 
 const POLL_INTERVAL_MILLIS: u64 = 200;
+/// The shortest time from one poll to the next that a device change runs: a device whose
+/// controls keep changing, as when another app fights the mute, can't make the loop poll more
+/// often than this.
+const DEVICE_CHANGE_POLL_SPACING: Duration = Duration::from_millis(50);
 /// How long the popup stays up after an unmute.
 const HIDE_POPUP_DELAY: Duration = Duration::from_secs(1);
 /// How long a `status` URL shows the popup.
@@ -37,6 +42,8 @@ const UI_FAILURE_EXIT_CODE: i32 = 1;
 #[derive(Debug)]
 pub enum Message {
     CameraStateChanged(bool),
+    /// A CoreAudio listener reported a device change (`DeviceChangeSignal`).
+    DevicesChanged,
 }
 
 pub type EventLoopMessage = EventLoop<Message>;
@@ -134,6 +141,13 @@ fn keep_popup_until(hide_at: &mut Option<Instant>, until: Option<Instant>) {
     *hide_at = (*hide_at).max(until);
 }
 
+/// When a device change reported at `now` runs the poll: at once, unless the last poll ran less
+/// than [`DEVICE_CHANGE_POLL_SPACING`] before. An earlier pending deadline stays.
+fn device_change_poll_at(pending: Option<Instant>, last_poll: Instant, now: Instant) -> Instant {
+    let at = now.max(last_poll + DEVICE_CHANGE_POLL_SPACING);
+    pending.map_or(at, |pending| pending.min(at))
+}
+
 /// Runs a URL's action and returns when to hide the popup. An action that can unmute runs only
 /// with `allow_url_unmute`: any app or web page can open the URL.
 fn run_url_action(
@@ -224,6 +238,8 @@ pub fn start(
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
     let mut last_poll = Instant::now() - poll_interval;
+    // When the poll a reported device change asked for runs; see `device_change_poll_at`.
+    let mut device_poll_at: Option<Instant> = None;
     let mut hide_popup_at: Option<Instant> = None;
     let mut is_exiting = false;
     let mut devices_menu_failures = FailureLog::new(
@@ -261,6 +277,17 @@ pub fn start(
             .send_event(Message::CameraStateChanged(active))
             .ok();
     });
+
+    // CoreAudio calls its listeners on its own thread or the main run loop; they only post
+    // DevicesChanged here. Leaked: a listener can run while it is being removed, so the signal
+    // must outlive every registration.
+    let proxy_devices = event_loop.create_proxy();
+    let device_changes: &'static DeviceChangeSignal =
+        Box::leak(Box::new(DeviceChangeSignal::new(move || {
+            // Fails only once the loop has ended, when there is nothing left to wake.
+            proxy_devices.send_event(Message::DevicesChanged).ok();
+        })));
+    controller.write().start_listening(device_changes);
 
     trace!("Starting event loop");
     // Set activation policy based on persisted show_in_dock before the loop starts.
@@ -348,6 +375,15 @@ pub fn start(
                     log::error!("Failed to update camera UI: {:#}", err);
                 }
             }
+        }
+
+        // A device came or went, or a control changed while mute is enforced: poll soon.
+        if let Event::UserEvent(Message::DevicesChanged) = event {
+            device_poll_at = Some(device_change_poll_at(
+                device_poll_at,
+                last_poll,
+                Instant::now(),
+            ));
         }
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -569,9 +605,14 @@ pub fn start(
             }
         }
 
-        // Poll mic state and cursor-monitor position on a 200 ms interval.
-        if is_poll_requested || last_poll.elapsed() >= poll_interval {
+        // Poll mic state and cursor-monitor position on a 200 ms interval, and soon after a
+        // reported device change.
+        let is_device_poll_due = device_poll_at.is_some_and(|at| Instant::now() >= at);
+        if is_poll_requested || is_device_poll_due || last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
+            device_poll_at = None;
+            // Before the poll reads the devices, so a change during the read wakes the loop again.
+            device_changes.take();
             let exclusions_changed = apply_exclusions(&controller, &settings);
             update_mic(ui, &controller, None);
             if exclusions_changed {
@@ -606,7 +647,7 @@ pub fn start(
             let next_poll = last_poll + poll_interval;
             let next_settings = last_settings_check + settings_poll_interval;
             let mut next_wake = next_poll.min(next_settings);
-            if let Some(deadline) = hide_popup_at {
+            for deadline in [hide_popup_at, device_poll_at].into_iter().flatten() {
                 next_wake = next_wake.min(deadline);
             }
             *control_flow = ControlFlow::WaitUntil(next_wake);
@@ -625,6 +666,7 @@ mod tests {
             Event::NewEvents(StartCause::Poll),
             Event::MainEventsCleared,
             Event::UserEvent(Message::CameraStateChanged(true)),
+            Event::UserEvent(Message::DevicesChanged),
             Event::LoopDestroyed,
         ];
         for event in later_events {
@@ -656,5 +698,26 @@ mod tests {
             Some(later),
             "a request that didn't unmute keeps it"
         );
+    }
+
+    #[test]
+    fn a_device_change_polls_at_once_unless_a_poll_just_ran() {
+        let last_poll = Instant::now();
+        let spaced = last_poll + DEVICE_CHANGE_POLL_SPACING;
+
+        let later = spaced + Duration::from_millis(1);
+        assert_eq!(device_change_poll_at(None, last_poll, later), later);
+        let soon = last_poll + Duration::from_millis(10);
+        assert_eq!(device_change_poll_at(None, last_poll, soon), spaced);
+    }
+
+    #[test]
+    fn a_burst_of_device_changes_keeps_the_earliest_poll() {
+        let last_poll = Instant::now();
+        let first = last_poll + DEVICE_CHANGE_POLL_SPACING;
+
+        let next = device_change_poll_at(Some(first), last_poll, first + Duration::from_secs(1));
+
+        assert_eq!(next, first);
     }
 }
