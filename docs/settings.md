@@ -68,6 +68,12 @@ Controls the small on-screen mute-status popup.
 
 The tray menu can also toggle this setting.
 
+## About window
+
+The tray menu's About item shows the mute shortcut in use, the settings file's location, and the version.
+
+- **Open Settings** opens `settings.json` in the default text editor. If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
+
 ## Editing settings
 
 Mic Mute checks the file every two seconds and reloads it when its modification time changes. Valid changes apply without a restart. The tray menu writes its setting changes to this file.

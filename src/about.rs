@@ -2,11 +2,35 @@
 /// Shows version info, shortcut configuration, and a link to the GitHub repo via a native macOS NSAlert.
 use crate::settings::{Settings, ShortcutConfig};
 use crate::shortcuts::{current_status, ShortcutStatus};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cocoa::base::nil;
 use cocoa::foundation::NSString;
 use objc::runtime::Object;
+use std::path::PathBuf;
 use std::process::Command;
+
+/// The file `Settings::save` writes.
+fn settings_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
+}
+
+/// Opens settings.json in the default text editor. A fresh install has no file yet and
+/// `open` fails on a missing path, so the file is first written with `settings`, the
+/// settings in use. An existing file opens as it is, even an invalid one.
+fn open_settings_file(settings: &Settings) -> Result<()> {
+    let path = settings_path().context("Failed to locate the settings directory")?;
+    if matches!(path.try_exists(), Ok(false)) {
+        settings
+            .save()
+            .context("Failed to create the settings file")?;
+    }
+    Command::new("open")
+        .arg("-t")
+        .arg(&path)
+        .spawn()
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    Ok(())
+}
 
 /// The alert's text: the registered shortcut (and why it isn't the configured one, if it
 /// isn't), the settings path, and the version.
@@ -62,10 +86,7 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
 
     match response {
         1001 => {
-            if let Some(path) = dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
-            {
-                let _ = Command::new("open").arg("-t").arg(&path).spawn();
-            }
+            open_settings_file(settings)?;
             Ok(false)
         }
         1002 => {
