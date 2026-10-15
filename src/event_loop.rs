@@ -1,4 +1,4 @@
-use crate::about::show_about;
+use crate::about::{self, AboutWindow};
 use crate::camera::CameraController;
 use crate::config::AppVars;
 use crate::launch_at_login;
@@ -111,6 +111,7 @@ pub fn start(
 ) {
     // `None` until the loop runs; see `is_loop_start`.
     let mut ui_and_ids: Option<(RwLock<UI>, EventIds)> = None;
+    let mut about_window = AboutWindow::default();
 
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
@@ -256,19 +257,34 @@ pub fn start(
                 }
             } else if event.id == button_about {
                 trace!("About tray menu item selected");
+                if let Err(e) = about_window.show() {
+                    log::error!("Failed to show the About window: {:#}", e);
+                }
+            }
+        }
+
+        // About's buttons only record the click; taking it closes the window. The action runs
+        // here, so About never stops the loop.
+        if let Some(button) = about_window.take_click() {
+            trace!("About → {} clicked", button.title());
+            let changed = {
                 let mut s = settings.write();
-                match show_about(&mut s) {
-                    Ok(true) => {
-                        // Reset to Default clicked — apply all settings immediately
-                        let mut ui = ui.write();
-                        if let Err(e) = ui.apply_settings(&s) {
-                            log::error!("Failed to apply settings: {}", e);
-                        } else {
-                            shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
-                        }
+                match about::run_action(button, &mut s) {
+                    Ok(true) => Some(s.clone()),
+                    Ok(false) => None,
+                    Err(e) => {
+                        log::error!("About → {} failed: {:#}", button.title(), e);
+                        None
                     }
-                    Ok(false) => {}
-                    Err(e) => log::error!("Preferences error: {}", e),
+                }
+            };
+            // Reset Settings: apply every setting at once.
+            if let Some(new_settings) = changed {
+                let mut ui = ui.write();
+                if let Err(e) = ui.apply_settings(&new_settings) {
+                    log::error!("Failed to apply settings: {}", e);
+                } else {
+                    shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
                 }
             }
         }
