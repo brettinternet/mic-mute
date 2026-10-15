@@ -95,8 +95,20 @@ impl UI {
         Ok(self)
     }
 
-    pub fn hide_popup(&mut self) -> Result<&mut Self> {
-        self.popup.hide().context("Failed to hide UI popup")?;
+    /// Ends a popup flash: hides the popup unless it stays up while muted.
+    pub fn hide_popup_unless_pinned(&mut self) -> Result<&mut Self> {
+        self.popup
+            .hide_unless_pinned()
+            .context("Failed to hide UI popup")?;
+        Ok(self)
+    }
+
+    /// Shows the popup with the current state, also while `show_popup` is off, until
+    /// `hide_popup_unless_pinned`.
+    pub fn show_popup_status(&mut self) -> Result<&mut Self> {
+        self.popup
+            .show_status()
+            .context("Failed to show the status popup")?;
         Ok(self)
     }
 

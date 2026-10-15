@@ -18,7 +18,8 @@ The file is JSON. The complete default configuration is:
   },
   "show_in_dock": false,
   "launch_at_login": false,
-  "show_popup": true
+  "show_popup": true,
+  "allow_url_unmute": false
 }
 ```
 
@@ -70,7 +71,16 @@ Controls the small on-screen mute-status popup.
 - `true` (default): show the popup when the microphone is muted.
 - `false`: keep the popup hidden while retaining the tray indicator.
 
-The tray menu can also toggle this setting.
+The tray menu can also toggle this setting. A `status` URL shows the popup for two seconds either way.
+
+### `allow_url_unmute`
+
+Controls which [URL actions](../README.md#control-from-other-apps) may run.
+
+- `false` (default): only `mute` and `status` run. Mic Mute refuses `unmute` and `toggle` and logs a warning.
+- `true`: every action runs, `unmute` and `toggle` included.
+
+Any app, and any web page through the browser, can open a `com.brettinternet.mic-mute://` URL. By default a URL can therefore mute the microphones and show their state, but never unmute them. With this setting on, any app, or a web page you let open Mic Mute, can unmute them.
 
 ## About window
 

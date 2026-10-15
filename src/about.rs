@@ -40,16 +40,17 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// The settings after About → Reset: `mic_shortcut`, `show_in_dock`, and `show_popup` at
-/// their defaults. Every other field is kept: `launch_at_login` mirrors the system login
-/// item, and fields this build doesn't manage must survive. List a new setting here if
-/// Reset should cover it.
+/// The settings after About → Reset: every setting this build manages at its default except
+/// `launch_at_login`, which mirrors the system login item. Fields this build doesn't manage
+/// are kept. List a new setting here if Reset should cover it.
 fn reset_settings(current: &Settings) -> Settings {
     let defaults = Settings::default();
     Settings {
         mic_shortcut: defaults.mic_shortcut,
         show_in_dock: defaults.show_in_dock,
         show_popup: defaults.show_popup,
+        // Inputs besides the tray menu.
+        allow_url_unmute: defaults.allow_url_unmute,
         ..current.clone()
     }
 }
@@ -348,6 +349,7 @@ mod tests {
                 "show_in_dock": true,
                 "launch_at_login": {launch_at_login},
                 "show_popup": false,
+                "allow_url_unmute": true,
                 "excluded_devices": ["Teams Audio"]
             }}"#
         ))
@@ -364,8 +366,19 @@ mod tests {
     }
 
     #[test]
+    fn reset_turns_url_unmute_off() {
+        let reset = reset_settings(&customized_settings(true));
+        assert!(!reset.allow_url_unmute);
+    }
+
+    #[test]
     fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
-        let reset_fields = ["mic_shortcut", "show_in_dock", "show_popup"];
+        let reset_fields = [
+            "mic_shortcut",
+            "show_in_dock",
+            "show_popup",
+            "allow_url_unmute",
+        ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);
             let reset = serde_json::to_value(reset_settings(&current)).unwrap();

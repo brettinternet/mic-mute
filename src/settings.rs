@@ -34,6 +34,11 @@ pub struct Settings {
     pub launch_at_login: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
+    // Inputs besides the tray menu: URLs (`url_scheme`).
+    /// Whether `unmute` and `toggle` URLs may run. Off by default: any app or web page can open
+    /// a URL, so by default URLs can only mute and show the state.
+    #[serde(default)]
+    pub allow_url_unmute: bool,
     /// Fields this version doesn't know (written by a newer version or a fork), saved back
     /// unchanged. Empty when the file has none, as in `impl Default`.
     #[serde(flatten)]
@@ -47,6 +52,8 @@ impl Default for Settings {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: true,
+            // Inputs besides the tray menu.
+            allow_url_unmute: false,
             extra: serde_json::Map::new(),
         }
     }
@@ -328,6 +335,7 @@ mod tests {
             show_in_dock: false,
             launch_at_login: false,
             show_popup: false,
+            allow_url_unmute: true,
             extra: serde_json::Map::new(),
         };
 
@@ -338,6 +346,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
         assert!(!loaded.show_popup);
+        assert!(loaded.allow_url_unmute);
 
         let _ = fs::remove_file(&tmp_path);
     }
@@ -403,6 +412,7 @@ mod tests {
             "show_in_dock",
             "launch_at_login",
             "show_popup",
+            "allow_url_unmute",
         ] {
             assert!(
                 !loaded.extra.contains_key(known),
@@ -434,6 +444,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "allow_url_unmute",
                 "launch_at_login",
                 "mic_shortcut",
                 "show_in_dock",
@@ -736,5 +747,26 @@ mod tests {
             !Settings::take_own_save(Some(t)),
             "a mismatch is forgotten too"
         );
+    }
+
+    // Inputs besides the tray menu: URLs, the shortcut's mode, and automatic mute.
+
+    #[test]
+    fn url_unmute_is_off_by_default_and_when_missing() {
+        assert!(!Settings::default().allow_url_unmute);
+        let loaded: Settings = serde_json::from_str(r#"{ "show_popup": false }"#).unwrap();
+        assert!(!loaded.allow_url_unmute);
+    }
+
+    #[test]
+    fn url_unmute_round_trips() {
+        let settings = Settings {
+            allow_url_unmute: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["allow_url_unmute"], serde_json::json!(true));
+        let loaded: Settings = serde_json::from_value(json).unwrap();
+        assert!(loaded.allow_url_unmute);
     }
 }

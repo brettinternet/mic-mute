@@ -25,6 +25,26 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
 - [x] Report whether a camera is in use: a dot on the tray icon (its tooltip says "Camera in use") and a label in the popup (disabling cameras appears to be impossible or too difficult for the scope of this project)
 - [x] Add configurable settings (hotkey, startup, popup visibility)
 - [x] Open app on system startup
+- [x] Control from other apps and scripts through `com.brettinternet.mic-mute://` URLs
+
+## Control from other apps
+
+Mic Mute handles `com.brettinternet.mic-mute://` URLs, so other apps and scripts can control it:
+
+| URL | Effect |
+| --- | --- |
+| `com.brettinternet.mic-mute://mute` | Mute every microphone |
+| `com.brettinternet.mic-mute://status` | Show the popup with the current state for two seconds, also when `show_popup` is off |
+| `com.brettinternet.mic-mute://unmute` | Unmute every microphone; needs `allow_url_unmute` |
+| `com.brettinternet.mic-mute://toggle` | Unmute when muted, mute otherwise; needs `allow_url_unmute` |
+
+Any app, and any web page through the browser, can open these URLs. So `unmute` and `toggle` run only after you set `"allow_url_unmute": true` in the [settings](./docs/settings.md#allow_url_unmute); until then Mic Mute refuses them and logs a warning. Action names are case-insensitive, and a trailing `/`, a query (`?…`), or a fragment (`#…`) is ignored. A URL with an unknown action does nothing but log a warning.
+
+- **Scripts and the terminal:** `open "com.brettinternet.mic-mute://mute"`
+- **Shortcuts.app:** add an **Open URLs** action with the URL, such as `com.brettinternet.mic-mute://mute`, and run the shortcut from the menu bar, a keyboard shortcut, or Siri.
+- **Raycast:** create a Quicklink whose link is the URL.
+
+macOS hands these URLs only to an installed app bundle (`task install` or a release). If Mic Mute isn't running, opening a URL starts it, and the action runs once it has started.
 
 ## Limitations
 

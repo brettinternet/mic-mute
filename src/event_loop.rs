@@ -3,8 +3,10 @@ use crate::camera::CameraController;
 use crate::config::AppVars;
 use crate::launch_at_login;
 use crate::mic::MicController;
+use crate::mic_command::MicCommand;
 use crate::settings::Settings;
 use crate::ui::UI;
+use crate::url_scheme::{UrlAction, UrlActions};
 use anyhow::Result;
 use global_hotkey::GlobalHotKeyEvent;
 use log::trace;
@@ -22,6 +24,8 @@ use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 const POLL_INTERVAL_MILLIS: u64 = 200;
 /// How long the popup stays up after an unmute.
 const HIDE_POPUP_DELAY: Duration = Duration::from_secs(1);
+/// How long a `status` URL shows the popup.
+const STATUS_POPUP_DURATION: Duration = Duration::from_secs(2);
 /// The exit code when the tray, popup, or hotkey can't be created.
 const UI_FAILURE_EXIT_CODE: i32 = 1;
 
@@ -75,25 +79,80 @@ pub struct EventIds {
     pub shortcut_mic: Arc<AtomicU32>,
 }
 
-/// Toggles, or re-enforces mute while the user wants it; otherwise watches unmuted devices.
-/// Returns whether a toggle just unmuted, so the popup should hide after a delay.
-fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, toggle: bool) -> bool {
+/// Runs `request`. Without one, it is the poll: re-mutes while the user wants mute, otherwise
+/// watches unmuted devices. Returns whether a request just unmuted, so the popup should hide
+/// after a delay.
+fn update_mic(
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    request: Option<MicCommand>,
+) -> bool {
     let mut controller = controller.write();
-    if toggle || controller.should_enforce_mute() {
-        let state = if toggle { None } else { Some(true) };
-        match controller.toggle(state).map(|_| ()) {
-            Ok(()) => controller.update_failures.clear(),
-            Err(err) => controller.update_failures.report(&err, Instant::now()),
+    let state = match request {
+        Some(command) => command.mute_state(),
+        None if controller.should_enforce_mute() => Some(true),
+        None => {
+            controller.watch_unmuted();
+            controller.save_input_levels_if_due();
+            return false;
         }
-        let mut ui = ui.write();
-        if let Err(err) = ui.update_mic(controller.muted) {
-            log::error!("Failed to update microphone UI: {:#}", err);
-        }
-    } else {
-        controller.watch_unmuted();
+    };
+    match controller.toggle(state).map(|_| ()) {
+        Ok(()) => controller.update_failures.clear(),
+        Err(err) => controller.update_failures.report(&err, Instant::now()),
+    }
+    if let Err(err) = ui.write().update_mic(controller.muted) {
+        log::error!("Failed to update microphone UI: {:#}", err);
     }
     controller.save_input_levels_if_due();
-    toggle && !controller.muted
+    request.is_some() && !controller.muted
+}
+
+/// Runs a change the user asked for. Returns when to hide the popup: a moment after an unmute.
+fn request_mic(
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    command: MicCommand,
+) -> Option<Instant> {
+    update_mic(ui, controller, Some(command)).then(|| Instant::now() + HIDE_POPUP_DELAY)
+}
+
+/// Keeps the popup up until the later of `hide_at` and `until`; `None` sorts before every
+/// deadline.
+fn keep_popup_until(hide_at: &mut Option<Instant>, until: Option<Instant>) {
+    *hide_at = (*hide_at).max(until);
+}
+
+/// Runs a URL's action and returns when to hide the popup. An action that can unmute runs only
+/// with `allow_url_unmute`: any app or web page can open the URL.
+fn run_url_action(
+    action: UrlAction,
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    allow_url_unmute: bool,
+) -> Option<Instant> {
+    if !action.is_allowed(allow_url_unmute) {
+        log::warn!(
+            "Refused the {} URL action: it can unmute, which needs \"allow_url_unmute\": true in \
+             settings.json",
+            action.name()
+        );
+        return None;
+    }
+    let Some(command) = action.command() else {
+        let muted = controller.read().muted;
+        log::info!(
+            "Running the {} URL action: the microphones are {}",
+            action.name(),
+            if muted { "muted" } else { "unmuted" }
+        );
+        if let Err(err) = ui.write().show_popup_status() {
+            log::error!("Failed to show the status popup: {:#}", err);
+        }
+        return Some(Instant::now() + STATUS_POPUP_DURATION);
+    };
+    log::info!("Running the {} URL action", action.name());
+    request_mic(ui, controller, command)
 }
 
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
@@ -113,6 +172,8 @@ pub fn start(
     // `None` until the loop runs; see `is_loop_start`.
     let mut ui_and_ids: Option<(RwLock<UI>, EventIds)> = None;
     let mut about_window = AboutWindow::default();
+    // Actions of opened URLs, run once the UI exists.
+    let mut url_actions = UrlActions::default();
 
     let poll_interval = Duration::from_millis(POLL_INTERVAL_MILLIS);
     // Start in the past so the first iteration triggers the poll immediately.
@@ -171,9 +232,12 @@ pub fn start(
             *control_flow = ControlFlow::Exit;
             return;
         }
+        // Parse and log each URL now; its action runs below, once the UI exists.
+        if let Event::Opened { urls } = &event {
+            url_actions.push_urls(urls.iter().map(|url| url.as_str()));
+        }
         if ui_and_ids.is_none() {
-            // Until Init, tao delivers at most `Event::Opened` (a launch by URL), which the
-            // app ignores.
+            // Until Init, tao delivers at most `Event::Opened` (a launch by URL), queued above.
             if !is_loop_start(&event) {
                 return;
             }
@@ -219,9 +283,8 @@ pub fn start(
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
-                if update_mic(ui, &controller, true) {
-                    hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
-                }
+                let hide_at = request_mic(ui, &controller, MicCommand::Toggle);
+                keep_popup_until(&mut hide_popup_at, hide_at);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
                 let mut s = settings.write();
@@ -296,11 +359,17 @@ pub fn start(
                 let id = event.id();
                 if shortcut_mic.load(Ordering::Relaxed) == id {
                     trace!("Toggle mic shortcut activated");
-                    if update_mic(ui, &controller, true) {
-                        hide_popup_at = Some(Instant::now() + HIDE_POPUP_DELAY);
-                    }
+                    let hide_at = request_mic(ui, &controller, MicCommand::Toggle);
+                    keep_popup_until(&mut hide_popup_at, hide_at);
                 }
             }
+        }
+
+        // URL actions, including any that arrived before the UI existed.
+        while let Some(action) = url_actions.pop() {
+            let allow_url_unmute = settings.read().allow_url_unmute;
+            let hide_at = run_url_action(action, ui, &controller, allow_url_unmute);
+            keep_popup_until(&mut hide_popup_at, hide_at);
         }
 
         // Once: settings.json was unusable at startup, so main() fell back to the defaults.
@@ -354,20 +423,18 @@ pub fn start(
         // Poll mic state and cursor-monitor position on a 200 ms interval.
         if last_poll.elapsed() >= poll_interval {
             last_poll = Instant::now();
-            update_mic(ui, &controller, false);
+            update_mic(ui, &controller, None);
             if let Err(err) = ui.write().detect() {
                 log::error!("Failed to update popup placement: {:#}", err);
             }
         }
 
-        // Hide the popup a moment after an unmute, unless the mic was muted again.
+        // Hide the popup a moment after an unmute or a status URL, unless it stays up while
+        // muted.
         if hide_popup_at.is_some_and(|deadline| Instant::now() >= deadline) {
             hide_popup_at = None;
-            let mic_controller = controller.read();
-            if !mic_controller.muted {
-                if let Err(err) = ui.write().hide_popup() {
-                    log::error!("Failed to hide popup: {:#}", err);
-                }
+            if let Err(err) = ui.write().hide_popup_unless_pinned() {
+                log::error!("Failed to hide popup: {:#}", err);
             }
         }
 
@@ -404,5 +471,31 @@ mod tests {
         for event in later_events {
             assert!(!is_loop_start(&event), "{event:?}");
         }
+        // A launch by URL can open it before Init; its action waits for the UI.
+        assert!(!is_loop_start(&Event::Opened { urls: Vec::new() }));
+    }
+
+    #[test]
+    fn the_popup_stays_up_until_the_latest_deadline() {
+        let now = Instant::now();
+        let soon = now + HIDE_POPUP_DELAY;
+        let later = now + STATUS_POPUP_DURATION;
+
+        let mut hide_at = None;
+        keep_popup_until(&mut hide_at, None);
+        assert_eq!(hide_at, None);
+        keep_popup_until(&mut hide_at, Some(later));
+        keep_popup_until(&mut hide_at, Some(soon));
+        assert_eq!(
+            hide_at,
+            Some(later),
+            "an earlier deadline doesn't cut it short"
+        );
+        keep_popup_until(&mut hide_at, None);
+        assert_eq!(
+            hide_at,
+            Some(later),
+            "a request that didn't unmute keeps it"
+        );
     }
 }
