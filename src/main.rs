@@ -37,9 +37,27 @@ extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+/// Restores the microphones from restore.json when a panic is about to end the app, then
+/// runs the previous hook, which prints the panic.
+fn install_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Only a main-thread panic ends the app: tao stops the event loop and re-raises it,
+        // and AppKit callbacks abort. A panic on a background thread (the camera poller, the
+        // signal watcher) leaves the loop running and still enforcing mute, so restoring
+        // there would unmute a user who is muted.
+        if unsafe { libc::pthread_main_np() } == 1 {
+            mic::restore_from_journal_file();
+        }
+        previous_hook(info);
+    }));
+}
+
 fn main() {
     Builder::from_env(Env::default().default_filter_or("trace")).init();
     info!("Starting app");
+    // Before anything can mute a device, so any later panic still restores them.
+    install_panic_hook();
 
     let mut settings = Settings::load();
 

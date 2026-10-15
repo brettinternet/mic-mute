@@ -653,6 +653,29 @@ fn restore_journaled_devices<B: AudioBackend>(
     }
 }
 
+/// Restores the devices `restore.json` lists with a fresh CoreAudio backend. Meant for the
+/// panic hook: it never touches a controller, whose lock the panicking thread may hold.
+pub fn restore_from_journal_file() {
+    let mut journal = RestoreJournal::load(state_file(JOURNAL_FILE_NAME));
+    if journal.is_empty() {
+        return;
+    }
+    info!(
+        "Restoring {} device(s) listed in {} before exiting",
+        journal.len(),
+        JOURNAL_FILE_NAME
+    );
+    let failures = restore_journaled_devices(&mut CoreAudioBackend, &mut journal);
+    if !failures.is_empty() {
+        error!(
+            "Failed to restore {} input device(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+    journal.save_logged();
+}
+
 pub struct MicController<B = CoreAudioBackend> {
     pub muted: bool,
     desired_muted: bool,
@@ -1939,5 +1962,23 @@ mod tests {
         assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
         assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.65));
         assert!(controller.journal.is_empty());
+    }
+
+    #[test]
+    fn journal_file_alone_restores_devices_like_the_panic_hook() {
+        let stores = Stores::default();
+        let mut controller = stores.launch(native_and_volume_devices());
+        controller.mute_all(true).unwrap();
+        // The panic hook reads restore.json with its own backend, never the controller.
+        let mut backend = controller.backend;
+        let mut journal = RestoreJournal::load(stores.journal.boxed());
+
+        let failures = restore_journaled_devices(&mut backend, &mut journal);
+        journal.save().unwrap();
+
+        assert!(failures.is_empty());
+        assert_eq!(backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(backend.device(2).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
     }
 }
