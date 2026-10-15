@@ -6,6 +6,9 @@ vars:
   PROJECT_DIR:
     sh: git rev-parse --show-toplevel
 
+# Pinned versions of the cargo-installed tools.
+dotenv: [scripts/cargo-tools.env]
+
 env:
   ROOT_DIR: "{{.PROJECT_DIR}}"
 
@@ -65,11 +68,11 @@ tasks:
 
   build-dependencies:
     internal: true
-    desc: Bundle dependencies
+    desc: Install the pinned cargo-bundle
     cmds:
-      - cargo install cargo-bundle
+      - cargo install --locked cargo-bundle@{{.CARGO_BUNDLE_VERSION}}
     status:
-      - test -f $HOME/.cargo/bin/cargo-bundle
+      - ./scripts/check-tool-version.sh cargo-bundle {{.CARGO_BUNDLE_VERSION}}
 
   build-target:
     cmds:
@@ -91,11 +94,11 @@ tasks:
     internal: true
     desc: Release dependencies
     cmds:
-      - cargo install apple-codesign
-      - cargo install toml-cli
+      - cargo install --locked apple-codesign@{{.APPLE_CODESIGN_VERSION}}
+      - cargo install --locked toml-cli@{{.TOML_CLI_VERSION}}
     status:
-      - test -f $HOME/.cargo/bin/apple-codesign
-      - test -f $HOME/.cargo/bin/toml-cli
+      - ./scripts/check-tool-version.sh rcodesign {{.APPLE_CODESIGN_VERSION}}
+      - ./scripts/check-tool-version.sh toml {{.TOML_CLI_VERSION}}
 
   release-target:
     internal: true
