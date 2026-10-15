@@ -1,6 +1,6 @@
 /// About window for the app.
 /// Shows version info, shortcut configuration, and a link to the GitHub repo via a native macOS NSAlert.
-use crate::settings::{Settings, ShortcutConfig};
+use crate::settings::Settings;
 use crate::shortcuts::{current_status, ShortcutStatus};
 use anyhow::{Context, Result};
 use cocoa::base::nil;
@@ -30,6 +30,20 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
         .spawn()
         .with_context(|| format!("Failed to open {}", path.display()))?;
     Ok(())
+}
+
+/// The settings after About → Reset: `mic_shortcut`, `show_in_dock`, and `show_popup` at
+/// their defaults. Every other field is kept: `launch_at_login` mirrors the system login
+/// item, and fields this build doesn't manage must survive. List a new setting here if
+/// Reset should cover it.
+fn reset_settings(current: &Settings) -> Settings {
+    let defaults = Settings::default();
+    Settings {
+        mic_shortcut: defaults.mic_shortcut,
+        show_in_dock: defaults.show_in_dock,
+        show_popup: defaults.show_popup,
+        ..current.clone()
+    }
 }
 
 /// The alert's text: the registered shortcut (and why it isn't the configured one, if it
@@ -90,8 +104,9 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
             Ok(false)
         }
         1002 => {
-            settings.mic_shortcut = ShortcutConfig::default();
-            settings.save()?;
+            let reset = reset_settings(settings);
+            reset.save().context("Failed to save the reset settings")?;
+            *settings = reset;
             Ok(true)
         }
         _ => Ok(false),
@@ -101,10 +116,49 @@ pub fn show_about(settings: &mut Settings) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::ShortcutConfig;
     use crate::shortcuts::{parse_shortcut, Shortcut, ShortcutProblem};
 
     fn default_shortcut() -> Shortcut {
         parse_shortcut(&ShortcutConfig::default()).unwrap()
+    }
+
+    fn customized_settings(launch_at_login: bool) -> Settings {
+        serde_json::from_str(&format!(
+            r#"{{
+                "mic_shortcut": {{ "modifiers": ["ctrl"], "key": "K" }},
+                "show_in_dock": true,
+                "launch_at_login": {launch_at_login},
+                "show_popup": false,
+                "excluded_devices": ["Teams Audio"]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reset_restores_shortcut_dock_and_popup_defaults() {
+        let reset = reset_settings(&customized_settings(true));
+        let defaults = Settings::default();
+        assert_eq!(reset.mic_shortcut, defaults.mic_shortcut);
+        assert_eq!(reset.show_in_dock, defaults.show_in_dock);
+        assert_eq!(reset.show_popup, defaults.show_popup);
+    }
+
+    #[test]
+    fn reset_keeps_launch_at_login_and_every_field_it_does_not_reset() {
+        let reset_fields = ["mic_shortcut", "show_in_dock", "show_popup"];
+        for launch_at_login in [true, false] {
+            let current = customized_settings(launch_at_login);
+            let reset = serde_json::to_value(reset_settings(&current)).unwrap();
+            let current = serde_json::to_value(&current).unwrap();
+            assert_eq!(reset["launch_at_login"], launch_at_login);
+            for (name, value) in current.as_object().unwrap() {
+                if !reset_fields.contains(&name.as_str()) {
+                    assert_eq!(reset.get(name), Some(value), "{name}");
+                }
+            }
+        }
     }
 
     #[test]
