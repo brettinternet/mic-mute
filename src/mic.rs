@@ -33,6 +33,9 @@ const NATIVE_READBACK_ATTEMPTS: u32 = 5;
 const IGNORED_WRITES_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// Identical repeats of a failure stay at `trace!` this long before an `error!` counts them.
 const FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+/// While unmuted, how often the device states for the tray's Microphones menu are read
+/// again; a mute poll reads them anyway, and a device that comes or goes shows at once.
+const DEVICE_STATES_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const AUDIO_HARDWARE_SERVICE_DEVICE_PROPERTY_VIRTUAL_MAIN_VOLUME: AudioObjectPropertySelector =
     0x766d7663; // 'vmvc'
 
@@ -521,6 +524,61 @@ fn is_excluded_by(excluded: &BTreeSet<String>, key: &DeviceKey) -> bool {
     matches!(key, DeviceKey::Uid(uid) if excluded.contains(uid))
 }
 
+/// One connected input device as the app last read it, for the tray's Microphones menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceState {
+    /// The device UID, which an exclusion names; `None` when it can't be read, so the device
+    /// can't be excluded.
+    pub uid: Option<String>,
+    pub name: String,
+    pub status: DeviceStatus,
+}
+
+/// What the app does with an input device, and the state it reads there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceStatus {
+    /// Its native mute is on.
+    Muted,
+    /// Its input volume is at zero: the fallback for a device without a working native mute.
+    MutedByVolume,
+    /// The control the app mutes it with reads unmuted.
+    Unmuted,
+    /// Skipped: it accepts mute writes, but they take effect on no control.
+    IgnoresWrites,
+    /// Skipped: neither native mute nor input volume can be set.
+    NoControl,
+    /// The last mute or unmute of it failed, or its state can't be read.
+    Failed,
+    /// The user excluded it, so the app leaves it alone.
+    Excluded,
+}
+
+/// The status the Microphones menu shows for a device: `reading` is `None` when reading the
+/// device failed, and `has_failed` says whether the last mute or unmute of it failed.
+fn device_status(reading: Option<Reading>, has_failed: bool) -> DeviceStatus {
+    match reading {
+        Some(Reading::Excluded) => DeviceStatus::Excluded,
+        _ if has_failed => DeviceStatus::Failed,
+        None | Some(Reading::State(_, None)) => DeviceStatus::Failed,
+        Some(Reading::NoControl) => DeviceStatus::NoControl,
+        Some(Reading::IgnoresWrites) => DeviceStatus::IgnoresWrites,
+        Some(Reading::State(MuteControl::Native, Some(true))) => DeviceStatus::Muted,
+        Some(Reading::State(MuteControl::Volume, Some(true))) => DeviceStatus::MutedByVolume,
+        Some(Reading::State(_, Some(false))) => DeviceStatus::Unmuted,
+    }
+}
+
+/// The device states the Microphones menu shows, and when they were read.
+#[derive(Debug, Default)]
+struct DeviceSnapshot {
+    states: Vec<DeviceState>,
+    /// The input devices `states` lists, in order; another list means a device came or went.
+    ids: Vec<AudioDeviceID>,
+    read_at: Option<Instant>,
+    /// Set when something the states show changed without a read, such as the exclusions.
+    is_stale: bool,
+}
+
 fn device_key<B: AudioBackend>(backend: &B, audio_device_id: AudioDeviceID) -> DeviceKey {
     match backend.device_uid(audio_device_id) {
         Ok(uid) => DeviceKey::Uid(uid),
@@ -871,6 +929,10 @@ pub struct MicController<B = CoreAudioBackend> {
     /// Connected excluded devices whose journaled changes the app has tried to undo since they
     /// connected or became excluded; a muted poll tries each only once.
     released_excluded: HashSet<DeviceKey>,
+    /// Devices whose write failed in the last `mute_all`, shown as failed.
+    failed_devices: HashSet<DeviceKey>,
+    /// What the tray's Microphones menu shows; see [`Self::device_states`].
+    snapshot: DeviceSnapshot,
     backend: B,
 }
 
@@ -917,6 +979,8 @@ impl<B: AudioBackend> MicController<B> {
             write_behavior: HashMap::new(),
             excluded,
             released_excluded: HashSet::new(),
+            failed_devices: HashSet::new(),
+            snapshot: DeviceSnapshot::default(),
             backend,
         };
         trace!("Creating audio controller");
@@ -924,9 +988,17 @@ impl<B: AudioBackend> MicController<B> {
         trace!("Found {} devices: {}", names.len(), names.join(", "));
         // Undo what an unclean exit left behind before the hardware state becomes user intent.
         controller.restore_after_unclean_exit();
-        controller.record_audible_levels();
+        let ids = match controller.get_input_device_ids() {
+            Ok(ids) => ids,
+            Err(err) => {
+                trace!("Could not list input devices to record levels: {}", err);
+                Vec::new()
+            }
+        };
+        controller.record_audible_levels(&ids);
         controller.muted = controller.is_muted_all()?;
         controller.desired_muted = controller.muted;
+        controller.refresh_device_states(&ids, Instant::now());
         Ok(controller)
     }
 
@@ -1360,6 +1432,7 @@ impl<B: AudioBackend> MicController<B> {
         let end_state = state_name(state);
         let mut failures = Vec::new();
         let mut polled = Vec::with_capacity(ids.len());
+        self.failed_devices.clear();
         for id in &ids {
             let name = self.backend.device_name(*id)?;
             let key = device_key(&self.backend, *id);
@@ -1370,7 +1443,7 @@ impl<B: AudioBackend> MicController<B> {
                     name
                 );
                 self.release_excluded_device(*id, &key, state);
-                polled.push((*id, key));
+                polled.push((*id, name, key));
                 continue;
             }
             trace!("Setting mute={} for {}", state, name);
@@ -1388,25 +1461,40 @@ impl<B: AudioBackend> MicController<B> {
                         err
                     );
                     failures.push(format!("{} ({})", name, err));
+                    self.failed_devices.insert(key.clone());
                 }
             }
-            polled.push((*id, key));
+            polled.push((*id, name, key));
         }
         // An excluded device that disconnects gets another restore attempt when it is back.
         self.released_excluded
-            .retain(|key| polled.iter().any(|(_, polled_key)| polled_key == key));
+            .retain(|key| polled.iter().any(|(_, _, polled_key)| polled_key == key));
         // Drop the entries of devices that unmuting restored; a no-op when nothing changed.
         self.journal.save_logged();
 
-        // One reading per device decides both `muted` and whether every device reached `state`.
+        // One reading per device decides `muted`, whether every device reached `state`, and
+        // what the Microphones menu shows.
         let readings: Vec<Result<Reading>> = polled
             .iter()
-            .map(|(id, key)| self.read_device(*id, key))
+            .map(|(id, _, key)| self.read_device(*id, key))
             .collect();
         self.muted = readings.iter().all(Result::is_ok)
             && are_controlled_devices_muted(
                 readings.iter().filter_map(|r| r.as_ref().ok().copied()),
             );
+        let states = polled
+            .into_iter()
+            .zip(&readings)
+            .map(|((_, name, key), reading)| {
+                self.device_state(name, &key, reading.as_ref().ok().copied())
+            })
+            .collect();
+        self.snapshot = DeviceSnapshot {
+            states,
+            ids,
+            read_at: Some(now),
+            is_stale: false,
+        };
         if !failures.is_empty() {
             return Err(anyhow!(
                 "failed to {} {} input device(s): {}",
@@ -1476,7 +1564,65 @@ impl<B: AudioBackend> MicController<B> {
             .retain(|key| is_excluded_by(excluded, key));
         self.release_newly_excluded(&newly_excluded);
         self.muted = self.is_muted_all().unwrap_or(false);
+        self.snapshot.is_stale = true;
         true
+    }
+
+    /// Each connected input device and its state for the tray's Microphones menu, as the last
+    /// poll read them. While unmuted, they're read again every
+    /// [`DEVICE_STATES_REFRESH_INTERVAL`], and when a device comes or goes.
+    pub fn device_states(&self) -> &[DeviceState] {
+        &self.snapshot.states
+    }
+
+    fn device_state(&self, name: String, key: &DeviceKey, reading: Option<Reading>) -> DeviceState {
+        let uid = match key {
+            DeviceKey::Uid(uid) => Some(uid.clone()),
+            DeviceKey::Session(_) => None,
+        };
+        DeviceState {
+            uid,
+            name,
+            status: device_status(reading, self.failed_devices.contains(key)),
+        }
+    }
+
+    /// Reads the device states again when they may be out of date: a device came or went, the
+    /// exclusions changed, or [`DEVICE_STATES_REFRESH_INTERVAL`] has passed.
+    fn refresh_device_states_if_due(&mut self, ids: &[AudioDeviceID], now: Instant) {
+        let snapshot = &self.snapshot;
+        let is_due = snapshot.is_stale
+            || snapshot.ids != ids
+            || snapshot.read_at.is_none_or(|read_at| {
+                now.saturating_duration_since(read_at) >= DEVICE_STATES_REFRESH_INTERVAL
+            });
+        if is_due {
+            self.refresh_device_states(ids, now);
+        }
+    }
+
+    /// Reads the name, UID, and state of every device in `ids` for the Microphones menu. The
+    /// failures it shows are the last `mute_all`'s.
+    fn refresh_device_states(&mut self, ids: &[AudioDeviceID], now: Instant) {
+        let mut states = Vec::with_capacity(ids.len());
+        for id in ids {
+            let name = self.backend.device_name(*id).unwrap_or_else(|err| {
+                trace!("Could not read the name of audio device {}: {}", id, err);
+                format!("Audio device {}", id)
+            });
+            let key = device_key(&self.backend, *id);
+            let reading = self.read_device(*id, &key);
+            if let Err(err) = &reading {
+                trace!("Could not read audio device {}: {}: {}", id, name, err);
+            }
+            states.push(self.device_state(name, &key, reading.ok()));
+        }
+        self.snapshot = DeviceSnapshot {
+            states,
+            ids: ids.to_vec(),
+            read_at: Some(now),
+            is_stale: false,
+        };
     }
 
     /// Restores the connected devices among `uids` that the journal lists.
@@ -1544,8 +1690,23 @@ impl<B: AudioBackend> MicController<B> {
 
     /// Runs on every poll while the user's intent is unmuted.
     pub fn watch_unmuted(&mut self) {
+        self.watch_unmuted_at(Instant::now());
+    }
+
+    /// [`Self::watch_unmuted`] at `now`, which decides whether the device states are due a read.
+    fn watch_unmuted_at(&mut self, now: Instant) {
         self.restore_reconnected_devices();
-        self.record_audible_levels();
+        let ids = match self.get_input_device_ids() {
+            Ok(ids) => ids,
+            Err(err) => {
+                trace!("Could not list input devices to record levels: {}", err);
+                return;
+            }
+        };
+        // Reconnects while unmuted count too: the next mute retries such a device at once.
+        self.note_input_devices(&ids);
+        self.record_audible_levels(&ids);
+        self.refresh_device_states_if_due(&ids, now);
     }
 
     /// Restores journaled devices that joined the connected set since the last poll: devices
@@ -1597,19 +1758,10 @@ impl<B: AudioBackend> MicController<B> {
         }
     }
 
-    /// Records the level of every volume-controlled device that is audible now.
-    fn record_audible_levels(&mut self) {
-        let ids = match self.get_input_device_ids() {
-            Ok(ids) => ids,
-            Err(err) => {
-                trace!("Could not list input devices to record levels: {}", err);
-                return;
-            }
-        };
-        // Reconnects while unmuted count too: the next mute retries such a device at once.
-        self.note_input_devices(&ids);
+    /// Records the level of every device in `ids` that is volume-controlled and audible now.
+    fn record_audible_levels(&mut self, ids: &[AudioDeviceID]) {
         for id in ids {
-            if let Err(err) = self.record_audible_level(id) {
+            if let Err(err) = self.record_audible_level(*id) {
                 trace!("Could not record the input level of device {}: {}", id, err);
             }
         }
@@ -1667,6 +1819,8 @@ mod tests {
         volume: Option<f32>,
         fail_uid: bool,
         fail_input_channels: bool,
+        /// Reading the native mute fails, as for a device that stops responding.
+        fail_get_mute: bool,
         fail_set_mute: bool,
         fail_set_volume: bool,
         ignore_set_mute: bool,
@@ -1684,6 +1838,7 @@ mod tests {
                 volume,
                 fail_uid: false,
                 fail_input_channels: false,
+                fail_get_mute: false,
                 fail_set_mute: false,
                 fail_set_volume: false,
                 ignore_set_mute: false,
@@ -1839,7 +1994,11 @@ mod tests {
         }
 
         fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
-            Ok(self.device(audio_device_id)?.mute)
+            let device = self.device(audio_device_id)?;
+            if device.fail_get_mute {
+                return Err(anyhow!("fake mute read failure"));
+            }
+            Ok(device.mute)
         }
 
         fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>> {
@@ -3286,5 +3445,221 @@ mod tests {
 
         assert!(controller.backend.writes.is_empty());
         assert!(controller.muted);
+    }
+
+    // Device states for the Microphones menu
+
+    fn statuses(controller: &MicController<FakeBackend>) -> Vec<(&str, DeviceStatus)> {
+        controller
+            .device_states()
+            .iter()
+            .map(|state| (state.name.as_str(), state.status))
+            .collect()
+    }
+
+    fn status_of(controller: &MicController<FakeBackend>, name: &str) -> Option<DeviceStatus> {
+        controller
+            .device_states()
+            .iter()
+            .find(|state| state.name == name)
+            .map(|state| state.status)
+    }
+
+    #[test]
+    fn device_status_shows_exclusions_then_failures_then_the_reading() {
+        use DeviceStatus::*;
+        let native = |state| Some(Reading::State(MuteControl::Native, state));
+        let volume = |state| Some(Reading::State(MuteControl::Volume, state));
+        let cases = [
+            (native(Some(true)), false, Muted),
+            (volume(Some(true)), false, MutedByVolume),
+            (native(Some(false)), false, Unmuted),
+            (volume(Some(false)), false, Unmuted),
+            (Some(Reading::IgnoresWrites), false, IgnoresWrites),
+            (Some(Reading::NoControl), false, NoControl),
+            (Some(Reading::Excluded), false, Excluded),
+            (Some(Reading::Excluded), true, Excluded),
+            (native(Some(false)), true, Failed),
+            (native(None), false, Failed),
+            (None, false, Failed),
+        ];
+        for (reading, has_failed, status) in cases {
+            assert_eq!(
+                device_status(reading, has_failed),
+                status,
+                "{reading:?}, failed {has_failed}"
+            );
+        }
+    }
+
+    #[test]
+    fn device_states_show_what_a_mute_did_to_each_device() {
+        let mut broken = Device::native("Broken Mic", false);
+        broken.fail_set_mute = true;
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::fallback("USB Mic", 0.65)),
+            (3, Device::ignoring_writes("Teams Audio")),
+            (4, Device::no_control("iPhone Mic")),
+            (5, broken),
+            (6, Device::native("Steam Mic", false)),
+        ]);
+        let mut controller = Stores::default().launch_excluding(backend, &["Steam Mic"]);
+
+        assert!(controller.mute_all(true).is_err());
+
+        use DeviceStatus::*;
+        assert_eq!(
+            statuses(&controller),
+            [
+                ("Built-in", Muted),
+                ("USB Mic", MutedByVolume),
+                ("Teams Audio", IgnoresWrites),
+                ("iPhone Mic", NoControl),
+                ("Broken Mic", Failed),
+                ("Steam Mic", Excluded),
+            ]
+        );
+        let uids: Vec<_> = controller
+            .device_states()
+            .iter()
+            .map(|state| state.uid.clone())
+            .collect();
+        assert_eq!(uids[0].as_deref(), Some("Built-in UID"));
+        assert!(uids.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn device_states_are_read_at_startup_and_follow_each_toggle() {
+        let mut controller = controller(native_and_volume_devices());
+        use DeviceStatus::*;
+        assert_eq!(
+            statuses(&controller),
+            [("Built-in", Unmuted), ("USB Mic", Unmuted)]
+        );
+
+        controller.toggle(None).unwrap();
+        assert_eq!(
+            statuses(&controller),
+            [("Built-in", Muted), ("USB Mic", MutedByVolume)]
+        );
+
+        controller.toggle(None).unwrap();
+        assert_eq!(
+            statuses(&controller),
+            [("Built-in", Unmuted), ("USB Mic", Unmuted)]
+        );
+    }
+
+    #[test]
+    fn device_whose_unmute_failed_shows_failed_until_the_next_toggle() {
+        let mut controller = controller(native_and_volume_devices());
+        let start = Instant::now();
+        controller.mute_all_at(true, start).unwrap();
+        controller.backend.device_mut(2).unwrap().fail_set_volume = true;
+        assert!(controller.mute_all_at(false, start).is_err());
+
+        controller.watch_unmuted_at(start + DEVICE_STATES_REFRESH_INTERVAL);
+        assert_eq!(
+            status_of(&controller, "USB Mic"),
+            Some(DeviceStatus::Failed)
+        );
+
+        controller.backend.device_mut(2).unwrap().fail_set_volume = false;
+        controller.mute_all(false).unwrap();
+        assert_eq!(
+            status_of(&controller, "USB Mic"),
+            Some(DeviceStatus::Unmuted)
+        );
+    }
+
+    #[test]
+    fn device_states_while_unmuted_are_read_again_once_the_interval_has_passed() {
+        let mut controller = controller(native_and_volume_devices());
+        // After the startup read, so that read is never in the future.
+        let start = Instant::now();
+        // Muted by someone else; the unmuted poll writes nothing.
+        controller.backend.device_mut(1).unwrap().mute = Some(true);
+
+        controller.watch_unmuted_at(start + Duration::from_secs(1));
+        assert_eq!(
+            status_of(&controller, "Built-in"),
+            Some(DeviceStatus::Unmuted)
+        );
+
+        controller.watch_unmuted_at(start + DEVICE_STATES_REFRESH_INTERVAL);
+        assert_eq!(
+            status_of(&controller, "Built-in"),
+            Some(DeviceStatus::Muted)
+        );
+        assert!(controller.backend.writes.is_empty());
+    }
+
+    #[test]
+    fn device_states_while_unmuted_show_a_device_that_comes_or_goes_at_once() {
+        let start = Instant::now();
+        let mut controller = controller(native_and_volume_devices());
+
+        controller.backend.plug(5, Device::native("Headset", false));
+        controller.watch_unmuted_at(start);
+        assert_eq!(
+            status_of(&controller, "Headset"),
+            Some(DeviceStatus::Unmuted)
+        );
+
+        controller.backend.unplug(2);
+        controller.watch_unmuted_at(start);
+        assert_eq!(
+            statuses(&controller),
+            [
+                ("Built-in", DeviceStatus::Unmuted),
+                ("Headset", DeviceStatus::Unmuted)
+            ]
+        );
+    }
+
+    #[test]
+    fn device_states_show_a_new_exclusion_at_the_next_poll() {
+        let start = Instant::now();
+        let mut controller = controller(native_and_volume_devices());
+
+        controller.set_excluded(uids(&["USB Mic"]));
+        controller.watch_unmuted_at(start);
+
+        assert_eq!(
+            status_of(&controller, "USB Mic"),
+            Some(DeviceStatus::Excluded)
+        );
+    }
+
+    #[test]
+    fn device_states_while_unmuted_show_an_unreadable_device_as_failed() {
+        let mut controller = controller(native_and_volume_devices());
+        let start = Instant::now();
+        controller.backend.device_mut(1).unwrap().fail_get_mute = true;
+
+        controller.watch_unmuted_at(start + DEVICE_STATES_REFRESH_INTERVAL);
+
+        assert_eq!(
+            status_of(&controller, "Built-in"),
+            Some(DeviceStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn device_without_a_uid_is_listed_without_one() {
+        let mut device = Device::native("No UID", false);
+        device.fail_uid = true;
+
+        let controller = controller(FakeBackend::with_devices(vec![(1, device)]));
+
+        assert_eq!(
+            controller.device_states(),
+            [DeviceState {
+                uid: None,
+                name: "No UID".to_string(),
+                status: DeviceStatus::Unmuted,
+            }]
+        );
     }
 }

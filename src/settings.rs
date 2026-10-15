@@ -123,6 +123,21 @@ impl Settings {
             .map(|device| device.uid.clone())
             .collect()
     }
+
+    /// Excludes the device with `uid`, saving `name` with it, or includes it again when it is
+    /// excluded. Returns whether it is excluded now.
+    pub fn toggle_device_exclusion(&mut self, uid: &str, name: &str) -> bool {
+        let count = self.excluded_devices.len();
+        self.excluded_devices.retain(|device| device.uid != uid);
+        if self.excluded_devices.len() < count {
+            return false;
+        }
+        self.excluded_devices.push(ExcludedDevice {
+            uid: uid.to_string(),
+            name: name.to_string(),
+        });
+        true
+    }
 }
 
 /// Why settings.json can't be used.
@@ -886,6 +901,34 @@ mod tests {
         assert_eq!(
             settings.excluded_uids().into_iter().collect::<Vec<_>>(),
             ["Teams UID"]
+        );
+    }
+
+    #[test]
+    fn toggling_a_device_excludes_it_then_includes_it_again() {
+        let mut settings = Settings::default();
+
+        assert!(
+            settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Microsoft Teams Audio")
+        );
+        assert_eq!(settings.excluded_devices, vec![teams_audio()]);
+
+        assert!(!settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Renamed"));
+        assert!(settings.excluded_devices.is_empty());
+    }
+
+    #[test]
+    fn including_a_device_removes_every_entry_with_its_uid() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{ "excluded_devices": ["Teams UID", "Steam UID", { "uid": "Teams UID", "name": "Teams" }] }"#,
+        )
+        .unwrap();
+
+        assert!(!settings.toggle_device_exclusion("Teams UID", "Teams"));
+
+        assert_eq!(
+            settings.excluded_uids().into_iter().collect::<Vec<_>>(),
+            ["Steam UID"]
         );
     }
 

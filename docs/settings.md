@@ -90,6 +90,8 @@ Lists the input devices Mic Mute leaves alone. It never mutes, unmutes, or keeps
 
 An entry can also be the bare UID, as in `"excluded_devices": ["MSLoopbackDriverDevice_UID"]`; Mic Mute saves such an entry back unchanged. A device whose UID can't be read is never excluded.
 
+The tray menu's **Microphones** submenu edits this list. It shows every connected input device, checked while Mic Mute controls it: unchecking a device adds it to the list with its name, and checking it removes it. Excluded devices that aren't connected are listed as `Excluded, not connected`, so they can be checked again; a device whose UID can't be read can't be unchecked. Each row also shows the device's state: `Muted`, `Muted by input volume`, `Unmuted`, `Skipped: ignores mute` (it accepts mute and volume changes but ignores them), `Skipped: no mute control`, `Failed` (its last mute or unmute failed, or its state can't be read), or `Excluded`. **Open Sound Settings…** opens System Settings at Sound → Input.
+
 **An excluded microphone may be live while the tray and popup show muted.** Excluding a device that Mic Mute muted undoes what Mic Mute changed, as quitting would: it turns native mute off or restores the input volume. A device that was already muted when Mic Mute muted the others stays muted. If that restore fails, Mic Mute tries again on the next unmute, when the device reconnects, and on quit. Removing a device from the list while mute is on mutes it as soon as Mic Mute applies the change. If every input device is excluded or can't be controlled, Mic Mute doesn't show muted.
 
 About → Reset Settings empties the list.
