@@ -1,5 +1,8 @@
 use libc::c_void;
 use parking_lot::RwLock;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 type CGFloat = f64;
@@ -27,6 +30,43 @@ pub fn get_cursor_pos() -> Option<(f64, f64)> {
         CFRelease(event);
         Some((point.x, point.y))
     }
+}
+
+/// Replaces `path` with `contents` atomically: writes `<name>.tmp` in the same directory,
+/// flushes it to disk, then renames it over `path`, so readers never see a partial file.
+///
+/// A symlinked `path` keeps its link: the file it points to is replaced. Missing parent
+/// directories are created. The flush is a full fsync (`F_FULLFSYNC`, several ms), so keep
+/// this off hot paths.
+pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Replace the link's target rather than the link (e.g. a settings file kept in a dotfiles
+    // repository). A missing file has nothing to resolve.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let file_name = target.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has no file name", target.display()),
+        )
+    })?;
+    if let Some(dir) = target.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = target.with_file_name(tmp_name);
+
+    let result = write_synced(&tmp, contents).and_then(|()| fs::rename(&tmp, &target));
+    if result.is_err() {
+        // Best effort: the write error is the one worth reporting.
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 pub fn arc_lock<T>(value: T) -> Arc<RwLock<T>> {
