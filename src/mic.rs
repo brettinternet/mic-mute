@@ -1137,7 +1137,9 @@ impl<B: AudioBackend> MicController<B> {
     }
 
     fn record_audible_level(&mut self, audio_device_id: AudioDeviceID) -> Result<()> {
-        if mute_control(&self.backend, audio_device_id)? != Some(MuteControl::Volume) {
+        // Same test as `mute_control`, reading the volume only once. Devices with native
+        // mute keep their level, so they need no record.
+        if self.backend.is_mute_settable(audio_device_id)? {
             return Ok(());
         }
         let Some(volume) = self.backend.get_volume(audio_device_id)? else {
