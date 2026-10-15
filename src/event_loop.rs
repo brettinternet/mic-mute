@@ -101,6 +101,17 @@ pub fn start(
     let settings_poll_interval = Duration::from_secs(2);
     let mut last_settings_check = Instant::now();
     let mut last_settings_mtime = Settings::mtime();
+    // main() runs on the defaults when settings.json is invalid at startup; the first loop
+    // pass says so in the tray. A file that breaks later keeps the previous settings.
+    use crate::settings::Fallback;
+    let mut startup_settings_notice = Settings::load()
+        .err()
+        .map(|err| err.notice(Fallback::Defaults));
+    let mut settings_fallback = if startup_settings_notice.is_some() {
+        Fallback::Defaults
+    } else {
+        Fallback::Previous
+    };
 
     // Camera detection runs expensive Cocoa/CMIO calls; offload to a background
     // thread so it never blocks the main event loop. Results are delivered back
@@ -218,23 +229,50 @@ pub fn start(
             }
         }
 
+        // Once: settings.json was unusable at startup, so main() fell back to the defaults.
+        if let Some(notice) = startup_settings_notice.take() {
+            if let Err(e) = ui.write().set_settings_notice(Some(&notice)) {
+                log::error!("Failed to show settings notice: {}", e);
+            }
+        }
+
         // Reload settings if the file has been modified since we last checked.
         if last_settings_check.elapsed() >= settings_poll_interval {
             last_settings_check = Instant::now();
             let current_mtime = Settings::mtime();
             if current_mtime != last_settings_mtime {
                 last_settings_mtime = current_mtime;
-                trace!("settings.json changed on disk — reloading");
-                let new_settings = Settings::load();
-                let mut s = settings.write();
-                *s = new_settings.clone();
-                drop(s);
-                let mut ui_w = ui.write();
-                if let Err(e) = ui_w.apply_settings(&new_settings) {
-                    log::error!("Failed to apply reloaded settings: {}", e);
+                let notice = if Settings::take_own_save(current_mtime) {
+                    // Saved by the app itself (a tray toggle or About): memory already
+                    // matches the file, and the app only ever writes a valid file.
+                    trace!("settings.json changed by the app's own save");
+                    settings_fallback = Fallback::Previous;
+                    None
                 } else {
-                    shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
-                    trace!("Settings reloaded from settings.json");
+                    trace!("settings.json changed on disk — reloading");
+                    match Settings::load() {
+                        Ok(new_settings) => {
+                            *settings.write() = new_settings.clone();
+                            settings_fallback = Fallback::Previous;
+                            let mut ui_w = ui.write();
+                            if let Err(e) = ui_w.apply_settings(&new_settings) {
+                                log::error!("Failed to apply reloaded settings: {}", e);
+                            } else {
+                                shortcut_mic.store(ui_w.mic_shortcut_id(), Ordering::Relaxed);
+                                trace!("Settings reloaded from settings.json");
+                            }
+                            None
+                        }
+                        Err(err) => {
+                            // Apply nothing from a broken file. Only a new mtime triggers a
+                            // reload, so this warns once per change to the file.
+                            log::warn!("{}; keeping the current settings", err);
+                            Some(err.notice(settings_fallback))
+                        }
+                    }
+                };
+                if let Err(e) = ui.write().set_settings_notice(notice.as_deref()) {
+                    log::error!("Failed to update settings notice: {}", e);
                 }
             }
         }

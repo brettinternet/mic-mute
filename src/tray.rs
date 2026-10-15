@@ -54,6 +54,12 @@ pub struct Tray {
     pub show_popup: CheckMenuItem,
     pub about: MenuItem,
     pub quit: MenuItem,
+    /// The menu `systray` shows; kept to insert and remove the settings notice.
+    menu: Menu,
+    /// Tooltip while settings.json is usable.
+    tooltip: String,
+    /// Disabled first menu item, and the separator below it, while settings.json is unusable.
+    settings_notice: Option<(MenuItem, PredefinedMenuItem)>,
 }
 
 impl Tray {
@@ -90,9 +96,10 @@ impl Tray {
             ])
             .context("Failed to append menu items")?;
 
+        let tooltip = format!("{} service is running", app_vars.name);
         let systray = TrayIconBuilder::new()
-            .with_menu(Box::new(tray_menu))
-            .with_tooltip(format!("{} service is running", app_vars.name))
+            .with_menu(Box::new(tray_menu.clone()))
+            .with_tooltip(&tooltip)
             .with_icon(icon)
             .with_menu_on_left_click(true)
             .build()
@@ -107,6 +114,9 @@ impl Tray {
             show_popup,
             about,
             quit,
+            menu: tray_menu,
+            tooltip,
+            settings_notice: None,
         };
         Ok(tray)
     }
@@ -185,6 +195,41 @@ impl Tray {
 
     pub fn quit_id(&self) -> &MenuId {
         self.quit.id()
+    }
+
+    /// Shows `notice` as a disabled first menu item and as the tooltip; `None` removes it.
+    /// Does nothing when the notice is unchanged.
+    pub fn set_settings_notice(&mut self, notice: Option<&str>) -> Result<()> {
+        let shown = self.settings_notice.as_ref().map(|(item, _)| item.text());
+        if shown.as_deref() == notice {
+            return Ok(());
+        }
+        match (notice, self.settings_notice.take()) {
+            (Some(text), Some((item, separator))) => {
+                item.set_text(text);
+                self.settings_notice = Some((item, separator));
+            }
+            (Some(text), None) => {
+                let item = MenuItem::new(text, false, None);
+                let separator = PredefinedMenuItem::separator();
+                self.menu
+                    .prepend_items(&[&item, &separator])
+                    .context("Failed to add settings notice to tray menu")?;
+                self.settings_notice = Some((item, separator));
+            }
+            (None, Some((item, separator))) => {
+                self.menu
+                    .remove(&item)
+                    .and_then(|()| self.menu.remove(&separator))
+                    .context("Failed to remove settings notice from tray menu")?;
+            }
+            (None, None) => {}
+        }
+        self.systray
+            .set_tooltip(Some(notice.unwrap_or(&self.tooltip)))
+            .context("Failed to update tray tooltip")?;
+        trace!("Updated settings notice: {:?}", notice);
+        Ok(())
     }
 }
 
