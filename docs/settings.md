@@ -6,7 +6,7 @@ Mic Mute stores its settings at:
 ~/Library/Application Support/mic-mute/settings.json
 ```
 
-The settings file shares its folder with three files Mic Mute manages itself, none of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (the next launch restores them after a crash); `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume; and `mute-state.json`, which remembers whether you last muted or unmuted, for [`launch_state`](#launch_state).
+The settings file shares its folder with three files Mic Mute manages itself, none of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (after a crash, the next launch restores them, or keeps them muted when it mutes at launch); `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume; and `mute-state.json`, which remembers whether you last muted or unmuted, for [`launch_state`](#launch_state).
 
 The tray menu's **Settings…** item opens a [Settings window](#settings-window) that changes every option below except `excluded_devices`, which the tray's Microphones menu edits. The file is JSON. The complete default configuration is:
 
@@ -150,7 +150,7 @@ macOS limits these notifications:
 
 Controls what the mute shortcut does.
 
-- `"toggle"` (default): each press mutes or unmutes.
+- `"toggle"` (default): each press mutes or unmutes, following what the tray shows. While a microphone that can't be muted keeps the tray at unmuted, a press mutes again and retries it.
 - `"push_to_talk"`: holding the shortcut unmutes the microphones, and releasing it mutes them again.
 
 In push-to-talk mode the microphones rest muted:
@@ -178,7 +178,7 @@ Controls whether Mic Mute mutes the microphones when it starts.
 - `"muted"`: mute every microphone.
 - `"last"`: mute them if you last chose mute before Mic Mute quit; otherwise leave them as they are.
 
-Mic Mute never unmutes at launch, and in push-to-talk mode it always mutes. Quitting restores the microphones Mic Mute muted, so with `"last"`, quitting while muted and starting again leaves them muted. Mic Mute remembers your last choice in `mute-state.json`, not in `settings.json`.
+Mic Mute never unmutes at launch, and in push-to-talk mode it always mutes. Quitting restores the microphones Mic Mute muted, so with `"last"`, quitting while muted and starting again leaves them muted. After a crash or `kill -9`, a launch that mutes keeps the microphones Mic Mute had muted as they are instead of restoring them first, so they're never live in between. Mic Mute remembers your last choice in `mute-state.json`, not in `settings.json`.
 
 ### `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`
 
