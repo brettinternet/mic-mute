@@ -15,7 +15,8 @@ use crate::utils::write_atomically;
 use anyhow::{anyhow, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2::ClassType;
+use objc2::{ClassType, MainThreadMarker};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::NSError;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use std::ffi::OsStr;
@@ -135,22 +136,37 @@ pub fn menu_title(needs_approval: bool) -> &'static str {
     }
 }
 
+/// Whether `set(wanted)` must run: only when `wanted` differs from `last_applied`, the value
+/// macOS last took (`set`) or that startup mirrored from it (`reconcile`). `None` after a failed
+/// `set`: macOS may hold either value, so the next one runs. Pushing an unchanged value after
+/// every settings change would register again a login item the user removed in System
+/// Settings.
+pub fn should_push(wanted: bool, last_applied: Option<bool>) -> bool {
+    last_applied != Some(wanted)
+}
+
 fn publish(state: Option<LoginItemState>) {
     let needs_approval = state == Some(LoginItemState::RequiresApproval);
     NEEDS_APPROVAL.store(needs_approval, Ordering::Relaxed);
 }
 
-/// Toggle the app's dock icon visibility at runtime.
+/// Toggle the app's dock icon visibility at runtime. Main thread only, like every AppKit call;
+/// elsewhere it logs instead.
 ///
 /// `true`  → NSApplicationActivationPolicyRegular (shows in Dock + Cmd-Tab)
 /// `false` → NSApplicationActivationPolicyAccessory (no Dock icon, default)
 pub fn set_dock_visible(visible: bool) {
-    // NSApplicationActivationPolicyRegular = 0
-    // NSApplicationActivationPolicyAccessory = 1
-    let policy: i64 = if visible { 0 } else { 1 };
-    unsafe {
-        let app: cocoa::base::id = objc::msg_send![objc::class!(NSApplication), sharedApplication];
-        let _: () = objc::msg_send![app, setActivationPolicy: policy];
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::error!("Failed to show or hide the Dock icon: not on the main thread");
+        return;
+    };
+    let policy = if visible {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if !NSApplication::sharedApplication(mtm).setActivationPolicy(policy) {
+        log::warn!("macOS refused the activation policy {:?}", policy);
     }
 }
 
@@ -761,6 +777,27 @@ mod tests {
             Some(Disabled)
         );
         assert_eq!(state_seen_outside_bundle(Mechanism::LoginItem, false), None);
+    }
+
+    #[test]
+    fn an_unchanged_setting_is_not_pushed_to_macos() {
+        for value in [true, false] {
+            assert!(!should_push(value, Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_toggled_setting_is_pushed_to_macos() {
+        for value in [true, false] {
+            assert!(should_push(!value, Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn every_value_is_pushed_after_a_failed_push() {
+        for value in [true, false] {
+            assert!(should_push(value, None), "{value}");
+        }
     }
 
     #[test]

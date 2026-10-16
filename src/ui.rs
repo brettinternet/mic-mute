@@ -43,6 +43,9 @@ pub struct UI {
     feedback: Feedback,
     /// How long the popup shows "Mic on" after the user unmutes (`popup_mic_on_ms`).
     mic_on_flash: Duration,
+    /// The `launch_at_login` value macOS last took, or that startup mirrored from it; `None`
+    /// after a failed push (`launch_at_login::should_push`).
+    launch_at_login_applied: Option<bool>,
 }
 
 impl UI {
@@ -97,6 +100,8 @@ impl UI {
             camera_muted,
             feedback: Feedback::new(settings.play_sound, settings.show_notification),
             mic_on_flash: settings.popup_mic_on_ms.value().duration(),
+            // main() mirrored the login item into the setting before the loop started.
+            launch_at_login_applied: Some(settings.launch_at_login),
         };
         ui.show_launch_at_login(settings.launch_at_login);
         ui.sync_shortcut();
@@ -202,11 +207,21 @@ impl UI {
         self.mic_on_flash
     }
 
-    /// Registers or removes the login item (a LaunchAgent on macOS 11 and 12), then shows the
-    /// result on the tray's Launch at Login item.
+    /// Registers or removes the login item (a LaunchAgent on macOS 11 and 12) when `enabled`
+    /// differs from what macOS last took or startup mirrored from it, then shows the result on
+    /// the tray's Launch at Login item. `apply_settings` runs this after every settings change,
+    /// so an unchanged value leaves macOS alone: pushing it again would register a login item
+    /// the user removed in System Settings. A tray click flips the value, so it pushes unless
+    /// macOS already has the new one.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
-        if let Err(e) = crate::launch_at_login::set(enabled) {
-            log::error!("Failed to apply launch_at_login setting: {:#}", e);
+        if crate::launch_at_login::should_push(enabled, self.launch_at_login_applied) {
+            self.launch_at_login_applied = match crate::launch_at_login::set(enabled) {
+                Ok(()) => Some(enabled),
+                Err(e) => {
+                    log::error!("Failed to apply launch_at_login setting: {:#}", e);
+                    None
+                }
+            };
         }
         self.show_launch_at_login(enabled);
     }

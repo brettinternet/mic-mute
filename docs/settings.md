@@ -73,6 +73,8 @@ Controls whether Mic Mute opens when the user logs in.
 
 The tray menu can also toggle this setting. macOS keeps the login item itself, so each launch sets `launch_at_login` to match it: removing Mic Mute from System Settings → General → Login Items turns the setting off.
 
+Mic Mute changes the login item only when `launch_at_login` changes, from the tray or in this file, so saving another setting never adds back a login item you removed. While Mic Mute runs, it doesn't notice a removal in System Settings: the tray item stays checked until the next launch, and turning it off and on again from the tray registers the login item again. If changing the login item fails, the log says so, and the next settings change tries again.
+
 - **macOS 13 and later:** Mic Mute registers itself as a login item (`SMAppService`), listed in System Settings → General → Login Items under Open at Login. macOS finds the app wherever it's moved. If macOS waits for your approval, the setting stays on, the log warns, and the tray item reads "Launch at Login (Approve in System Settings)"; turning the setting on from the tray then opens Login Items. If the login item can't be registered, Mic Mute logs a warning and uses the LaunchAgent below instead.
 - **macOS 11 and 12:** Mic Mute writes the LaunchAgent `~/Library/LaunchAgents/com.brettinternet.mic-mute.plist`. Each launch of the app bundle points it at the bundle's current location, so moving the app doesn't break it.
 - **After upgrading** on macOS 13 and later, the first launch replaces a LaunchAgent from an earlier version with a login item, then deletes the plist so Mic Mute doesn't open twice. While the login item can't be registered or waits for your approval, the LaunchAgent stays and keeps opening Mic Mute.

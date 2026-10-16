@@ -2,33 +2,24 @@
 //! going to sleep, and a switch to another user. Each can swallow a held push-to-talk
 //! shortcut's release, and the `mute_on_*` settings mute on them (`mute_triggers.rs`).
 //!
-//! An observer, an instance of a class declared with `ClassDecl`, receives them from
+//! An observer, an instance of a class defined with `define_class!`, receives them from
 //! NSWorkspace's notification center and from the distributed notification center
 //! (`com.apple.screenIsLocked`, `com.apple.screensaver.didstart`). Like About's buttons, its
 //! methods only record the event; the event loop takes it with `SessionEvents::take` and acts.
 
-use anyhow::{anyhow, bail, Result};
-use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
-use objc::declare::ClassDecl;
-use objc::runtime::{Class, Object, Sel};
+use anyhow::{bail, Result};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, NSObject, Sel};
+use objc2::{define_class, msg_send, sel, AnyThread, ClassType};
+use objc2_app_kit::{
+    NSWorkspace, NSWorkspaceScreensDidSleepNotification,
+    NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification,
+};
+use objc2_foundation::{
+    ns_string, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSNotificationName, NSNotificationSuspensionBehavior,
+};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
-
-#[link(name = "AppKit", kind = "framework")]
-extern "C" {
-    static NSWorkspaceWillSleepNotification: id;
-    static NSWorkspaceScreensDidSleepNotification: id;
-    static NSWorkspaceSessionDidResignActiveNotification: id;
-}
-
-/// `NSNotificationSuspensionBehaviorDeliverImmediately = 4`, an `NSUInteger` (Foundation
-/// `NSDistributedNotificationCenter.h`): delivered even while distributed notifications are
-/// suspended for the app.
-const DELIVER_IMMEDIATELY: u64 = 4;
-
-/// The Objective-C class of the observer, declared at runtime.
-const OBSERVER_CLASS_NAME: &str = "MicMuteSessionEventObserver";
 
 /// A session event the app reacts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +41,9 @@ pub enum SessionEvent {
 /// Where a session event's notification comes from.
 enum Source {
     /// NSWorkspace's notification center, with AppKit's name for the notification.
-    Workspace(id),
+    Workspace(&'static NSNotificationName),
     /// The distributed notification center, with the notification's name.
-    Distributed(&'static str),
+    Distributed(&'static NSNotificationName),
 }
 
 impl SessionEvent {
@@ -86,23 +77,20 @@ impl SessionEvent {
         }
     }
 
-    fn from_selector(selector: Sel) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|event| event.selector() == selector)
-    }
-
-    /// # Safety
-    ///
-    /// Reads AppKit's notification name constants.
-    unsafe fn source(self) -> Source {
+    fn source(self) -> Source {
+        // SAFETY (each `unsafe`): reads one of AppKit's notification name constants, which
+        // every supported macOS defines.
         match self {
-            Self::ScreenLocked => Source::Distributed("com.apple.screenIsLocked"),
-            Self::ScreenSaverStarted => Source::Distributed("com.apple.screensaver.didstart"),
-            Self::WillSleep => Source::Workspace(NSWorkspaceWillSleepNotification),
-            Self::ScreensDidSleep => Source::Workspace(NSWorkspaceScreensDidSleepNotification),
+            Self::ScreenLocked => Source::Distributed(ns_string!("com.apple.screenIsLocked")),
+            Self::ScreenSaverStarted => {
+                Source::Distributed(ns_string!("com.apple.screensaver.didstart"))
+            }
+            Self::WillSleep => Source::Workspace(unsafe { NSWorkspaceWillSleepNotification }),
+            Self::ScreensDidSleep => {
+                Source::Workspace(unsafe { NSWorkspaceScreensDidSleepNotification })
+            }
             Self::SessionResignedActive => {
-                Source::Workspace(NSWorkspaceSessionDidResignActiveNotification)
+                Source::Workspace(unsafe { NSWorkspaceSessionDidResignActiveNotification })
             }
         }
     }
@@ -129,120 +117,108 @@ fn take_received() -> Vec<SessionEvent> {
         .collect()
 }
 
-/// The implementation of every observer method. The notification centers call it from their
-/// dispatch, so it only records the event its selector names: no AppKit calls, no locks, and no
-/// panics, which can't unwind into Objective-C and would abort the app.
-extern "C" fn session_event_received(_observer: &Object, selector: Sel, _notification: id) {
-    if let Some(event) = SessionEvent::from_selector(selector) {
-        record(event);
+define_class!(
+    /// Receives the session events' notifications, one method per event. The centers call it
+    /// from their dispatch, so each method only records its event: no AppKit calls, no locks,
+    /// and no panics, which would abort the app inside Objective-C.
+    // SAFETY: NSObject has no subclassing requirements, and the class implements no `Drop`.
+    // Unnamed: objc2 names it after this module and reuses a class already registered under
+    // that name, which can only be this one, so registering it never panics.
+    #[unsafe(super(NSObject))]
+    struct SessionEventObserver;
+
+    impl SessionEventObserver {
+        #[unsafe(method(screenLocked:))]
+        fn screen_locked(&self, _notification: Option<&NSNotification>) {
+            record(SessionEvent::ScreenLocked);
+        }
+
+        #[unsafe(method(screenSaverStarted:))]
+        fn screen_saver_started(&self, _notification: Option<&NSNotification>) {
+            record(SessionEvent::ScreenSaverStarted);
+        }
+
+        #[unsafe(method(willSleep:))]
+        fn will_sleep(&self, _notification: Option<&NSNotification>) {
+            record(SessionEvent::WillSleep);
+        }
+
+        #[unsafe(method(screensDidSleep:))]
+        fn screens_did_sleep(&self, _notification: Option<&NSNotification>) {
+            record(SessionEvent::ScreensDidSleep);
+        }
+
+        #[unsafe(method(sessionResignedActive:))]
+        fn session_resigned_active(&self, _notification: Option<&NSNotification>) {
+            record(SessionEvent::SessionResignedActive);
+        }
+    }
+);
+
+impl SessionEventObserver {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(());
+        // SAFETY: NSObject's initializer; the class adds no state to set up.
+        unsafe { msg_send![super(this), init] }
     }
 }
 
-/// Whether `class` has a method for every event, so no notification reaches a missing one.
-fn handles_every_event(class: &Class) -> bool {
+/// Whether `class` has a method for every event: a center that sends a selector the observer
+/// doesn't implement raises an exception, which aborts the app.
+fn handles_every_event(class: &AnyClass) -> bool {
     SessionEvent::ALL
         .into_iter()
         .all(|event| class.instance_method(event.selector()).is_some())
 }
 
-/// The observer class, declared and registered on first use.
-fn observer_class() -> Result<&'static Class> {
-    static CLASS: OnceLock<Option<&'static Class>> = OnceLock::new();
-    CLASS
-        .get_or_init(declare_observer_class)
-        .ok_or_else(|| anyhow!("Failed to declare the Objective-C class {OBSERVER_CLASS_NAME}"))
-}
-
-fn declare_observer_class() -> Option<&'static Class> {
-    let superclass = Class::get("NSObject")?;
-    let Some(mut decl) = ClassDecl::new(OBSERVER_CLASS_NAME, superclass) else {
-        // The name is taken. Use that class only if it handles every event.
-        return Class::get(OBSERVER_CLASS_NAME).filter(|class| handles_every_event(class));
-    };
-    for event in SessionEvent::ALL {
-        // SAFETY: `session_event_received` takes the receiver, the selector, and the one object
-        // argument (the NSNotification) of every event's method, and returns nothing.
-        unsafe {
-            decl.add_method(
-                event.selector(),
-                session_event_received as extern "C" fn(&Object, Sel, id),
-            );
-        }
-    }
-    Some(decl.register())
-}
-
-/// NSWorkspace's notification center, or nil.
-///
-/// # Safety
-///
-/// Main thread only.
-unsafe fn workspace_center() -> id {
-    let Some(class) = Class::get("NSWorkspace") else {
-        return nil;
-    };
-    let workspace: id = msg_send![class, sharedWorkspace];
-    msg_send![workspace, notificationCenter]
-}
-
-/// The distributed notification center, or nil.
-fn distributed_center() -> id {
-    let Some(class) = Class::get("NSDistributedNotificationCenter") else {
-        return nil;
-    };
-    // SAFETY: `defaultCenter` returns the shared center, which the caller doesn't own.
-    unsafe { msg_send![class, defaultCenter] }
-}
-
 /// Watches the session events while it lives: it adds its observer to both notification
-/// centers on creation and removes it on drop. Main thread only: it holds an Objective-C
-/// object, so it is neither `Send` nor `Sync`.
+/// centers on creation and removes it from both on drop. The event loop creates it on the main
+/// thread.
 pub struct SessionEvents {
-    /// Retained; released on drop, once neither center refers to it.
-    observer: id,
+    /// Released after `Drop` has removed it from both centers.
+    observer: Retained<SessionEventObserver>,
+    workspace_center: Retained<NSNotificationCenter>,
+    distributed_center: Retained<NSDistributedNotificationCenter>,
 }
 
 impl SessionEvents {
     pub fn new() -> Result<Self> {
-        let class = observer_class()?;
-        // SAFETY: `new` returns a retained instance, which `Drop` releases.
-        let observer: id = unsafe { msg_send![class, new] };
-        if observer.is_null() {
-            bail!("Failed to create the session event observer");
+        if !handles_every_event(SessionEventObserver::class()) {
+            bail!("The session event observer lacks a method for an event");
         }
-        let workspace = unsafe { workspace_center() };
-        let distributed = distributed_center();
-        if workspace.is_null() || distributed.is_null() {
-            unsafe {
-                let _: () = msg_send![observer, release];
-            }
-            bail!("Failed to find the workspace or the distributed notification center");
-        }
+        let observer = SessionEventObserver::new();
+        let workspace_center = NSWorkspace::sharedWorkspace().notificationCenter();
+        let distributed_center = NSDistributedNotificationCenter::defaultCenter();
         for event in SessionEvent::ALL {
             let selector = event.selector();
-            // SAFETY: main thread; the observer implements `selector` (`handles_every_event`)
-            // and stays registered no longer than it lives (`Drop`).
+            // SAFETY: the observer implements `selector` (`handles_every_event`), which takes
+            // the notification, and stays registered no longer than it lives (`Drop`).
             unsafe {
                 match event.source() {
-                    Source::Workspace(name) => {
-                        let _: () = msg_send![workspace, addObserver: observer
-                                                         selector: selector
-                                                             name: name
-                                                           object: nil];
-                    }
-                    Source::Distributed(name) => {
-                        let name = NSString::alloc(nil).init_str(name);
-                        let _: () = msg_send![distributed, addObserver: observer
-                                                           selector: selector
-                                                               name: name
-                                                             object: nil
-                                                 suspensionBehavior: DELIVER_IMMEDIATELY];
-                        let _: () = msg_send![name, release];
-                    }
+                    Source::Workspace(name) => workspace_center.addObserver_selector_name_object(
+                        &observer,
+                        selector,
+                        Some(name),
+                        None,
+                    ),
+                    // `NSNotificationSuspensionBehaviorDeliverImmediately` (4): delivered even
+                    // while distributed notifications are suspended for the app.
+                    Source::Distributed(name) => distributed_center
+                        .addObserver_selector_name_object_suspensionBehavior(
+                            &observer,
+                            selector,
+                            Some(name),
+                            None,
+                            NSNotificationSuspensionBehavior::DeliverImmediately,
+                        ),
                 }
             }
         }
-        Ok(Self { observer })
+        Ok(Self {
+            observer,
+            workspace_center,
+            distributed_center,
+        })
     }
 
     /// The events received since the last call, each once.
@@ -253,13 +229,10 @@ impl SessionEvents {
 
 impl Drop for SessionEvents {
     fn drop(&mut self) {
-        // SAFETY: main thread (`SessionEvents` isn't `Send`); both centers forget the observer
-        // before its release.
+        // SAFETY: both centers forget the observer before its release, which follows this body.
         unsafe {
-            let workspace = workspace_center();
-            let _: () = msg_send![workspace, removeObserver: self.observer];
-            let _: () = msg_send![distributed_center(), removeObserver: self.observer];
-            let _: () = msg_send![self.observer, release];
+            self.workspace_center.removeObserver(&self.observer);
+            self.distributed_center.removeObserver(&self.observer);
         }
     }
 }
@@ -267,15 +240,16 @@ impl Drop for SessionEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Explicit: `super::*` and main.rs's `#[macro_use] extern crate objc` both offer one.
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
 
     #[test]
     fn every_event_has_its_own_selector_and_bit() {
-        for event in SessionEvent::ALL {
-            assert_eq!(
-                SessionEvent::from_selector(event.selector()),
-                Some(event),
-                "{event:?}"
-            );
+        for (index, event) in SessionEvent::ALL.into_iter().enumerate() {
+            for other in SessionEvent::ALL.into_iter().skip(index + 1) {
+                assert_ne!(event.selector(), other.selector(), "{event:?}, {other:?}");
+            }
         }
         let bits = SessionEvent::ALL.map(SessionEvent::bit);
         let combined = bits.iter().fold(0, |all, bit| all | bit);
@@ -283,13 +257,17 @@ mod tests {
     }
 
     #[test]
-    fn other_selectors_name_no_event() {
-        assert_eq!(SessionEvent::from_selector(sel!(description)), None);
+    fn the_observer_class_handles_every_event() {
+        assert!(handles_every_event(SessionEventObserver::class()));
     }
 
-    #[test]
-    fn the_observer_class_handles_every_event() {
-        assert!(handles_every_event(observer_class().unwrap()));
+    /// Sends `selector` to `observer` as a center does, with a nil notification.
+    fn deliver(observer: &SessionEventObserver, selector: Sel) {
+        // SAFETY: every event's method takes one object and returns nothing; the result of
+        // `performSelector:withObject:` is never read.
+        let _: *mut AnyObject = unsafe {
+            msg_send![observer, performSelector: selector, withObject: None::<&AnyObject>]
+        };
     }
 
     // The only test that touches RECEIVED. It messages an observer directly, as the centers
@@ -297,15 +275,17 @@ mod tests {
     // notification centers.
     #[test]
     fn the_observer_records_each_event_once_until_taken() {
-        let class = observer_class().unwrap();
-        unsafe {
-            let observer: id = msg_send![class, new];
-            for event in SessionEvent::ALL {
-                let _: id = msg_send![observer, performSelector: event.selector() withObject: nil];
-            }
-            let _: () = msg_send![observer, screenLocked: nil];
-            let _: () = msg_send![observer, release];
+        let observer = SessionEventObserver::new();
+        for event in SessionEvent::ALL {
+            deliver(&observer, event.selector());
+            assert_eq!(take_received(), [event], "{event:?}");
         }
+
+        for event in SessionEvent::ALL {
+            deliver(&observer, event.selector());
+        }
+        // SAFETY: as in `deliver`.
+        let _: () = unsafe { msg_send![&observer, screenLocked: None::<&NSNotification>] };
 
         assert_eq!(take_received(), SessionEvent::ALL);
         assert_eq!(take_received(), []);

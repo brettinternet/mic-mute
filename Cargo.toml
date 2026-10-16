@@ -39,12 +39,31 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 ] }
 # SMAppService.mainApp (macOS 13+) for Launch at Login; NSError describes its failures.
 # NSBundle tells the installed app from a bare executable, which can't post notifications.
+# NSWorkspace's center and the distributed center deliver the session events; NSApplication
+# shows or hides the Dock icon; NSURL opens Sound settings.
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSWorkspace",
+] }
+# Camera-in-use detection (`camera.rs`); the crate links AVFoundation.
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "AVCaptureDevice",
+  "AVMediaFormat",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
+  "NSArray",
   "NSBundle",
+  "NSDistributedNotificationCenter",
   "NSError",
+  "NSNotification",
   "NSString",
+  "NSURL",
 ] }
 objc2-service-management = { version = "0.3", default-features = false, features = [
   "std",

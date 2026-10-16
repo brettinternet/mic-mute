@@ -1,12 +1,11 @@
 use anyhow::Result;
-use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
 use log::{error, trace};
+use objc2::rc::Retained;
+use objc2::{msg_send, ClassType};
+use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeVideo};
+use objc2_foundation::NSArray;
 use std::ffi::c_void;
 use std::mem;
-
-#[link(name = "AVFoundation", kind = "framework")]
-extern "C" {}
 
 // CMIO constants
 const K_CMIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = 0x676c6f62; // 'glob'
@@ -44,6 +43,17 @@ extern "C" {
         qualifier_data: *const c_void,
         out_data_size: *mut u32,
     ) -> i32;
+}
+
+/// AVFoundation's video capture devices, in one array; `None` if it returns nil.
+///
+/// Not the binding's `devicesWithMediaType`: it is deprecated, and it would panic on the nil
+/// it declares impossible.
+fn video_capture_devices() -> Option<Retained<NSArray<AVCaptureDevice>>> {
+    // SAFETY: AVFoundation's media type constant, `None` only where it's missing.
+    let media_type = unsafe { AVMediaTypeVideo }?;
+    // SAFETY: a class method that takes a media type and returns an array of devices.
+    unsafe { msg_send![AVCaptureDevice::class(), devicesWithMediaType: media_type] }
 }
 
 pub struct CameraController {
@@ -147,48 +157,36 @@ impl CameraController {
     pub fn is_running_anywhere(&self) -> Result<bool> {
         // First: AVFoundation isInUseByAnotherApplication.
         // Only trusted if devicesWithMediaType: returns at least one device (requires TCC permission).
-        let av_device_count: usize = unsafe {
-            let media_type = NSString::alloc(nil).init_str("vide");
-            let devices: id = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
-            if devices == nil {
+        let devices = video_capture_devices();
+        let av_device_count = match &devices {
+            Some(devices) => devices.count(),
+            None => {
                 error!(
                     "AVCaptureDevice.devicesWithMediaType: returned nil — no camera permission?"
                 );
                 0
-            } else {
-                msg_send![devices, count]
             }
         };
         trace!("AVFoundation camera device count: {}", av_device_count);
-        if av_device_count > 0 {
-            let active = unsafe {
-                let media_type = NSString::alloc(nil).init_str("vide");
-                let devices: id =
-                    msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type];
-                let mut any = false;
-                for i in 0..av_device_count {
-                    let device: id = msg_send![devices, objectAtIndex: i];
-                    // isInUseByAnotherApplication returns ObjC BOOL (i8)
-                    let in_use: cocoa::base::BOOL = msg_send![device, isInUseByAnotherApplication];
-                    trace!(
-                        "AVCaptureDevice {} isInUseByAnotherApplication={}",
-                        i,
-                        in_use
-                    );
-                    if in_use != cocoa::base::NO {
-                        any = true;
-                        break;
-                    }
+        if let Some(devices) = &devices {
+            // One array for the count and the devices, so an index can't outrun it.
+            for i in 0..av_device_count {
+                let device = devices.objectAtIndex(i);
+                // SAFETY: a BOOL property of a capture device AVFoundation returned.
+                let in_use = unsafe { device.isInUseByAnotherApplication() };
+                trace!(
+                    "AVCaptureDevice {} isInUseByAnotherApplication={}",
+                    i,
+                    in_use
+                );
+                if in_use {
+                    return Ok(true);
                 }
-                any
-            };
-            if active {
-                return Ok(true);
             }
-            // AVFoundation found devices but all report not-in-use.
-            // Also check CMIO — isInUseByAnotherApplication can be unreliable on newer macOS.
         }
-
+        // AVFoundation found no device in use. Also check CMIO — isInUseByAnotherApplication
+        // can be unreliable on newer macOS.
+        //
         // CMIO kCMIODevicePropertyDeviceIsRunningSomewhere — lower-level check that
         // runs regardless of AVFoundation result.
         let device_ids = self.get_cmio_device_ids_system();
