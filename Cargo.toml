@@ -28,8 +28,6 @@ serde_json = "1"
 dirs = "6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.24"
-objc = "0.2"
 coreaudio-rs = "0.14"
 objc2-core-audio = { version = "0.3", features = [
   "AudioHardware",
@@ -116,10 +114,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
   "UNNotificationRequest",
   "UNUserNotificationCenter",
 ] }
-
-[lints.rust]
-# objc 0.2.x macros use the old cfg(cargo-clippy) pattern which triggers this lint
-unexpected_cfgs = "allow"
 
 [package.metadata.bundle]
 name = "Mic Mute"

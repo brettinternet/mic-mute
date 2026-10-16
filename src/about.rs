@@ -155,7 +155,6 @@ define_class!(
     /// takes (`AboutWindow::take_click`), so a click sent on any thread counts.
     // SAFETY: NSObject has no subclassing requirements, and the class doesn't implement `Drop`.
     #[unsafe(super(NSObject))]
-    #[name = "MicMuteAboutButtonTarget"]
     #[ivars = AtomicIsize]
     struct AboutButtonTarget;
 
@@ -313,8 +312,6 @@ impl Drop for AboutWindow {
 mod tests {
     use super::*;
     use crate::settings::ShortcutConfig;
-    // Named, not only globbed: through `super::*` it is ambiguous with objc 0.2's crate-wide
-    // `msg_send!` (`#[macro_use] extern crate objc` in main.rs).
     use crate::shortcuts::{parse_shortcut, Shortcut, ShortcutProblem};
     use objc2::msg_send;
 
@@ -521,7 +518,6 @@ mod tests {
         // SAFETY: NSObject has no subclassing requirements, and the class doesn't implement
         // `Drop`.
         #[unsafe(super(NSObject))]
-        #[name = "MicMuteTestFakeAboutButton"]
         struct FakeAboutButton;
 
         impl FakeAboutButton {

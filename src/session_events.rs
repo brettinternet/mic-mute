@@ -240,7 +240,6 @@ impl Drop for SessionEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Explicit: `super::*` and main.rs's `#[macro_use] extern crate objc` both offer one.
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
 
