@@ -194,6 +194,13 @@ impl UI {
         settings: &Settings,
     ) -> Result<()> {
         match change {
+            SettingsChange::Shortcut(config) => {
+                // An invalid or unregistrable shortcut keeps the registered one, and the
+                // shortcut's status says why; the tray shows whichever is registered.
+                let reloaded = self.shortcuts.reload(config);
+                self.sync_shortcut();
+                reloaded?;
+            }
             SettingsChange::LaunchAtLogin(enabled) => self.set_launch_at_login(*enabled),
             SettingsChange::ShowInDock(visible) => {
                 self.tray.show_in_dock.set_checked(*visible);
@@ -278,6 +285,19 @@ impl UI {
         if let Err(e) = self.tray.update_accelerators(registered) {
             log::warn!("Failed to update the tray menu's mute shortcut: {:#}", e);
         }
+    }
+
+    /// Unregisters the mute hotkey while the Settings window records a new shortcut, so the
+    /// recorder hears its keys; `resume_shortcut` registers it again.
+    pub fn suspend_shortcut(&mut self) -> Result<()> {
+        self.shortcuts.suspend()
+    }
+
+    /// Registers the hotkey `suspend_shortcut` unregistered again.
+    pub fn resume_shortcut(&mut self) -> Result<()> {
+        let resumed = self.shortcuts.resume();
+        self.sync_shortcut();
+        resumed
     }
 
     /// The registered mute hotkey's id; 0 when no hotkey is registered.

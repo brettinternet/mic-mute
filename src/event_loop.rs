@@ -313,8 +313,27 @@ fn run_settings_window(
     last_state: &mut LastMuteState,
     problem: Option<&FileProblem>,
 ) {
-    for event in window.take_events() {
+    for event in window.take_events(Instant::now()) {
         match event {
+            WindowEvent::RecordingStarted => {
+                if let Err(e) = ui.write().suspend_shortcut() {
+                    log::error!(
+                        "Failed to pause the mute shortcut for the recorder: {:#}",
+                        e
+                    );
+                }
+                // A hold's release can't arrive while the hotkey is paused.
+                let mode = settings.read().mode;
+                if let Some(command) = push_to_talk.on_settings_change(mode, mode, true) {
+                    log::info!("Muting: recording a new shortcut ended a push-to-talk hold");
+                    request_mic(ui, controller, last_state, command);
+                }
+            }
+            WindowEvent::RecordingEnded => {
+                if let Err(e) = ui.write().resume_shortcut() {
+                    log::error!("Failed to restore the mute shortcut: {:#}", e);
+                }
+            }
             WindowEvent::Changed(change) => {
                 apply_window_change(&change, ui, controller, settings, push_to_talk, last_state)
             }

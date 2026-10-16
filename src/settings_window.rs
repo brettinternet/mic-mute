@@ -7,12 +7,22 @@
 //! (`SettingsWindow::take_events`), saves each one the way the tray toggles do, and then shows the
 //! settings in use again (`SettingsWindow::refresh`), so changes made elsewhere (the tray,
 //! About → Reset Settings, a hand edit of the file) show here too.
+//!
+//! Change… records a new mute shortcut. While it records, the mute hotkey is unregistered
+//! (`Shortcuts::suspend`), so pressing the current shortcut reaches the recorder instead of
+//! toggling mute, and a local `NSEvent` monitor takes the window's key events: the first key
+//! that makes, with the modifiers held, a shortcut `record_press` accepts becomes the shortcut.
+//! Esc, Cancel, another control, the window losing focus or closing, and 30 seconds without a
+//! key press end the recording, and the event loop registers the hotkey again
+//! (`Shortcuts::resume`).
 use crate::settings::{
     Fallback, LaunchState, Lenient, LoadError, MicOnFlash, PopupPosition, PopupSize, Settings,
-    ShortcutMode,
+    ShortcutConfig, ShortcutMode,
 };
-use crate::shortcuts::{current_status, ShortcutStatus};
+use crate::shortcuts::{current_status, key_label, parse_shortcut, Shortcut, ShortcutStatus};
 use anyhow::{Context, Result};
+use block2::RcBlock;
+use global_hotkey::hotkey::{Code, Modifiers};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{
@@ -20,14 +30,19 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSGridCell, NSGridCellPlacement, NSGridRow, NSGridRowAlignment,
-    NSGridView, NSLayoutAttribute, NSPopUpButton, NSStackView, NSStepper, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont,
+    NSGridCell, NSGridCellPlacement, NSGridRow, NSGridRowAlignment, NSGridView, NSLayoutAttribute,
+    NSPopUpButton, NSStackView, NSStepper, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSInteger, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
+use std::cell::Cell;
+use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 /// The window's title.
 const WINDOW_TITLE: &str = "Mic Mute Settings";
@@ -49,6 +64,7 @@ const FOOTER_TEXT: &str = "Changes apply at once and are saved to \
 pub enum SettingsChange {
     LaunchAtLogin(bool),
     ShowInDock(bool),
+    Shortcut(ShortcutConfig),
     Mode(ShortcutMode),
     ShowPopup(bool),
     PopupPosition(PopupPosition),
@@ -71,6 +87,7 @@ impl SettingsChange {
         match self {
             Self::LaunchAtLogin(on) => replace(&mut settings.launch_at_login, *on),
             Self::ShowInDock(on) => replace(&mut settings.show_in_dock, *on),
+            Self::Shortcut(config) => replace(&mut settings.mic_shortcut, config.clone()),
             Self::Mode(mode) => replace(&mut settings.mode, *mode),
             Self::ShowPopup(on) => replace(&mut settings.show_popup, *on),
             // A chosen value replaces one the file sets that this build doesn't accept.
@@ -107,8 +124,13 @@ fn replace<T: PartialEq>(slot: &mut T, value: T) -> bool {
 pub enum WindowEvent {
     /// Save and apply the change.
     Changed(SettingsChange),
-    /// Open settings.json in the text editor (the invalid-file notice's button).
+    /// Open settings.json (the invalid-file notice's button).
     OpenSettingsFile,
+    /// The recorder started: unregister the mute hotkey, so pressing it reaches the recorder.
+    RecordingStarted,
+    /// The recorder stopped: register the mute hotkey again. A recorded shortcut follows as
+    /// `Changed`, so it replaces the hotkey that is back by then.
+    RecordingEnded,
 }
 
 /// Why settings.json can't be used, as the notice at the top of the window shows it.
@@ -233,6 +255,463 @@ fn popup_note(settings: &Settings) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+// The shortcut recorder.
+
+/// How long the recorder waits for a shortcut, counted again from each rejected key, before it
+/// gives up and the hotkey comes back.
+const RECORDING_TIMEOUT: Duration = Duration::from_secs(30);
+/// `kVK_Escape`: without modifiers, it cancels the recording.
+const ESCAPE_KEY_CODE: u16 = 0x35;
+/// `kVK_ANSI_W`: ⌘W closes the window.
+const W_KEY_CODE: u16 = 0x0d;
+/// How many key presses, and how many edit commands, the monitor keeps between two passes of
+/// the event loop.
+const QUEUE_LEN: usize = 4;
+const RECORD_TITLE: &str = "Change…";
+const CANCEL_RECORDING_TITLE: &str = "Cancel";
+const RECORDING_PROMPT: &str = "Type the new shortcut…";
+const RECORDING_HINT: &str = "Press the new shortcut, or Esc to cancel.";
+
+/// macOS virtual key codes (HIToolbox's `kVK_*`) and the keys global-hotkey registers for them:
+/// the inverse of global-hotkey 0.8's `key_to_scancode`, so a recorded key registers as the
+/// same physical key. Caps Lock, which AppKit reports only as a modifier change, and
+/// PrintScreen (0x46, which no Mac keyboard sends) are left out.
+const KEY_CODES: &[(u16, Code)] = &[
+    (0x00, Code::KeyA),
+    (0x01, Code::KeyS),
+    (0x02, Code::KeyD),
+    (0x03, Code::KeyF),
+    (0x04, Code::KeyH),
+    (0x05, Code::KeyG),
+    (0x06, Code::KeyZ),
+    (0x07, Code::KeyX),
+    (0x08, Code::KeyC),
+    (0x09, Code::KeyV),
+    (0x0b, Code::KeyB),
+    (0x0c, Code::KeyQ),
+    (0x0d, Code::KeyW),
+    (0x0e, Code::KeyE),
+    (0x0f, Code::KeyR),
+    (0x10, Code::KeyY),
+    (0x11, Code::KeyT),
+    (0x12, Code::Digit1),
+    (0x13, Code::Digit2),
+    (0x14, Code::Digit3),
+    (0x15, Code::Digit4),
+    (0x16, Code::Digit6),
+    (0x17, Code::Digit5),
+    (0x18, Code::Equal),
+    (0x19, Code::Digit9),
+    (0x1a, Code::Digit7),
+    (0x1b, Code::Minus),
+    (0x1c, Code::Digit8),
+    (0x1d, Code::Digit0),
+    (0x1e, Code::BracketRight),
+    (0x1f, Code::KeyO),
+    (0x20, Code::KeyU),
+    (0x21, Code::BracketLeft),
+    (0x22, Code::KeyI),
+    (0x23, Code::KeyP),
+    (0x24, Code::Enter),
+    (0x25, Code::KeyL),
+    (0x26, Code::KeyJ),
+    (0x27, Code::Quote),
+    (0x28, Code::KeyK),
+    (0x29, Code::Semicolon),
+    (0x2a, Code::Backslash),
+    (0x2b, Code::Comma),
+    (0x2c, Code::Slash),
+    (0x2d, Code::KeyN),
+    (0x2e, Code::KeyM),
+    (0x2f, Code::Period),
+    (0x30, Code::Tab),
+    (0x31, Code::Space),
+    (0x32, Code::Backquote),
+    (0x33, Code::Backspace),
+    (0x35, Code::Escape),
+    (0x40, Code::F17),
+    (0x41, Code::NumpadDecimal),
+    (0x43, Code::NumpadMultiply),
+    (0x45, Code::NumpadAdd),
+    (0x47, Code::NumLock),
+    (0x48, Code::AudioVolumeUp),
+    (0x49, Code::AudioVolumeDown),
+    (0x4a, Code::AudioVolumeMute),
+    (0x4b, Code::NumpadDivide),
+    (0x4c, Code::NumpadEnter),
+    (0x4e, Code::NumpadSubtract),
+    (0x4f, Code::F18),
+    (0x50, Code::F19),
+    (0x51, Code::NumpadEqual),
+    (0x52, Code::Numpad0),
+    (0x53, Code::Numpad1),
+    (0x54, Code::Numpad2),
+    (0x55, Code::Numpad3),
+    (0x56, Code::Numpad4),
+    (0x57, Code::Numpad5),
+    (0x58, Code::Numpad6),
+    (0x59, Code::Numpad7),
+    (0x5a, Code::F20),
+    (0x5b, Code::Numpad8),
+    (0x5c, Code::Numpad9),
+    (0x60, Code::F5),
+    (0x61, Code::F6),
+    (0x62, Code::F7),
+    (0x63, Code::F3),
+    (0x64, Code::F8),
+    (0x65, Code::F9),
+    (0x67, Code::F11),
+    (0x69, Code::F13),
+    (0x6a, Code::F16),
+    (0x6b, Code::F14),
+    (0x6d, Code::F10),
+    (0x6f, Code::F12),
+    (0x71, Code::F15),
+    (0x72, Code::Insert),
+    (0x73, Code::Home),
+    (0x74, Code::PageUp),
+    (0x75, Code::Delete),
+    (0x76, Code::F4),
+    (0x77, Code::End),
+    (0x78, Code::F2),
+    (0x79, Code::PageDown),
+    (0x7a, Code::F1),
+    (0x7b, Code::ArrowLeft),
+    (0x7c, Code::ArrowRight),
+    (0x7d, Code::ArrowDown),
+    (0x7e, Code::ArrowUp),
+];
+
+/// The key at `key_code`; `None` for a key global-hotkey can't register.
+fn code_for_key(key_code: u16) -> Option<Code> {
+    KEY_CODES
+        .iter()
+        .find(|&&(code, _)| code == key_code)
+        .map(|&(_, key)| key)
+}
+
+/// The modifiers a shortcut can hold, in Apple's order, with their settings.json names.
+const MODIFIERS: [(NSEventModifierFlags, &str, &str); 4] = [
+    (NSEventModifierFlags::Control, "ctrl", "⌃"),
+    (NSEventModifierFlags::Option, "alt", "⌥"),
+    (NSEventModifierFlags::Shift, "shift", "⇧"),
+    (NSEventModifierFlags::Command, "meta", "⌘"),
+];
+
+/// The settings.json names of the shortcut modifiers in `flags`, in Apple's order. Caps Lock,
+/// Fn, and the keypad flag don't count.
+fn modifier_names(flags: NSEventModifierFlags) -> Vec<String> {
+    MODIFIERS
+        .iter()
+        .filter(|&&(flag, _, _)| flags.contains(flag))
+        .map(|&(_, name, _)| name.to_string())
+        .collect()
+}
+
+/// The shortcut modifiers in `flags` as menus show them, e.g. `⌃⌥`.
+fn modifier_glyphs(flags: NSEventModifierFlags) -> String {
+    MODIFIERS
+        .iter()
+        .filter(|&&(flag, _, _)| flags.contains(flag))
+        .map(|&(_, _, glyph)| glyph)
+        .collect()
+}
+
+/// Whether `flags` hold ⌘ and no other shortcut modifier.
+fn is_command_only(flags: NSEventModifierFlags) -> bool {
+    modifier_names(flags) == ["meta"]
+}
+
+/// A key the recorder caught: its virtual key code and the modifiers held with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyPress {
+    key_code: u16,
+    modifiers: NSEventModifierFlags,
+}
+
+/// What a key press means to the recorder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Recorded {
+    /// The new shortcut, as settings.json writes it.
+    Shortcut(ShortcutConfig),
+    /// Esc without modifiers.
+    Cancel,
+    /// Why the press can't be the shortcut; the recorder keeps waiting.
+    Rejected(String),
+}
+
+/// Whether `code` types a character or edits text: a letter, a digit, punctuation, the space
+/// bar, the keypad, Tab, Return, Delete, and the keys that move the insertion point. ⇧ and ⌥
+/// change what such a key does in text rather than make it a shortcut.
+fn is_text_key(code: Code) -> bool {
+    key_label(code).chars().count() == 1
+        || matches!(
+            code,
+            Code::Backquote
+                | Code::Minus
+                | Code::Equal
+                | Code::BracketLeft
+                | Code::BracketRight
+                | Code::Backslash
+                | Code::Semicolon
+                | Code::Quote
+                | Code::Comma
+                | Code::Period
+                | Code::Slash
+                | Code::Space
+                | Code::Tab
+                | Code::Enter
+                | Code::NumpadEnter
+                | Code::Backspace
+                | Code::Delete
+                | Code::ArrowLeft
+                | Code::ArrowRight
+                | Code::ArrowUp
+                | Code::ArrowDown
+                | Code::Home
+                | Code::End
+                | Code::PageUp
+                | Code::PageDown
+                | Code::Numpad0
+                | Code::Numpad1
+                | Code::Numpad2
+                | Code::Numpad3
+                | Code::Numpad4
+                | Code::Numpad5
+                | Code::Numpad6
+                | Code::Numpad7
+                | Code::Numpad8
+                | Code::Numpad9
+                | Code::NumpadDecimal
+                | Code::NumpadAdd
+                | Code::NumpadSubtract
+                | Code::NumpadMultiply
+                | Code::NumpadDivide
+                | Code::NumpadEqual
+        )
+}
+
+/// Whether `shortcut` holds only ⇧ and ⌥ on a text key: as a global hotkey, it would take that
+/// key from typing and editing in every app (⌥2 types ™ on a US layout and @ on others; ⇧↩
+/// starts a new line in chat apps).
+fn takes_text_key(shortcut: Shortcut) -> bool {
+    (Modifiers::SHIFT | Modifiers::ALT).contains(shortcut.modifiers())
+        && is_text_key(shortcut.code())
+}
+
+/// `text` as a sentence's start: its first letter capitalized.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// What `press` means while recording. It is the shortcut only when `parse_shortcut` accepts
+/// it, and it doesn't take a text key from every app.
+fn record_press(press: KeyPress) -> Recorded {
+    let modifiers = modifier_names(press.modifiers);
+    if press.key_code == ESCAPE_KEY_CODE && modifiers.is_empty() {
+        return Recorded::Cancel;
+    }
+    let Some(code) = code_for_key(press.key_code) else {
+        return Recorded::Rejected("Mic Mute can't use that key in a shortcut".to_string());
+    };
+    let config = ShortcutConfig {
+        modifiers,
+        key: key_label(code),
+    };
+    match parse_shortcut(&config) {
+        Err(e) => Recorded::Rejected(capitalized(&format!("{e:#}"))),
+        Ok(shortcut) if takes_text_key(shortcut) => Recorded::Rejected(format!(
+            "{shortcut} types or edits text in every app; add ⌃ or ⌘"
+        )),
+        Ok(_) => Recorded::Shortcut(config),
+    }
+}
+
+/// A recording in progress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Recording {
+    /// When the recorder gives up.
+    deadline: Instant,
+    /// The modifiers held now, shown until a key completes the shortcut.
+    held: NSEventModifierFlags,
+    /// Why the last key can't be the shortcut.
+    rejection: Option<String>,
+}
+
+impl Recording {
+    fn new(now: Instant) -> Self {
+        Self {
+            deadline: now + RECORDING_TIMEOUT,
+            held: NSEventModifierFlags::empty(),
+            rejection: None,
+        }
+    }
+}
+
+/// What the recorder does after a pass of the event loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Step {
+    /// Keep recording.
+    Wait,
+    /// Stop without a shortcut: Esc, or the timeout.
+    Stop,
+    /// Stop with this shortcut.
+    Record(ShortcutConfig),
+}
+
+/// Runs the key `presses` and the latest `held` modifiers caught since the last pass through
+/// `recording` at `now`.
+fn advance(
+    recording: &mut Recording,
+    presses: &[KeyPress],
+    held: Option<NSEventModifierFlags>,
+    now: Instant,
+) -> Step {
+    if let Some(held) = held {
+        recording.held = held;
+    }
+    for &press in presses {
+        match record_press(press) {
+            Recorded::Shortcut(config) => return Step::Record(config),
+            Recorded::Cancel => return Step::Stop,
+            Recorded::Rejected(reason) => {
+                recording.rejection = Some(reason);
+                recording.deadline = now + RECORDING_TIMEOUT;
+            }
+        }
+    }
+    if now >= recording.deadline {
+        return Step::Stop;
+    }
+    Step::Wait
+}
+
+/// The shortcut row's text, its note and whether that is an error, and the button's title.
+fn shortcut_row(
+    status: &ShortcutStatus,
+    recording: Option<&Recording>,
+) -> (String, Option<String>, bool, &'static str) {
+    let Some(recording) = recording else {
+        let note = shortcut_note(status);
+        return (shortcut_text(status), note, true, RECORD_TITLE);
+    };
+    let text = if recording.held.is_empty() {
+        RECORDING_PROMPT.to_string()
+    } else {
+        format!("{}…", modifier_glyphs(recording.held))
+    };
+    let (note, is_error) = match &recording.rejection {
+        Some(reason) => (format!("{reason}. {RECORDING_HINT}"), true),
+        None => (RECORDING_HINT.to_string(), false),
+    };
+    (text, Some(note), is_error, CANCEL_RECORDING_TITLE)
+}
+
+/// A key event in the window, with only what is valid to read for its type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyEvent {
+    Down {
+        key_code: u16,
+        modifiers: NSEventModifierFlags,
+        is_repeat: bool,
+    },
+    ModifiersChanged(NSEventModifierFlags),
+}
+
+/// A text-editing shortcut the window handles itself: the app has no Edit menu, which would
+/// otherwise send it to the focused text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+impl EditCommand {
+    /// The command ⌘ and `key_code` (`kVK_ANSI_X`, `C`, `V`, `A`) give.
+    fn for_key(key_code: u16) -> Option<Self> {
+        match key_code {
+            0x07 => Some(Self::Cut),
+            0x08 => Some(Self::Copy),
+            0x09 => Some(Self::Paste),
+            0x00 => Some(Self::SelectAll),
+            _ => None,
+        }
+    }
+
+    /// The responder action an Edit menu item would send.
+    fn action(self) -> Sel {
+        match self {
+            Self::Cut => sel!(cut:),
+            Self::Copy => sel!(copy:),
+            Self::Paste => sel!(paste:),
+            Self::SelectAll => sel!(selectAll:),
+        }
+    }
+}
+
+/// What the key-event monitor does with a key event in the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Catch {
+    /// A key for the recorder.
+    Press(KeyPress),
+    /// The modifiers held while recording.
+    Held(NSEventModifierFlags),
+    /// A key repeat while recording: nobody gets it.
+    Swallow,
+    /// ⌘W: close the window.
+    Close,
+    /// ⌘X, ⌘C, ⌘V, or ⌘A outside a recording: edit the focused text.
+    Edit(EditCommand),
+    /// Not the monitor's business: AppKit handles it as usual.
+    Pass,
+}
+
+impl Catch {
+    /// Whether AppKit must not handle the event too.
+    fn swallows(self) -> bool {
+        !matches!(self, Self::Held(_) | Self::Pass)
+    }
+}
+
+/// What the key-event monitor does with `event`, a key event in the window. ⌘W closes the
+/// window even while recording: as a global shortcut, it would take Close from every app.
+fn catch(event: KeyEvent, is_recording: bool) -> Catch {
+    match event {
+        KeyEvent::ModifiersChanged(modifiers) if is_recording => Catch::Held(modifiers),
+        KeyEvent::ModifiersChanged(_) => Catch::Pass,
+        KeyEvent::Down {
+            key_code: W_KEY_CODE,
+            modifiers,
+            ..
+        } if is_command_only(modifiers) => Catch::Close,
+        KeyEvent::Down {
+            is_repeat: true, ..
+        } if is_recording => Catch::Swallow,
+        KeyEvent::Down {
+            key_code,
+            modifiers,
+            ..
+        } if is_recording => Catch::Press(KeyPress {
+            key_code,
+            modifiers,
+        }),
+        KeyEvent::Down {
+            key_code,
+            modifiers,
+            ..
+        } if is_command_only(modifiers) => {
+            EditCommand::for_key(key_code).map_or(Catch::Pass, Catch::Edit)
+        }
+        KeyEvent::Down { .. } => Catch::Pass,
+    }
+}
+
 /// What the window shows: one field per control, so `refresh` touches only what changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct View {
@@ -242,6 +721,8 @@ struct View {
     show_in_dock: bool,
     shortcut: String,
     shortcut_note: Option<String>,
+    is_shortcut_note_error: bool,
+    record_title: &'static str,
     mode: usize,
     show_popup: bool,
     position: usize,
@@ -257,14 +738,18 @@ struct View {
     allow_url_unmute: bool,
 }
 
-/// The window's contents for `settings`, the shortcut's `status`, and the file's `problem`.
-/// `needs_approval`: macOS waits for the user to approve the login item.
+/// The window's contents for `settings`, the shortcut's `status`, the file's `problem`, and
+/// the `recording` in progress. `needs_approval`: macOS waits for the user to approve the login
+/// item.
 fn view_for(
     settings: &Settings,
     status: &ShortcutStatus,
     problem: Option<&FileProblem>,
     needs_approval: bool,
+    recording: Option<&Recording>,
 ) -> View {
+    let (shortcut, shortcut_note, is_shortcut_note_error, record_title) =
+        shortcut_row(status, recording);
     View {
         problem: problem.cloned(),
         launch_at_login: settings.launch_at_login,
@@ -272,8 +757,10 @@ fn view_for(
             settings.launch_at_login && needs_approval,
         ),
         show_in_dock: settings.show_in_dock,
-        shortcut: shortcut_text(status),
-        shortcut_note: shortcut_note(status),
+        shortcut,
+        shortcut_note,
+        is_shortcut_note_error,
+        record_title,
         mode: index_of(&MODE_CHOICES, settings.mode),
         show_popup: settings.show_popup,
         position: index_of(&POSITION_CHOICES, settings.popup_position.value()),
@@ -296,6 +783,7 @@ fn view_for(
 enum Control {
     LaunchAtLogin,
     ShowInDock,
+    RecordShortcut,
     Mode,
     ShowPopup,
     PopupPosition,
@@ -313,9 +801,10 @@ enum Control {
 }
 
 impl Control {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::LaunchAtLogin,
         Self::ShowInDock,
+        Self::RecordShortcut,
         Self::Mode,
         Self::ShowPopup,
         Self::PopupPosition,
@@ -352,6 +841,122 @@ impl Control {
     fn bit(self) -> u32 {
         1 << self.index()
     }
+}
+
+/// What the key-event monitor shares with the window: whether the recorder records, and what
+/// the monitor caught for the event loop. A local monitor runs on the main thread, inside
+/// AppKit's event dispatch, as the event loop's closure does, so plain `Cell`s do.
+#[derive(Debug, Default)]
+struct KeyCatcher {
+    is_recording: Cell<bool>,
+    /// The key presses caught since the loop last took them, oldest first; once it is full,
+    /// later ones are dropped.
+    presses: Cell<[Option<KeyPress>; QUEUE_LEN]>,
+    /// The edit commands caught since the loop last took them, the same way.
+    edits: Cell<[Option<EditCommand>; QUEUE_LEN]>,
+    /// The modifiers held at the last modifier change while recording.
+    held: Cell<Option<NSEventModifierFlags>>,
+    /// ⌘W was pressed in the window.
+    is_close_requested: Cell<bool>,
+}
+
+impl KeyCatcher {
+    /// What the monitor does with `event`, a key event in the window. Keeps what the event
+    /// loop acts on until it takes it.
+    fn catch(&self, event: KeyEvent) -> Catch {
+        let caught = catch(event, self.is_recording.get());
+        match caught {
+            Catch::Press(press) => enqueue(&self.presses, press),
+            Catch::Held(modifiers) => self.held.set(Some(modifiers)),
+            Catch::Close => self.is_close_requested.set(true),
+            Catch::Edit(command) => enqueue(&self.edits, command),
+            Catch::Swallow | Catch::Pass => {}
+        }
+        caught
+    }
+
+    fn take_presses(&self) -> Vec<KeyPress> {
+        self.presses.take().into_iter().flatten().collect()
+    }
+
+    fn take_edits(&self) -> Vec<EditCommand> {
+        self.edits.take().into_iter().flatten().collect()
+    }
+
+    fn take_held(&self) -> Option<NSEventModifierFlags> {
+        self.held.take()
+    }
+
+    fn take_close_request(&self) -> bool {
+        self.is_close_requested.take()
+    }
+
+    /// Starts or stops handing the window's keys to the recorder. Either way it drops the keys
+    /// caught so far, which belong to no recording.
+    fn set_recording(&self, is_recording: bool) {
+        self.is_recording.set(is_recording);
+        self.presses.take();
+        self.held.take();
+    }
+}
+
+/// Adds `item` to the first free slot of `queue`; drops it when `queue` is full.
+fn enqueue<T: Copy>(queue: &Cell<[Option<T>; QUEUE_LEN]>, item: T) {
+    let mut items = queue.get();
+    if let Some(slot) = items.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(item);
+        queue.set(items);
+    }
+}
+
+/// `event` as the recorder sees it; `None` for any other type. `keyCode` and `isARepeat` raise
+/// an exception on other events, so they're read for key-down events only.
+fn key_event(event: &NSEvent) -> Option<KeyEvent> {
+    let modifiers = event.modifierFlags();
+    let event_type = event.r#type();
+    if event_type == NSEventType::KeyDown {
+        Some(KeyEvent::Down {
+            key_code: event.keyCode(),
+            modifiers,
+            is_repeat: event.isARepeat(),
+        })
+    } else if event_type == NSEventType::FlagsChanged {
+        Some(KeyEvent::ModifiersChanged(modifiers))
+    } else {
+        None
+    }
+}
+
+/// Adds the app's local key-event monitor for `window`. It hands the window's key events to
+/// `catcher` and swallows the ones it takes: every key press while the recorder records, ⌘W,
+/// which closes the window, and the edit commands. It runs inside AppKit's event dispatch, so it only reads the event
+/// and updates `catcher`: no other AppKit call, no locks, no panics. Events of other windows
+/// pass untouched.
+fn add_key_monitor(
+    window: &NSWindow,
+    catcher: Rc<KeyCatcher>,
+    mtm: MainThreadMarker,
+) -> Option<Retained<AnyObject>> {
+    let window: *const NSWindow = window;
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit hands the monitor a valid event for the duration of the call.
+        let ns_event = unsafe { event.as_ref() };
+        let is_window_event = ns_event
+            .window(mtm)
+            .is_some_and(|event_window| ptr::eq(Retained::as_ptr(&event_window), window));
+        let caught = match key_event(ns_event) {
+            Some(key) if is_window_event => catcher.catch(key),
+            _ => Catch::Pass,
+        };
+        if caught.swallows() {
+            ptr::null_mut()
+        } else {
+            event.as_ptr()
+        }
+    });
+    let mask = NSEventMask::KeyDown | NSEventMask::FlagsChanged;
+    // SAFETY: the handler returns the event it was handed, or null to swallow it.
+    unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) }
 }
 
 define_class!(
@@ -548,6 +1153,8 @@ struct Controls {
     launch_at_login: Retained<NSButton>,
     show_in_dock: Retained<NSButton>,
     shortcut: Retained<NSTextField>,
+    /// Change… while idle, Cancel while recording.
+    record: Retained<NSButton>,
     shortcut_note: Retained<NSTextField>,
     shortcut_note_row: Retained<NSGridRow>,
     mode: Retained<NSPopUpButton>,
@@ -604,8 +1211,9 @@ impl Controls {
         let show_in_dock = checkbox("Show in Dock", Control::ShowInDock, target, mtm);
 
         let shortcut = label("", mtm);
+        let record = push_button(RECORD_TITLE, Control::RecordShortcut, target, mtm);
+        let shortcut_row = stack(&[&shortcut, &record], horizontal, 8., mtm);
         let shortcut_note = note_label("", NOTE_WIDTH, mtm);
-        shortcut_note.setTextColor(Some(&NSColor::systemRedColor()));
         let mode = pop_up(titles(&MODE_CHOICES), Control::Mode, target, mtm);
 
         let show_popup = checkbox(
@@ -722,7 +1330,7 @@ impl Controls {
             Row::Setting(&empty, &launch_at_login),
             Row::Setting(&empty, &show_in_dock),
             Row::Header(shortcut_header),
-            Row::Setting(shortcut_label, &shortcut),
+            Row::Setting(shortcut_label, &shortcut_row),
             Row::Setting(&empty, &shortcut_note),
             Row::Setting(mode_label, &mode),
             Row::Header(popup_header),
@@ -768,6 +1376,7 @@ impl Controls {
             launch_at_login,
             show_in_dock,
             shortcut,
+            record,
             shortcut_note,
             shortcut_note_row,
             mode,
@@ -823,6 +1432,18 @@ impl Controls {
             is_resized = true;
             self.shortcut
                 .setStringValue(&NSString::from_str(&new.shortcut));
+        }
+        if differs(old, new, |view| &view.record_title) {
+            is_resized = true;
+            self.record.setTitle(&NSString::from_str(new.record_title));
+        }
+        if differs(old, new, |view| &view.is_shortcut_note_error) {
+            let color = if new.is_shortcut_note_error {
+                NSColor::systemRedColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            self.shortcut_note.setTextColor(Some(&color));
         }
         if differs(old, new, |view| &view.shortcut_note) {
             is_resized = true;
@@ -943,6 +1564,19 @@ struct Built {
     /// Every control's target. Controls don't retain their target, so it lives as long as they
     /// do: it is dropped after the window and its controls.
     target: Retained<SettingsTarget>,
+    /// What the key-event monitor caught for the event loop.
+    catcher: Rc<KeyCatcher>,
+    /// The key-event monitor (`add_key_monitor`), removed on drop.
+    monitor: Option<Retained<AnyObject>>,
+}
+
+impl Drop for Built {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.monitor.take() {
+            // SAFETY: `monitor` is the token `addLocalMonitorForEventsMatchingMask` returned.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+    }
 }
 
 impl Built {
@@ -967,10 +1601,17 @@ impl Built {
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str(WINDOW_TITLE));
         window.setContentView(Some(&controls.content));
+        let catcher = Rc::new(KeyCatcher::default());
+        let monitor = add_key_monitor(&window, Rc::clone(&catcher), mtm);
+        if monitor.is_none() {
+            log::warn!("Failed to watch the Settings window's keys; the recorder can't record");
+        }
         Self {
             window,
             controls,
             target,
+            catcher,
+            monitor,
         }
     }
 }
@@ -984,6 +1625,8 @@ pub struct SettingsWindow {
     shown: Option<View>,
     /// The "Mic on" field was edited, so `refresh` writes the setting back into it.
     is_mic_on_stale: bool,
+    /// The shortcut recording in progress.
+    recording: Option<Recording>,
 }
 
 impl SettingsWindow {
@@ -1019,20 +1662,77 @@ impl SettingsWindow {
             .is_some_and(|built| built.window.isVisible())
     }
 
-    /// What the user did in the window since the last call, in `Control::ALL` order.
-    pub fn take_events(&mut self) -> Vec<WindowEvent> {
+    /// What the user did in the window since the last call, at `now`: the recorder's progress
+    /// first, then each changed control in `Control::ALL` order.
+    pub fn take_events(&mut self, now: Instant) -> Vec<WindowEvent> {
         let Some(built) = &self.built else {
             return Vec::new();
         };
-        built
-            .target
-            .take_changed()
-            .into_iter()
-            .filter_map(|control| match control {
-                Control::OpenSettingsFile => Some(WindowEvent::OpenSettingsFile),
-                _ => self.change_for(control).map(WindowEvent::Changed),
-            })
-            .collect()
+        let changed = built.target.take_changed();
+        let presses = built.catcher.take_presses();
+        let held = built.catcher.take_held();
+        if built.catcher.take_close_request() {
+            built.window.performClose(None);
+        }
+        for command in built.catcher.take_edits() {
+            if let Some(responder) = built.window.firstResponder() {
+                // SAFETY: the edit actions take their sender, and nil is allowed. A responder
+                // that doesn't handle one passes it up the responder chain.
+                unsafe { responder.tryToPerform_with(command.action(), None) };
+            }
+        }
+        // The hotkey stays unregistered only while the user records in this window: losing
+        // focus, closing, or using another control ends the recording.
+        let is_focused = built.window.isVisible() && built.window.isKeyWindow();
+        let is_other_control_used = changed
+            .iter()
+            .any(|&control| control != Control::RecordShortcut);
+        let was_recording = self.recording.is_some();
+        let step = match &mut self.recording {
+            None => None,
+            Some(_) if !is_focused || is_other_control_used => Some(Step::Stop),
+            Some(recording) => Some(advance(recording, &presses, held, now)),
+        };
+        let mut events = Vec::new();
+        match step {
+            Some(Step::Stop) => events.push(self.stop_recording()),
+            Some(Step::Record(config)) => {
+                events.push(self.stop_recording());
+                events.push(WindowEvent::Changed(SettingsChange::Shortcut(config)));
+            }
+            Some(Step::Wait) | None => {}
+        }
+        for control in changed {
+            match control {
+                Control::RecordShortcut if self.recording.is_some() => {
+                    events.push(self.stop_recording());
+                }
+                // A click that ended the recording above doesn't start another.
+                Control::RecordShortcut if !was_recording => {
+                    events.push(self.start_recording(now));
+                }
+                Control::RecordShortcut => {}
+                Control::OpenSettingsFile => events.push(WindowEvent::OpenSettingsFile),
+                _ => events.extend(self.change_for(control).map(WindowEvent::Changed)),
+            }
+        }
+        events
+    }
+
+    fn start_recording(&mut self, now: Instant) -> WindowEvent {
+        if let Some(built) = &self.built {
+            built.catcher.set_recording(true);
+        }
+        self.recording = Some(Recording::new(now));
+        WindowEvent::RecordingStarted
+    }
+
+    fn stop_recording(&mut self) -> WindowEvent {
+        if let Some(built) = &self.built {
+            built.catcher.set_recording(false);
+        }
+        self.recording = None;
+        WindowEvent::RecordingEnded
     }
 
     /// The change `control` shows now; `None` when it holds no usable value.
@@ -1083,7 +1783,7 @@ impl SettingsWindow {
             Control::AllowUrlUnmute => {
                 SettingsChange::AllowUrlUnmute(is_checked(&controls.allow_url_unmute))
             }
-            Control::OpenSettingsFile => return None,
+            Control::RecordShortcut | Control::OpenSettingsFile => return None,
         };
         Some(change)
     }
@@ -1099,6 +1799,7 @@ impl SettingsWindow {
             &current_status(),
             problem,
             crate::launch_at_login::needs_approval(),
+            self.recording.as_ref(),
         );
         if self.shown.as_ref() == Some(&view) && !self.is_mic_on_stale {
             return;
@@ -1137,6 +1838,10 @@ mod tests {
         let changes = [
             SettingsChange::LaunchAtLogin(true),
             SettingsChange::ShowInDock(true),
+            SettingsChange::Shortcut(ShortcutConfig {
+                modifiers: vec!["ctrl".to_string()],
+                key: "F13".to_string(),
+            }),
             SettingsChange::Mode(ShortcutMode::PushToTalk),
             SettingsChange::ShowPopup(false),
             SettingsChange::PopupPosition(PopupPosition::TopRight),
@@ -1158,6 +1863,10 @@ mod tests {
         let saved = serde_json::to_value(&settings).unwrap();
         assert_eq!(saved["launch_at_login"], true);
         assert_eq!(saved["show_in_dock"], true);
+        assert_eq!(
+            saved["mic_shortcut"],
+            serde_json::json!({ "modifiers": ["ctrl"], "key": "F13" })
+        );
         assert_eq!(saved["mode"], "push_to_talk");
         assert_eq!(saved["show_popup"], false);
         assert_eq!(saved["popup_position"], "top_right");
@@ -1293,7 +2002,7 @@ mod tests {
         )
         .unwrap();
 
-        let view = view_for(&settings, &status_ok(), None, false);
+        let view = view_for(&settings, &status_ok(), None, false, None);
 
         assert!(view.launch_at_login && view.show_in_dock && !view.show_popup);
         assert_eq!(view.launch_at_login_title, "Launch at Login");
@@ -1316,7 +2025,7 @@ mod tests {
 
     #[test]
     fn the_view_of_the_defaults_matches_a_fresh_install() {
-        let view = view_for(&Settings::default(), &status_ok(), None, false);
+        let view = view_for(&Settings::default(), &status_ok(), None, false, None);
         assert!(!view.launch_at_login && !view.show_in_dock && view.show_popup);
         assert_eq!(MODE_CHOICES[view.mode].0, ShortcutMode::Toggle);
         assert_eq!(
@@ -1335,13 +2044,13 @@ mod tests {
             launch_at_login: true,
             ..Settings::default()
         };
-        let waiting = view_for(&on, &status_ok(), None, true);
+        let waiting = view_for(&on, &status_ok(), None, true, None);
         assert_eq!(
             waiting.launch_at_login_title,
             crate::launch_at_login::menu_title(true)
         );
         // Off, there is nothing to approve.
-        let off = view_for(&Settings::default(), &status_ok(), None, true);
+        let off = view_for(&Settings::default(), &status_ok(), None, true, None);
         assert_eq!(
             off.launch_at_login_title,
             crate::launch_at_login::menu_title(false)
@@ -1368,7 +2077,7 @@ mod tests {
                 reason: "taken".to_string(),
             }),
         };
-        let view = view_for(&Settings::default(), &none, None, false);
+        let view = view_for(&Settings::default(), &none, None, false, None);
         assert_eq!(view.shortcut, "None");
         assert_eq!(
             view.shortcut_note.as_deref(),
@@ -1381,7 +2090,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{ "popup_size": "huge", "popup_mic_on_ms": 60000 }"#).unwrap();
 
-        let view = view_for(&settings, &status_ok(), None, false);
+        let view = view_for(&settings, &status_ok(), None, false, None);
 
         assert_eq!(SIZE_CHOICES[view.size].0, PopupSize::Medium);
         assert_eq!(view.mic_on_ms, MicOnFlash::MAX_MS);
@@ -1434,7 +2143,13 @@ mod tests {
             .starts_with("Mic Mute keeps the settings it had"));
         assert!(later.note().contains("doesn't save them"));
 
-        let view = view_for(&Settings::default(), &status_ok(), Some(&problem), false);
+        let view = view_for(
+            &Settings::default(),
+            &status_ok(),
+            Some(&problem),
+            false,
+            None,
+        );
         assert_eq!(view.problem, Some(problem));
     }
 
@@ -1524,5 +2239,391 @@ mod tests {
             [Control::LaunchAtLogin, Control::PlaySound]
         );
         assert!(target.take_changed().is_empty());
+    }
+
+    fn press(key_code: u16, modifiers: NSEventModifierFlags) -> KeyPress {
+        KeyPress {
+            key_code,
+            modifiers,
+        }
+    }
+
+    fn down(key_code: u16, modifiers: NSEventModifierFlags) -> KeyEvent {
+        KeyEvent::Down {
+            key_code,
+            modifiers,
+            is_repeat: false,
+        }
+    }
+
+    fn shift_command() -> NSEventModifierFlags {
+        NSEventModifierFlags::Shift | NSEventModifierFlags::Command
+    }
+
+    fn no_modifiers() -> NSEventModifierFlags {
+        NSEventModifierFlags::empty()
+    }
+
+    const KEY_M: u16 = 0x2e;
+    const KEY_C: u16 = 0x08;
+    const KEY_2: u16 = 0x13;
+    const KEY_F5: u16 = 0x60;
+    const KEY_F13: u16 = 0x69;
+    const KEY_SPACE: u16 = 0x31;
+    const KEY_NUMPAD_0: u16 = 0x52;
+    const KEY_RETURN: u16 = 0x24;
+    const KEY_LEFT_ARROW: u16 = 0x7b;
+    const KEY_DELETE: u16 = 0x33;
+    const KEY_FN: u16 = 0x3f;
+
+    #[test]
+    fn every_recorded_key_parses_back_to_the_same_key() {
+        for &(key_code, code) in KEY_CODES {
+            let config = ShortcutConfig {
+                modifiers: vec!["ctrl".to_string(), "meta".to_string()],
+                key: key_label(code),
+            };
+            let shortcut = parse_shortcut(&config)
+                .unwrap_or_else(|e| panic!("key code {key_code:#04x}: {e:#}"));
+            assert_eq!(shortcut.code(), code, "key code {key_code:#04x}");
+            assert_eq!(code_for_key(key_code), Some(code));
+        }
+    }
+
+    #[test]
+    fn no_two_key_codes_share_a_key() {
+        let mut key_codes: Vec<u16> = KEY_CODES.iter().map(|&(key_code, _)| key_code).collect();
+        let mut keys: Vec<String> = KEY_CODES.iter().map(|&(_, key)| key.to_string()).collect();
+        key_codes.sort_unstable();
+        key_codes.dedup();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(key_codes.len(), KEY_CODES.len());
+        assert_eq!(keys.len(), KEY_CODES.len());
+    }
+
+    #[test]
+    fn keys_global_hotkey_cant_register_are_unknown() {
+        // Caps Lock, Fn, and the JIS keyboard's Eisu and Kana keys.
+        for key_code in [0x39, KEY_FN, 0x66, 0x68] {
+            assert_eq!(code_for_key(key_code), None, "key code {key_code:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_press_records_the_shortcut_as_settings_json_writes_it() {
+        assert_eq!(
+            record_press(press(KEY_M, shift_command())),
+            Recorded::Shortcut(ShortcutConfig::default())
+        );
+        let every_modifier = NSEventModifierFlags::Control
+            | NSEventModifierFlags::Option
+            | NSEventModifierFlags::Shift
+            | NSEventModifierFlags::Command;
+        assert_eq!(
+            record_press(press(KEY_F13, every_modifier)),
+            Recorded::Shortcut(ShortcutConfig {
+                modifiers: ["ctrl", "alt", "shift", "meta"].map(String::from).to_vec(),
+                key: "F13".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn caps_lock_fn_and_the_keypad_flag_arent_modifiers() {
+        let flags = shift_command()
+            | NSEventModifierFlags::CapsLock
+            | NSEventModifierFlags::Function
+            | NSEventModifierFlags::NumericPad;
+        assert_eq!(
+            record_press(press(KEY_M, flags)),
+            Recorded::Shortcut(ShortcutConfig::default())
+        );
+    }
+
+    #[test]
+    fn escape_cancels_unless_a_modifier_is_held() {
+        assert_eq!(
+            record_press(press(ESCAPE_KEY_CODE, no_modifiers())),
+            Recorded::Cancel
+        );
+        assert_eq!(
+            record_press(press(ESCAPE_KEY_CODE, NSEventModifierFlags::CapsLock)),
+            Recorded::Cancel
+        );
+        assert_eq!(
+            record_press(press(ESCAPE_KEY_CODE, NSEventModifierFlags::Control)),
+            Recorded::Shortcut(ShortcutConfig {
+                modifiers: vec!["ctrl".to_string()],
+                key: "Escape".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_key_without_modifiers_is_rejected_unless_parse_shortcut_takes_it() {
+        assert_eq!(
+            record_press(press(KEY_M, no_modifiers())),
+            Recorded::Rejected(
+                "Key \"M\" needs a modifier; only F13–F24 work without one".to_string()
+            )
+        );
+        assert_eq!(
+            record_press(press(KEY_F13, no_modifiers())),
+            Recorded::Shortcut(ShortcutConfig {
+                modifiers: Vec::new(),
+                key: "F13".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn shift_or_option_alone_on_a_text_key_is_rejected() {
+        assert_eq!(
+            record_press(press(KEY_M, NSEventModifierFlags::Shift)),
+            Recorded::Rejected("⇧M types or edits text in every app; add ⌃ or ⌘".to_string())
+        );
+        let shift = NSEventModifierFlags::Shift;
+        let option = NSEventModifierFlags::Option;
+        let text_keys = [
+            (KEY_2, option),
+            (KEY_M, shift | option),
+            (KEY_SPACE, shift),
+            (KEY_NUMPAD_0, option),
+            (KEY_RETURN, shift),
+            (KEY_LEFT_ARROW, option),
+            (KEY_DELETE, option),
+        ];
+        for (key_code, flags) in text_keys {
+            let recorded = record_press(press(key_code, flags));
+            assert!(
+                matches!(&recorded, Recorded::Rejected(reason) if reason.contains("edits text")),
+                "{key_code:#04x}: {recorded:?}"
+            );
+        }
+        // Function keys and Esc don't edit text, and ⌃ or ⌘ make a text key a shortcut.
+        let shortcuts = [
+            (KEY_F5, option),
+            (ESCAPE_KEY_CODE, shift),
+            (
+                KEY_M,
+                NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
+            ),
+            (KEY_M, NSEventModifierFlags::Command),
+        ];
+        for (key_code, flags) in shortcuts {
+            let recorded = record_press(press(key_code, flags));
+            assert!(
+                matches!(recorded, Recorded::Shortcut(_)),
+                "{key_code:#04x}: {recorded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_global_hotkey_cant_register_is_rejected() {
+        assert_eq!(
+            record_press(press(KEY_FN, NSEventModifierFlags::Command)),
+            Recorded::Rejected("Mic Mute can't use that key in a shortcut".to_string())
+        );
+    }
+
+    #[test]
+    fn the_recorder_stops_at_the_first_key_that_is_a_shortcut() {
+        let now = Instant::now();
+        let mut recording = Recording::new(now);
+        let presses = [
+            press(KEY_M, no_modifiers()),
+            press(KEY_M, shift_command()),
+            press(KEY_F13, no_modifiers()),
+        ];
+        assert_eq!(
+            advance(&mut recording, &presses, None, now),
+            Step::Record(ShortcutConfig::default())
+        );
+    }
+
+    #[test]
+    fn escape_or_the_timeout_stops_the_recorder_without_a_shortcut() {
+        let start = Instant::now();
+        let mut recording = Recording::new(start);
+        let almost = start + RECORDING_TIMEOUT - Duration::from_millis(1);
+        assert_eq!(advance(&mut recording, &[], None, almost), Step::Wait);
+        let timeout = start + RECORDING_TIMEOUT;
+        assert_eq!(advance(&mut recording, &[], None, timeout), Step::Stop);
+
+        let mut recording = Recording::new(start);
+        let escape = [press(ESCAPE_KEY_CODE, no_modifiers())];
+        assert_eq!(advance(&mut recording, &escape, None, start), Step::Stop);
+    }
+
+    #[test]
+    fn a_rejected_key_says_why_and_restarts_the_timeout() {
+        let start = Instant::now();
+        let mut recording = Recording::new(start);
+        let later = start + Duration::from_secs(20);
+        let plain_m = [press(KEY_M, no_modifiers())];
+        assert_eq!(advance(&mut recording, &plain_m, None, later), Step::Wait);
+        assert_eq!(recording.deadline, later + RECORDING_TIMEOUT);
+
+        let view = view_for(
+            &Settings::default(),
+            &status_ok(),
+            None,
+            false,
+            Some(&recording),
+        );
+        assert_eq!(
+            view.shortcut_note.as_deref(),
+            Some(
+                "Key \"M\" needs a modifier; only F13–F24 work without one. Press the new \
+                 shortcut, or Esc to cancel."
+            )
+        );
+        assert!(view.is_shortcut_note_error);
+        let first_deadline = start + RECORDING_TIMEOUT;
+        assert_eq!(
+            advance(&mut recording, &[], None, first_deadline),
+            Step::Wait
+        );
+    }
+
+    #[test]
+    fn while_recording_the_view_shows_the_modifiers_held_and_cancel() {
+        let now = Instant::now();
+        let mut recording = Recording::new(now);
+        let settings = Settings::default();
+        let view = view_for(&settings, &status_ok(), None, false, Some(&recording));
+        assert_eq!(view.shortcut, RECORDING_PROMPT);
+        assert_eq!(view.shortcut_note.as_deref(), Some(RECORDING_HINT));
+        assert!(!view.is_shortcut_note_error);
+        assert_eq!(view.record_title, CANCEL_RECORDING_TITLE);
+
+        let held = NSEventModifierFlags::Control | NSEventModifierFlags::Option;
+        assert_eq!(advance(&mut recording, &[], Some(held), now), Step::Wait);
+        let view = view_for(&settings, &status_ok(), None, false, Some(&recording));
+        assert_eq!(view.shortcut, "⌃⌥…");
+
+        advance(&mut recording, &[], Some(no_modifiers()), now);
+        let view = view_for(&settings, &status_ok(), None, false, Some(&recording));
+        assert_eq!(view.shortcut, RECORDING_PROMPT);
+
+        let idle = view_for(&settings, &status_ok(), None, false, None);
+        assert_eq!(idle.shortcut, "⇧⌘M");
+        assert_eq!(idle.record_title, RECORD_TITLE);
+    }
+
+    #[test]
+    fn outside_a_recording_the_monitor_takes_only_close_and_the_edit_commands() {
+        let command = NSEventModifierFlags::Command;
+        assert_eq!(catch(down(W_KEY_CODE, command), false), Catch::Close);
+        let edits = [
+            (0x07, EditCommand::Cut),
+            (KEY_C, EditCommand::Copy),
+            (0x09, EditCommand::Paste),
+            (0x00, EditCommand::SelectAll),
+        ];
+        for (key_code, edit) in edits {
+            assert_eq!(catch(down(key_code, command), false), Catch::Edit(edit));
+            assert_eq!(catch(down(key_code, shift_command()), false), Catch::Pass);
+        }
+        assert_eq!(catch(down(W_KEY_CODE, no_modifiers()), false), Catch::Pass);
+        assert_eq!(catch(down(W_KEY_CODE, shift_command()), false), Catch::Pass);
+        assert_eq!(catch(down(KEY_M, shift_command()), false), Catch::Pass);
+        assert_eq!(
+            catch(KeyEvent::ModifiersChanged(command), false),
+            Catch::Pass
+        );
+    }
+
+    #[test]
+    fn while_recording_the_monitor_takes_every_key_and_still_closes_on_command_w() {
+        let flags = shift_command();
+        assert_eq!(
+            catch(down(KEY_M, flags), true),
+            Catch::Press(press(KEY_M, flags))
+        );
+        // ⌘C is a shortcut to record then, not Copy.
+        let command = NSEventModifierFlags::Command;
+        assert_eq!(
+            catch(down(KEY_C, command), true),
+            Catch::Press(press(KEY_C, command))
+        );
+        let repeat = KeyEvent::Down {
+            key_code: KEY_M,
+            modifiers: flags,
+            is_repeat: true,
+        };
+        assert_eq!(catch(repeat, true), Catch::Swallow);
+        assert_eq!(
+            catch(KeyEvent::ModifiersChanged(flags), true),
+            Catch::Held(flags)
+        );
+        assert_eq!(catch(down(W_KEY_CODE, command), true), Catch::Close);
+    }
+
+    #[test]
+    fn the_monitor_swallows_only_the_keys_it_handles() {
+        assert!(Catch::Press(press(KEY_M, shift_command())).swallows());
+        assert!(Catch::Swallow.swallows());
+        assert!(Catch::Close.swallows());
+        assert!(Catch::Edit(EditCommand::Copy).swallows());
+        // Modifier changes still reach AppKit, which tracks them for every window.
+        assert!(!Catch::Held(shift_command()).swallows());
+        assert!(!Catch::Pass.swallows());
+    }
+
+    #[test]
+    fn the_catcher_keeps_presses_only_while_recording_and_hands_them_over_once() {
+        let catcher = KeyCatcher::default();
+        let flags = shift_command();
+        assert_eq!(catcher.catch(down(KEY_M, flags)), Catch::Pass);
+        assert!(catcher.take_presses().is_empty());
+
+        catcher.set_recording(true);
+        for key_code in [0x00, 0x01, 0x02, 0x03, 0x04] {
+            catcher.catch(down(key_code, flags));
+        }
+        catcher.catch(KeyEvent::ModifiersChanged(NSEventModifierFlags::Control));
+        let kept: Vec<u16> = catcher
+            .take_presses()
+            .iter()
+            .map(|press| press.key_code)
+            .collect();
+        assert_eq!(
+            kept,
+            [0x00, 0x01, 0x02, 0x03],
+            "a full queue drops later keys"
+        );
+        assert!(catcher.take_presses().is_empty());
+        assert_eq!(catcher.take_held(), Some(NSEventModifierFlags::Control));
+        assert_eq!(catcher.take_held(), None);
+    }
+
+    #[test]
+    fn starting_or_stopping_a_recording_drops_the_keys_caught_before() {
+        let catcher = KeyCatcher::default();
+        catcher.set_recording(true);
+        catcher.catch(down(KEY_M, shift_command()));
+        catcher.catch(KeyEvent::ModifiersChanged(shift_command()));
+        catcher.set_recording(false);
+        assert!(catcher.take_presses().is_empty());
+        assert_eq!(catcher.take_held(), None);
+    }
+
+    #[test]
+    fn the_catcher_hands_over_close_and_edit_commands_once() {
+        let catcher = KeyCatcher::default();
+        let command = NSEventModifierFlags::Command;
+        catcher.catch(down(0x00, command));
+        catcher.catch(down(KEY_C, command));
+        catcher.catch(down(W_KEY_CODE, command));
+        assert_eq!(
+            catcher.take_edits(),
+            [EditCommand::SelectAll, EditCommand::Copy]
+        );
+        assert!(catcher.take_edits().is_empty());
+        assert!(catcher.take_close_request());
+        assert!(!catcher.take_close_request());
     }
 }

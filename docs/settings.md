@@ -53,7 +53,7 @@ If the shortcut is invalid or macOS can't register it, Mic Mute logs an error an
 - At startup, it uses the default, `Cmd` + `Shift` + `M`. If that can't be registered either, Mic Mute runs without a shortcut; mute from the tray menu.
 - When the settings file is reloaded, the shortcut already in use stays active.
 
-The tray menu and the About window show the shortcut in use, and the About window explains why the configured one isn't in use.
+The tray menu, the About window, and the Settings window show the shortcut in use, and both windows explain why the configured one isn't in use. To change the shortcut without editing the file, [record it](#recording-a-shortcut) in the Settings window.
 
 ### `show_in_dock`
 
@@ -217,13 +217,24 @@ About → Reset Settings empties the list.
 
 ## Settings window
 
-The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (the shortcut in use, `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
+The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
 
 - Each change applies and is saved at once, like a tray toggle. The "Mic on" field takes whole milliseconds when you press Return or Tab or click elsewhere; anything else puts the setting's value back, and the stepper moves it by 100 ms.
 - The window shows changes made elsewhere as they apply: tray toggles, About → Reset Settings, and edits to `settings.json`, which Mic Mute reloads within two seconds.
 - Under the shortcut, the window explains why the configured shortcut isn't the one in use, as the About window does, and under the popup settings it lists the [popup values Mic Mute doesn't accept](#popup-values-mic-mute-doesnt-accept) that the file sets. Choosing a value in the window replaces such a value.
-- The window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open.
+- The window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Only a recording pauses the shortcut.
+- <kbd>Cmd</kbd> <kbd>W</kbd> closes the window, and <kbd>Cmd</kbd> with <kbd>X</kbd>, <kbd>C</kbd>, <kbd>V</kbd>, or <kbd>A</kbd> cuts, copies, pastes, or selects text in it.
 - While `settings.json` is invalid, the top of the window shows the error, with the file's path and the line and column, and an **Open settings.json** button. The controls stay usable: a change applies at once but isn't saved, as with the tray menu (see [Invalid settings](#invalid-settings)).
+
+### Recording a shortcut
+
+Click **Change…** next to the shortcut, then press the new one: hold its modifiers and press its key. The first key that makes a usable shortcut becomes `mic_shortcut`, which is saved and takes effect at once.
+
+- While the window records, the shortcut in use is paused, so pressing it reaches the recorder instead of muting. In `push_to_talk` mode, a hold in progress ends with a mute. The shortcut works again when the recording ends.
+- The recorder takes what `mic_shortcut` takes: a key without modifiers only if it's `F13` or higher. It also refuses `Shift` or `Option`, alone or together, on a key that types or edits text (a letter, a digit, punctuation, the space bar, the keypad, Tab, Return, Delete, and the arrow, Home, End, and page keys): as a shortcut, that combination would stop working in every app's text, so `Shift` + `M` would no longer type a capital M. Add `Ctrl` or `Cmd`. Caps Lock, Fn, and keys macOS hotkeys can't use, such as the JIS Eisu and Kana keys, can't be part of a shortcut.
+- A key it refuses shows why under the shortcut, and the recorder keeps waiting.
+- <kbd>Esc</kbd> without modifiers, **Cancel**, another control, closing the window, switching to another app, and 30 seconds without a key press end the recording without a change. <kbd>Cmd</kbd> <kbd>W</kbd> closes the window even while it records.
+- If macOS can't register the recorded shortcut, for example because another app has it, the shortcut in use stays, and the window says why. `settings.json` keeps the recorded one, as if you had typed it into the file.
 
 ## About window
 

@@ -38,7 +38,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
 Choose **Settings…** in the tray menu (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) to change the settings without editing `settings.json`:
 
 - **General:** Launch at Login and Show in Dock.
-- **Shortcut:** the mute shortcut in use, and why the configured one isn't, if it isn't; toggle or push-to-talk mode.
+- **Shortcut:** the mute shortcut in use, and why the configured one isn't, if it isn't; **Change…** records a new one when you press it; toggle or push-to-talk mode.
 - **Popup:** whether it shows while muted, its position and size, and how long it shows "Mic on" after an unmute.
 - **Feedback:** a sound and a notification when the microphones mute or unmute.
 - **Automatic mute:** what a launch does, and muting on screen lock, sleep, and display sleep.
