@@ -7,14 +7,13 @@
 //! which closes the window, and then runs `run_action`.
 use crate::settings::Settings;
 use crate::shortcuts::{current_status, ShortcutStatus};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSAlert, NSApplication};
-use objc2_foundation::{NSInteger, NSString};
+use objc2_app_kit::{NSAlert, NSApplication, NSWorkspace};
+use objc2_foundation::{NSInteger, NSString, NSURL};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 /// The file `Settings::save` writes.
@@ -22,9 +21,10 @@ fn settings_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
 }
 
-/// Opens settings.json in the default text editor. A fresh install has no file yet and
-/// `open` fails on a missing path, so the file is first written with `settings`, the
-/// settings in use. An existing file opens as it is, even an invalid one.
+/// Opens settings.json in the app macOS opens JSON files with, through `NSWorkspace`, so no
+/// child process is left to reap. A fresh install has no file yet and a missing file can't
+/// open, so it is first written with `settings`, the settings in use. An existing file opens
+/// as it is, even an invalid one.
 fn open_settings_file(settings: &Settings) -> Result<()> {
     let path = settings_path().context("Failed to locate the settings directory")?;
     if matches!(path.try_exists(), Ok(false)) {
@@ -32,11 +32,13 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
             .save()
             .context("Failed to create the settings file")?;
     }
-    Command::new("open")
-        .arg("-t")
-        .arg(&path)
-        .spawn()
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let path_text = path
+        .to_str()
+        .with_context(|| format!("{} isn't valid UTF-8", path.display()))?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path_text));
+    if !NSWorkspace::sharedWorkspace().openURL(&url) {
+        bail!("Failed to open {}", path.display());
+    }
     Ok(())
 }
 
