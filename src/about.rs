@@ -89,12 +89,13 @@ fn reset_settings(current: &Settings) -> Settings {
         mute_on_sleep: defaults.mute_on_sleep,
         mute_on_display_sleep: defaults.mute_on_display_sleep,
         // Feedback on a mute change: sound and notification off, the popup as it has always
-        // been. macOS keeps its own answer about notifications.
+        // been, up while muted. macOS keeps its own answer about notifications.
         play_sound: defaults.play_sound,
         show_notification: defaults.show_notification,
         popup_position: defaults.popup_position,
         popup_size: defaults.popup_size,
         popup_mic_on_ms: defaults.popup_mic_on_ms,
+        popup_mic_off_ms: defaults.popup_mic_off_ms,
         ..current.clone()
     }
 }
@@ -366,6 +367,7 @@ mod tests {
                 "popup_position": "top_right",
                 "popup_size": "large",
                 "popup_mic_on_ms": 3000,
+                "popup_mic_off_ms": 2000,
                 "future_setting": {{ "nested": [1, "two"] }}
             }}"#
         ))
@@ -412,6 +414,13 @@ mod tests {
         assert_eq!(reset.popup_position, defaults.popup_position);
         assert_eq!(reset.popup_size, defaults.popup_size);
         assert_eq!(reset.popup_mic_on_ms, defaults.popup_mic_on_ms);
+        assert_eq!(reset.popup_mic_off_ms, defaults.popup_mic_off_ms);
+        let saved = serde_json::to_value(&reset).unwrap();
+        assert_eq!(
+            saved["popup_mic_off_ms"],
+            serde_json::Value::Null,
+            "the popup stays up while muted again"
+        );
     }
 
     #[test]
@@ -443,6 +452,7 @@ mod tests {
             "popup_position",
             "popup_size",
             "popup_mic_on_ms",
+            "popup_mic_off_ms",
         ];
         for launch_at_login in [true, false] {
             let current = customized_settings(launch_at_login);

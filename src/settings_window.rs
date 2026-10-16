@@ -16,8 +16,8 @@
 //! key press end the recording, and the event loop registers the hotkey again
 //! (`Shortcuts::resume`).
 use crate::settings::{
-    Fallback, LaunchState, Lenient, LoadError, MicOnFlash, PopupPosition, PopupSize, Settings,
-    ShortcutConfig, ShortcutMode,
+    Fallback, LaunchState, Lenient, LoadError, MicOffFlash, MicOnFlash, PopupPosition, PopupSize,
+    Settings, ShortcutConfig, ShortcutMode,
 };
 use crate::shortcuts::{current_status, key_label, parse_shortcut, Shortcut, ShortcutStatus};
 use anyhow::{Context, Result};
@@ -51,8 +51,11 @@ const WIDE_TEXT_WIDTH: f64 = 440.;
 const NOTE_WIDTH: f64 = 320.;
 /// The margin around the window's content, in points.
 const CONTENT_MARGIN: f64 = 20.;
-/// How far the "Mic on" stepper moves per click, in milliseconds.
-const MIC_ON_STEP_MS: f64 = 100.;
+/// How far the "Mic on" and "Mic off" steppers move per click, in milliseconds.
+const MILLIS_STEP_MS: f64 = 100.;
+/// The milliseconds the disabled "Mic off" field shows while the popup stays up while muted,
+/// which checking Hide “Mic off” after sets: one second, as long as "Mic on" shows by default.
+const MIC_OFF_DEFAULT_MS: u64 = MicOnFlash::DEFAULT_MS;
 const URL_UNMUTE_WARNING: &str = "Any app, and any web page through your browser, can open a \
     com.brettinternet.mic-mute:// URL. With this on, any of them can unmute your microphones.";
 const FOOTER_TEXT: &str = "Changes apply at once and are saved to \
@@ -71,6 +74,9 @@ pub enum SettingsChange {
     PopupSize(PopupSize),
     /// Milliseconds; more than `MicOnFlash::MAX_MS` is capped.
     PopupMicOnMs(u64),
+    /// Milliseconds, more than `MicOffFlash::MAX_MS` capped; `None` keeps the popup up while
+    /// muted.
+    PopupMicOffMs(Option<u64>),
     PlaySound(bool),
     ShowNotification(bool),
     LaunchState(LaunchState),
@@ -98,6 +104,10 @@ impl SettingsChange {
             Self::PopupMicOnMs(ms) => replace(
                 &mut settings.popup_mic_on_ms,
                 Lenient::new(MicOnFlash::from_millis(*ms)),
+            ),
+            Self::PopupMicOffMs(ms) => replace(
+                &mut settings.popup_mic_off_ms,
+                Lenient::new(ms.map_or(MicOffFlash::WHILE_MUTED, MicOffFlash::from_millis)),
             ),
             Self::PlaySound(on) => replace(&mut settings.play_sound, *on),
             Self::ShowNotification(on) => replace(&mut settings.show_notification, *on),
@@ -225,6 +235,13 @@ fn parse_millis(text: &str) -> Option<u64> {
 /// The "Mic on" flash in whole milliseconds.
 fn mic_on_millis(flash: MicOnFlash) -> u64 {
     u64::try_from(flash.duration().as_millis()).unwrap_or(MicOnFlash::MAX_MS)
+}
+
+/// The "Mic off" flash in whole milliseconds; `None` while the popup stays up while muted.
+fn mic_off_millis(flash: MicOffFlash) -> Option<u64> {
+    flash
+        .duration()
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(MicOffFlash::MAX_MS))
 }
 
 /// The mute shortcut in use, as menus show it.
@@ -728,6 +745,8 @@ struct View {
     position: usize,
     size: usize,
     mic_on_ms: u64,
+    /// `None` while the popup stays up while muted, which unchecks Hide “Mic off” after.
+    mic_off_ms: Option<u64>,
     popup_note: Option<String>,
     play_sound: bool,
     show_notification: bool,
@@ -766,6 +785,7 @@ fn view_for(
         position: index_of(&POSITION_CHOICES, settings.popup_position.value()),
         size: index_of(&SIZE_CHOICES, settings.popup_size.value()),
         mic_on_ms: mic_on_millis(settings.popup_mic_on_ms.value()),
+        mic_off_ms: mic_off_millis(settings.popup_mic_off_ms.value()),
         popup_note: popup_note(settings),
         play_sound: settings.play_sound,
         show_notification: settings.show_notification,
@@ -790,6 +810,10 @@ enum Control {
     PopupSize,
     MicOnField,
     MicOnStepper,
+    /// The Hide “Mic off” after checkbox.
+    HideMicOff,
+    MicOffField,
+    MicOffStepper,
     PlaySound,
     ShowNotification,
     LaunchState,
@@ -801,7 +825,7 @@ enum Control {
 }
 
 impl Control {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 20] = [
         Self::LaunchAtLogin,
         Self::ShowInDock,
         Self::RecordShortcut,
@@ -811,6 +835,9 @@ impl Control {
         Self::PopupSize,
         Self::MicOnField,
         Self::MicOnStepper,
+        Self::HideMicOff,
+        Self::MicOffField,
+        Self::MicOffStepper,
         Self::PlaySound,
         Self::ShowNotification,
         Self::LaunchState,
@@ -1096,6 +1123,51 @@ fn pop_up<'a>(
     pop_up
 }
 
+/// A field for a whole number of milliseconds.
+fn millis_field(
+    control: Control,
+    target: &AnyObject,
+    mtm: MainThreadMarker,
+) -> Retained<NSTextField> {
+    let field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
+    field.setTag(control.tag());
+    // SAFETY: as in `checkbox`.
+    unsafe {
+        field.setTarget(Some(target));
+        field.setAction(Some(action()));
+    }
+    // Also send the action when editing ends with Tab or a click elsewhere, not only Return.
+    if let Some(cell) = field.cell() {
+        cell.setSendsActionOnEndEditing(true);
+    }
+    field
+        .widthAnchor()
+        .constraintEqualToConstant(64.)
+        .setActive(true);
+    field
+}
+
+/// A stepper from 0 to `max_ms` milliseconds, `MILLIS_STEP_MS` per click.
+fn millis_stepper(
+    control: Control,
+    max_ms: u64,
+    target: &AnyObject,
+    mtm: MainThreadMarker,
+) -> Retained<NSStepper> {
+    let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+    stepper.setMinValue(0.);
+    stepper.setMaxValue(max_ms as f64);
+    stepper.setIncrement(MILLIS_STEP_MS);
+    stepper.setValueWraps(false);
+    stepper.setTag(control.tag());
+    // SAFETY: as in `checkbox`.
+    unsafe {
+        stepper.setTarget(Some(target));
+        stepper.setAction(Some(action()));
+    }
+    stepper
+}
+
 /// A stack of `views`, top to bottom or left to right, `spacing` points apart.
 fn stack(
     views: &[&NSView],
@@ -1128,6 +1200,17 @@ fn is_checked(button: &NSButton) -> bool {
 
 fn select(pop_up: &NSPopUpButton, index: usize) {
     pop_up.selectItemAtIndex(NSInteger::try_from(index).unwrap_or(0));
+}
+
+/// Shows `ms` in a milliseconds field and its stepper.
+fn show_millis(field: &NSTextField, stepper: &NSStepper, ms: u64) {
+    field.setStringValue(&NSString::from_str(&ms.to_string()));
+    stepper.setIntegerValue(NSInteger::try_from(ms).unwrap_or(0));
+}
+
+/// A stepper's milliseconds; 0 for a negative value, which its minimum rules out.
+fn stepper_millis(stepper: &NSStepper) -> u64 {
+    u64::try_from(stepper.integerValue()).unwrap_or(0)
 }
 
 /// Shows `text` in a note under a control, hiding its grid row while there is none.
@@ -1163,6 +1246,11 @@ struct Controls {
     size: Retained<NSPopUpButton>,
     mic_on_field: Retained<NSTextField>,
     mic_on_stepper: Retained<NSStepper>,
+    /// Hide “Mic off” after: on, the popup hides the field's milliseconds after each mute.
+    hide_mic_off: Retained<NSButton>,
+    /// Enabled only while `hide_mic_off` is checked, as is `mic_off_stepper`.
+    mic_off_field: Retained<NSTextField>,
+    mic_off_stepper: Retained<NSStepper>,
     popup_note: Retained<NSTextField>,
     popup_note_row: Retained<NSGridRow>,
     play_sound: Retained<NSButton>,
@@ -1178,6 +1266,15 @@ struct Controls {
 enum Row<'a> {
     Header(&'a NSView),
     Setting(&'a NSView, &'a NSView),
+}
+
+/// The index of the row whose control is `control`, so a row added above it needs no
+/// renumbering. 0 for a control `rows` lacks, which `Controls::new` never looks up.
+fn row_index(rows: &[Row], control: &NSView) -> NSInteger {
+    rows.iter()
+        .position(|row| matches!(row, Row::Setting(_, view) if ptr::eq(*view, control)))
+        .and_then(|index| NSInteger::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 impl Controls {
@@ -1229,34 +1326,21 @@ impl Controls {
             mtm,
         );
         let size = pop_up(titles(&SIZE_CHOICES), Control::PopupSize, target, mtm);
-        let mic_on_field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        mic_on_field.setTag(Control::MicOnField.tag());
-        // SAFETY: as in `checkbox`.
-        unsafe {
-            mic_on_field.setTarget(Some(target));
-            mic_on_field.setAction(Some(action()));
-        }
-        // Also send the action when editing ends with Tab or a click elsewhere, not only Return.
-        if let Some(cell) = mic_on_field.cell() {
-            cell.setSendsActionOnEndEditing(true);
-        }
-        mic_on_field
-            .widthAnchor()
-            .constraintEqualToConstant(64.)
-            .setActive(true);
-        let mic_on_stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
-        mic_on_stepper.setMinValue(0.);
-        mic_on_stepper.setMaxValue(MicOnFlash::MAX_MS as f64);
-        mic_on_stepper.setIncrement(MIC_ON_STEP_MS);
-        mic_on_stepper.setValueWraps(false);
-        mic_on_stepper.setTag(Control::MicOnStepper.tag());
-        // SAFETY: as in `checkbox`.
-        unsafe {
-            mic_on_stepper.setTarget(Some(target));
-            mic_on_stepper.setAction(Some(action()));
-        }
+        let mic_on_field = millis_field(Control::MicOnField, target, mtm);
+        let mic_on_stepper = millis_stepper(Control::MicOnStepper, MicOnFlash::MAX_MS, target, mtm);
         let ms = label("ms", mtm);
         let mic_on = stack(&[&mic_on_field, &ms, &mic_on_stepper], horizontal, 6., mtm);
+        let hide_mic_off = checkbox("Hide “Mic off” after", Control::HideMicOff, target, mtm);
+        let mic_off_field = millis_field(Control::MicOffField, target, mtm);
+        let mic_off_stepper =
+            millis_stepper(Control::MicOffStepper, MicOffFlash::MAX_MS, target, mtm);
+        let mic_off_ms = label("ms", mtm);
+        let mic_off = stack(
+            &[&hide_mic_off, &mic_off_field, &mic_off_ms, &mic_off_stepper],
+            horizontal,
+            6.,
+            mtm,
+        );
         let popup_note = note_label("", NOTE_WIDTH, mtm);
 
         let play_sound = checkbox(
@@ -1338,6 +1422,7 @@ impl Controls {
             Row::Setting(position_label, &position),
             Row::Setting(size_label, &size),
             Row::Setting(mic_on_label, &mic_on),
+            Row::Setting(&empty, &mic_off),
             Row::Setting(&empty, &popup_note),
             Row::Header(feedback),
             Row::Setting(&empty, &play_sound),
@@ -1352,11 +1437,11 @@ impl Controls {
             Row::Setting(&empty, &url_warning),
         ];
         // The rows of the two notes, which hide while there's nothing to say.
-        const SHORTCUT_NOTE_ROW: NSInteger = 5;
-        const POPUP_NOTE_ROW: NSInteger = 12;
+        let shortcut_note_index = row_index(&rows, &shortcut_note);
+        let popup_note_index = row_index(&rows, &popup_note);
         let grid = grid(&rows, mtm);
-        let shortcut_note_row = grid.rowAtIndex(SHORTCUT_NOTE_ROW);
-        let popup_note_row = grid.rowAtIndex(POPUP_NOTE_ROW);
+        let shortcut_note_row = grid.rowAtIndex(shortcut_note_index);
+        let popup_note_row = grid.rowAtIndex(popup_note_index);
 
         let footer = note_label(FOOTER_TEXT, WIDE_TEXT_WIDTH, mtm);
         let content = stack(&[&notice, &grid, &footer], vertical, 18., mtm);
@@ -1385,6 +1470,9 @@ impl Controls {
             size,
             mic_on_field,
             mic_on_stepper,
+            hide_mic_off,
+            mic_off_field,
+            mic_off_stepper,
             popup_note,
             popup_note_row,
             play_sound,
@@ -1397,10 +1485,16 @@ impl Controls {
         }
     }
 
-    /// Shows `new`, touching only what differs from `old`; `is_mic_on_stale` rewrites the
-    /// "Mic on" field after an edit, which may have left text the setting doesn't hold.
-    /// Returns whether the content's size may have changed.
-    fn show(&self, old: Option<&View>, new: &View, is_mic_on_stale: bool) -> bool {
+    /// Shows `new`, touching only what differs from `old`; `is_mic_on_stale` and
+    /// `is_mic_off_stale` rewrite the "Mic on" and "Mic off" fields after an edit, which may have
+    /// left text the setting doesn't hold. Returns whether the content's size may have changed.
+    fn show(
+        &self,
+        old: Option<&View>,
+        new: &View,
+        is_mic_on_stale: bool,
+        is_mic_off_stale: bool,
+    ) -> bool {
         let mut is_resized = false;
         if differs(old, new, |view| &view.problem) {
             is_resized = true;
@@ -1466,11 +1560,15 @@ impl Controls {
             select(&self.size, new.size);
         }
         if is_mic_on_stale || differs(old, new, |view| &view.mic_on_ms) {
-            let ms = new.mic_on_ms;
-            self.mic_on_field
-                .setStringValue(&NSString::from_str(&ms.to_string()));
-            self.mic_on_stepper
-                .setIntegerValue(NSInteger::try_from(ms).unwrap_or(0));
+            show_millis(&self.mic_on_field, &self.mic_on_stepper, new.mic_on_ms);
+        }
+        if is_mic_off_stale || differs(old, new, |view| &view.mic_off_ms) {
+            let is_hiding = new.mic_off_ms.is_some();
+            set_checked(&self.hide_mic_off, is_hiding);
+            let ms = new.mic_off_ms.unwrap_or(MIC_OFF_DEFAULT_MS);
+            show_millis(&self.mic_off_field, &self.mic_off_stepper, ms);
+            self.mic_off_field.setEnabled(is_hiding);
+            self.mic_off_stepper.setEnabled(is_hiding);
         }
         if differs(old, new, |view| &view.popup_note) {
             is_resized = true;
@@ -1625,6 +1723,8 @@ pub struct SettingsWindow {
     shown: Option<View>,
     /// The "Mic on" field was edited, so `refresh` writes the setting back into it.
     is_mic_on_stale: bool,
+    /// The same for the "Mic off" field.
+    is_mic_off_stale: bool,
     /// The shortcut recording in progress.
     recording: Option<Recording>,
 }
@@ -1762,9 +1862,27 @@ impl SettingsWindow {
                 self.is_mic_on_stale = true;
                 SettingsChange::PopupMicOnMs(parse_millis(&text)?)
             }
-            Control::MicOnStepper => SettingsChange::PopupMicOnMs(
-                u64::try_from(controls.mic_on_stepper.integerValue()).unwrap_or(0),
+            Control::MicOnStepper => {
+                SettingsChange::PopupMicOnMs(stepper_millis(&controls.mic_on_stepper))
+            }
+            // Checking it sets the milliseconds the disabled field showed.
+            Control::HideMicOff => SettingsChange::PopupMicOffMs(
+                is_checked(&controls.hide_mic_off)
+                    .then(|| stepper_millis(&controls.mic_off_stepper)),
             ),
+            Control::MicOffField => {
+                let text = controls.mic_off_field.stringValue().to_string();
+                self.is_mic_off_stale = true;
+                // An edit that ends because the checkbox was unchecked changes nothing.
+                if !is_checked(&controls.hide_mic_off) {
+                    return None;
+                }
+                SettingsChange::PopupMicOffMs(Some(parse_millis(&text)?))
+            }
+            Control::MicOffStepper if is_checked(&controls.hide_mic_off) => {
+                SettingsChange::PopupMicOffMs(Some(stepper_millis(&controls.mic_off_stepper)))
+            }
+            Control::MicOffStepper => return None,
             Control::PlaySound => SettingsChange::PlaySound(is_checked(&controls.play_sound)),
             Control::ShowNotification => {
                 SettingsChange::ShowNotification(is_checked(&controls.show_notification))
@@ -1801,13 +1919,17 @@ impl SettingsWindow {
             crate::launch_at_login::needs_approval(),
             self.recording.as_ref(),
         );
-        if self.shown.as_ref() == Some(&view) && !self.is_mic_on_stale {
+        if self.shown.as_ref() == Some(&view) && !self.is_mic_on_stale && !self.is_mic_off_stale {
             return;
         }
-        let is_resized = built
-            .controls
-            .show(self.shown.as_ref(), &view, self.is_mic_on_stale);
+        let is_resized = built.controls.show(
+            self.shown.as_ref(),
+            &view,
+            self.is_mic_on_stale,
+            self.is_mic_off_stale,
+        );
         self.is_mic_on_stale = false;
+        self.is_mic_off_stale = false;
         if is_resized {
             fit_to_content(&built.window, &built.controls.content);
         }
@@ -1847,6 +1969,7 @@ mod tests {
             SettingsChange::PopupPosition(PopupPosition::TopRight),
             SettingsChange::PopupSize(PopupSize::Large),
             SettingsChange::PopupMicOnMs(2_500),
+            SettingsChange::PopupMicOffMs(Some(1_500)),
             SettingsChange::PlaySound(true),
             SettingsChange::ShowNotification(true),
             SettingsChange::LaunchState(LaunchState::Last),
@@ -1872,6 +1995,7 @@ mod tests {
         assert_eq!(saved["popup_position"], "top_right");
         assert_eq!(saved["popup_size"], "large");
         assert_eq!(saved["popup_mic_on_ms"], 2_500);
+        assert_eq!(saved["popup_mic_off_ms"], 1_500);
         assert_eq!(saved["play_sound"], true);
         assert_eq!(saved["show_notification"], true);
         assert_eq!(saved["launch_state"], "last");
@@ -1903,6 +2027,53 @@ mod tests {
             MicOnFlash::from_millis(10_000)
         );
         assert!(settings.feedback_problems().is_empty());
+    }
+
+    #[test]
+    fn unchecking_hide_mic_off_keeps_the_popup_up_while_muted_again() {
+        let mut settings = Settings::default();
+        assert!(SettingsChange::PopupMicOffMs(Some(2_000)).apply_to(&mut settings));
+        assert_eq!(
+            settings.popup_mic_off_ms.value().duration(),
+            Some(Duration::from_secs(2))
+        );
+
+        assert!(SettingsChange::PopupMicOffMs(None).apply_to(&mut settings));
+        assert!(
+            !SettingsChange::PopupMicOffMs(None).apply_to(&mut settings),
+            "already off"
+        );
+
+        assert_eq!(settings.popup_mic_off_ms.value(), MicOffFlash::WHILE_MUTED);
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["popup_mic_off_ms"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_long_mic_off_flash_is_capped() {
+        let mut settings = Settings::default();
+        assert!(SettingsChange::PopupMicOffMs(Some(60_000)).apply_to(&mut settings));
+        assert_eq!(
+            settings.popup_mic_off_ms.value(),
+            MicOffFlash::from_millis(MicOffFlash::MAX_MS)
+        );
+        assert!(settings.feedback_problems().is_empty());
+    }
+
+    #[test]
+    fn hiding_mic_off_or_not_replaces_a_value_the_file_got_wrong() {
+        for change in [
+            SettingsChange::PopupMicOffMs(None),
+            SettingsChange::PopupMicOffMs(Some(800)),
+        ] {
+            let mut settings: Settings =
+                serde_json::from_str(r#"{ "popup_mic_off_ms": "1s" }"#).unwrap();
+            assert_eq!(settings.popup_mic_off_ms.value(), MicOffFlash::WHILE_MUTED);
+
+            assert!(change.apply_to(&mut settings), "{change:?}");
+
+            assert!(settings.feedback_problems().is_empty(), "{change:?}");
+        }
     }
 
     #[test]
@@ -1991,6 +2162,7 @@ mod tests {
                 "popup_position": "top_left",
                 "popup_size": "small",
                 "popup_mic_on_ms": 0,
+                "popup_mic_off_ms": 2500,
                 "play_sound": true,
                 "show_notification": true,
                 "launch_state": "muted",
@@ -2012,6 +2184,7 @@ mod tests {
         assert_eq!(POSITION_CHOICES[view.position].0, PopupPosition::TopLeft);
         assert_eq!(SIZE_CHOICES[view.size].0, PopupSize::Small);
         assert_eq!(view.mic_on_ms, 0);
+        assert_eq!(view.mic_off_ms, Some(2_500));
         assert_eq!(view.popup_note, None);
         assert!(view.play_sound && view.show_notification);
         assert_eq!(
@@ -2034,6 +2207,10 @@ mod tests {
         );
         assert_eq!(SIZE_CHOICES[view.size].0, PopupSize::Medium);
         assert_eq!(view.mic_on_ms, MicOnFlash::DEFAULT_MS);
+        assert_eq!(
+            view.mic_off_ms, None,
+            "Hide “Mic off” after is unchecked: the popup stays up while muted"
+        );
         assert_eq!(LAUNCH_STATE_CHOICES[view.launch_state].0, LaunchState::Keep);
         assert!(!view.allow_url_unmute);
     }
@@ -2100,6 +2277,22 @@ mod tests {
                 "settings.json: popup_size \"huge\" isn't one of \"small\", \"medium\", \
                  \"large\"; using \"medium\".\nsettings.json: popup_mic_on_ms 60000 is above \
                  the maximum, 10000; using 10000."
+            )
+        );
+    }
+
+    #[test]
+    fn the_popup_note_lists_a_mic_off_value_the_file_got_wrong() {
+        let settings: Settings = serde_json::from_str(r#"{ "popup_mic_off_ms": "1s" }"#).unwrap();
+
+        let view = view_for(&settings, &status_ok(), None, false, None);
+
+        assert_eq!(view.mic_off_ms, None, "the popup stays up while muted");
+        assert_eq!(
+            view.popup_note.as_deref(),
+            Some(
+                "settings.json: popup_mic_off_ms \"1s\" isn't null or a whole number of \
+                 milliseconds from 0 to 10000; using null."
             )
         );
     }

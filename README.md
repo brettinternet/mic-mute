@@ -25,6 +25,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] Popup window shouldn't appear in screenshots or recordings and ignores mouse events
   - [x] Popup follows screens and monitors with cursor
   - [x] Choose the popup's [position, size](./docs/settings.md#popup_position), and how long it shows "Mic on" after an unmute
+  - [x] Optionally [show the popup only briefly after each mute](./docs/settings.md#popup_mic_off_ms) instead of for as long as the microphones stay muted
   - [x] Optionally [play a sound](./docs/settings.md#play_sound) or [post a notification](./docs/settings.md#show_notification) when the microphones mute or unmute
   - [x] List each microphone and its state in the tray's Microphones menu; uncheck one there to [exclude it](./docs/settings.md#excluded_devices)
 - [x] Report whether a camera is in use: a dot on the tray icon (its tooltip says "Camera in use") and a label in the popup (disabling cameras appears to be impossible or too difficult for the scope of this project)
@@ -39,7 +40,7 @@ Choose **Settings…** in the tray menu (<kbd>Cmd</kbd> <kbd>,</kbd> while the m
 
 - **General:** Launch at Login and Show in Dock.
 - **Shortcut:** the mute shortcut in use, and why the configured one isn't, if it isn't; **Change…** records a new one when you press it; toggle or push-to-talk mode.
-- **Popup:** whether it shows while muted, its position and size, and how long it shows "Mic on" after an unmute.
+- **Popup:** whether it shows while muted, its position and size, how long it shows "Mic on" after an unmute, and whether it hides a set time after each mute instead of staying up.
 - **Feedback:** a sound and a notification when the microphones mute or unmute.
 - **Automatic mute:** what a launch does, and muting on screen lock, sleep, and display sleep.
 - **External control:** whether URLs may unmute the microphones.

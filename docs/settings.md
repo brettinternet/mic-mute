@@ -30,7 +30,8 @@ The tray menu's **Settings…** item opens a [Settings window](#settings-window)
   "show_notification": false,
   "popup_position": "bottom_center",
   "popup_size": "medium",
-  "popup_mic_on_ms": 1000
+  "popup_mic_on_ms": 1000,
+  "popup_mic_off_ms": null
 }
 ```
 
@@ -87,7 +88,7 @@ See the README's [Launch at Login](../README.md#launch-at-login) section for how
 
 Controls the small on-screen mute-status popup.
 
-- `true` (default): show the popup when the microphone is muted.
+- `true` (default): show the popup while the microphones are muted, or only briefly after each mute with [`popup_mic_off_ms`](#popup_mic_off_ms).
 - `false`: keep the popup hidden while retaining the tray indicator.
 
 The tray menu can also toggle this setting. A `status` URL shows the popup for two seconds either way.
@@ -117,11 +118,23 @@ Controls how long the popup stays up showing "Mic on" after you unmute, in milli
 - `0`: hide the popup as soon as you unmute, without showing "Mic on".
 - At most `10000`, ten seconds; a larger value counts as `10000`.
 
-Muting again while "Mic on" shows keeps the popup up.
+Muting again while "Mic on" shows switches the popup to "Mic off": it then stays up while muted or, with [`popup_mic_off_ms`](#popup_mic_off_ms) set, hides that long after the mute. With `popup_mic_off_ms` set, an unmute shows the popup again even after "Mic off" has hidden.
+
+### `popup_mic_off_ms`
+
+Controls how long the popup shows "Mic off" after the microphones mute, in milliseconds, so that it doesn't stay on screen.
+
+- `null` (default): keep the popup up for as long as the microphones stay muted, as it always has.
+- A whole number, such as `1500`: hide the popup that long after each mute. `0` shows nothing on a mute: the popup then appears only to show "Mic on" after an unmute, and for `status` URLs.
+- At most `10000`, ten seconds; a larger value counts as `10000`.
+
+Every mute shows "Mic off" and starts the time over, also while the popup is already up: from the shortcut (in push-to-talk mode, each release), the tray's Mute item, a URL action, or an automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`, and the mutes of [push-to-talk mode](#mode)). The re-mutes Mic Mute makes when another app unmutes a microphone or one is plugged in, and a camera turning on or off, don't show the popup or bring it to the front, and they leave the time as it is. Starting Mic Mute while every microphone is already muted, without a mute at launch, shows nothing.
+
+After "Mic off" hides, an unmute shows the popup with "Mic on" for [`popup_mic_on_ms`](#popup_mic_on_ms), and a `status` URL shows it for two seconds. With `show_popup` off, only `status` URLs show it. Setting a number while the popup is up because the microphones are muted hides it at once, or when a `status` URL's two seconds end; setting `null` again while muted shows it.
 
 ### Popup values Mic Mute doesn't accept
 
-A `popup_position`, `popup_size`, or `popup_mic_on_ms` value Mic Mute doesn't accept, such as `"top-right"`, `"huge"`, `-1`, or `1.5`, doesn't make the file invalid: Mic Mute logs a warning naming the value and uses the default instead (`10000` for a `popup_mic_on_ms` above it), while the file's other settings apply. Names are read in any letter case. Saves keep such a value as written, so it stays in the file for you to fix.
+A `popup_position`, `popup_size`, `popup_mic_on_ms`, or `popup_mic_off_ms` value Mic Mute doesn't accept, such as `"top-right"`, `"huge"`, `-1`, or `1.5`, doesn't make the file invalid: Mic Mute logs a warning naming the value and uses the default instead (`10000` for a `popup_mic_on_ms` or `popup_mic_off_ms` above it; for `popup_mic_off_ms` the default, `null`, keeps the popup up while muted), while the file's other settings apply. Names are read in any letter case. Saves keep such a value as written, so it stays in the file for you to fix.
 
 ### `play_sound`
 
@@ -217,9 +230,10 @@ About → Reset Settings empties the list.
 
 ## Settings window
 
-The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
+The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`, `popup_mic_off_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
 
-- Each change applies and is saved at once, like a tray toggle. The "Mic on" field takes whole milliseconds when you press Return or Tab or click elsewhere; anything else puts the setting's value back, and the stepper moves it by 100 ms.
+- Each change applies and is saved at once, like a tray toggle. The "Mic on" and "Mic off" fields take whole milliseconds when you press Return or Tab or click elsewhere; anything else puts the setting's value back, and each stepper moves its field by 100 ms.
+- Checking **Hide “Mic off” after** sets `popup_mic_off_ms` to `1000`, which its field and stepper then change; unchecking it sets `null`, so the popup stays up while muted again. The field and stepper work only while it's checked.
 - The window shows changes made elsewhere as they apply: tray toggles, About → Reset Settings, and edits to `settings.json`, which Mic Mute reloads within two seconds.
 - Under the shortcut, the window explains why the configured shortcut isn't the one in use, as the About window does, and under the popup settings it lists the [popup values Mic Mute doesn't accept](#popup-values-mic-mute-doesnt-accept) that the file sets. Choosing a value in the window replaces such a value.
 - The window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Only a recording pauses the shortcut.
