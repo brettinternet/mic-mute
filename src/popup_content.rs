@@ -1,9 +1,12 @@
 use crate::icons::{self, RenderedIcon};
 use anyhow::Result;
-use cocoa::appkit::{NSColor, NSImage, NSImageView, NSTextField};
-use cocoa::base::{id, nil, NO, YES};
-use cocoa::foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
-use objc::runtime::Object;
+use objc2::rc::Retained;
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSColor, NSFont, NSImage, NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSLayoutRelation,
+    NSStackView, NSStackViewGravity, NSTextAlignment, NSTextField, NSView,
+};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use std::sync::Arc;
 use tao::dpi::LogicalSize;
 use tao::window::Theme;
@@ -12,14 +15,6 @@ const MUTED_DESCRIPTION: &str = "Mic off";
 const UNMUTED_DESCRIPTION: &str = "Mic on";
 const CAMERA_MUTED_DESCRIPTION: &str = "Camera off";
 const CAMERA_UNMUTED_DESCRIPTION: &str = "Camera on";
-
-/// `NSTextAlignmentCenter`, an `NSInteger` (AppKit `NSText.h`). The header picks the value with
-/// `TARGET_ABI_USES_IOS_VALUES`, which `TargetConditionals.h` defines as `!TARGET_CPU_X86_64 || …`:
-/// Apple silicon Macs use the iOS value 1 (`NSTextAlignmentRight` = 2), Intel Macs use 2
-/// (`NSTextAlignmentRight` = 1).
-const NS_TEXT_ALIGNMENT_CENTER: i64 = if cfg!(target_arch = "x86_64") { 2 } else { 1 };
-/// `NSStackViewGravityCenter = 2`, an `NSInteger` (AppKit `NSStackView.h`).
-const NS_STACK_VIEW_GRAVITY_CENTER: i64 = 2;
 
 /// The medium popup's measurements, which it has always had; the other sizes scale them
 /// (`Metrics::at`). The labels' line height:
@@ -79,83 +74,82 @@ fn get_frame_rect(size: LogicalSize<f64>, line_height: f64) -> NSRect {
     )
 }
 
-fn get_text_color(muted: bool, theme: Theme) -> id {
-    unsafe {
-        // 239, 68, 68 (light mode red) - #ef4444 / 248, 113, 113 (dark mode red) - #f87171
-        let dark_red = NSColor::colorWithRed_green_blue_alpha_(nil, 0.9372, 0.2666, 0.2666, 1.);
-        let light_red = NSColor::colorWithRed_green_blue_alpha_(nil, 0.9725, 0.4431, 0.4431, 1.);
-        let black = NSColor::colorWithRed_green_blue_alpha_(nil, 0., 0., 0., 1.);
-        let white = NSColor::colorWithRed_green_blue_alpha_(nil, 1., 1., 1., 1.);
-        match theme {
-            Theme::Light if muted => dark_red,
-            Theme::Light => black,
-            Theme::Dark if muted => light_red,
-            _ => white,
-        }
+/// A label's red, green, and blue: red while what it names is off, otherwise black on the
+/// light theme and white on the dark one.
+fn text_rgb(muted: bool, theme: Theme) -> (f64, f64, f64) {
+    match theme {
+        // 239, 68, 68 (light mode red) - #ef4444
+        Theme::Light if muted => (0.9372, 0.2666, 0.2666),
+        Theme::Light => (0., 0., 0.),
+        // 248, 113, 113 (dark mode red) - #f87171
+        Theme::Dark if muted => (0.9725, 0.4431, 0.4431),
+        _ => (1., 1., 1.),
     }
+}
+
+fn get_text_color(muted: bool, theme: Theme) -> Retained<NSColor> {
+    let (red, green, blue) = text_rgb(muted, theme);
+    NSColor::colorWithRed_green_blue_alpha(red, green, blue, 1.)
 }
 
 /// Sets `label`'s text and color.
-unsafe fn set_label(label: id, text: &str, color: id) {
-    let text = NSString::alloc(nil).init_str(text);
-    label.setStringValue_(text);
-    let _: () = msg_send![text, release];
-    let _: () = msg_send![label, setTextColor: color];
+fn set_label(label: &NSTextField, text: &str, color: &NSColor) {
+    label.setStringValue(&NSString::from_str(text));
+    label.setTextColor(Some(color));
 }
 
-fn get_textfield(text: &str, color: id, frame: NSRect, font_size: f64) -> id {
-    unsafe {
-        let label = NSTextField::alloc(nil);
-        let label: id = msg_send![label, initWithFrame: frame];
-        set_label(label, text, color);
-        let _: () = msg_send![label, setBezeled: NO];
-        let _: () = msg_send![label, setEditable: NO];
-        let _: () = msg_send![label, setDrawsBackground: NO];
-        let _: () = msg_send![label, setSelectable: NO];
-        let _: () = msg_send![label, setAlignment: NS_TEXT_ALIGNMENT_CENTER];
-        let custom_font: *mut Object = msg_send![class!(NSFont), systemFontOfSize: font_size];
-        let _: () = msg_send![label, setFont: custom_font];
-        label
-    }
+fn get_textfield(
+    mtm: MainThreadMarker,
+    text: &str,
+    color: &NSColor,
+    frame: NSRect,
+    font_size: f64,
+) -> Retained<NSTextField> {
+    let label = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
+    set_label(&label, text, color);
+    label.setBezeled(false);
+    label.setEditable(false);
+    label.setDrawsBackground(false);
+    label.setSelectable(false);
+    label.setAlignment(NSTextAlignment::Center);
+    label.setFont(Some(&NSFont::systemFontOfSize(font_size)));
+    label
 }
 
-/// `+[NSFont systemFontSize]`, the size the labels scale from.
-fn system_font_size() -> f64 {
-    unsafe { msg_send![class!(NSFont), systemFontSize] }
-}
-
-/// A new `NSImage` of `icon`'s cached PNG, `height` points tall; the caller owns it (+1) and
-/// releases it.
-fn ns_image(icon: &RenderedIcon, height: f64) -> id {
+/// A new `NSImage` of `icon`'s cached PNG, `height` points tall; `None` when AppKit can't read
+/// the PNG.
+fn ns_image(icon: &RenderedIcon, height: f64) -> Option<Retained<NSImage>> {
     let icon_width = f64::from(icon.width) / (f64::from(icon.height) / height);
-    unsafe {
-        let nsdata = NSData::dataWithBytes_length_(
-            nil,
-            icon.png.as_ptr() as *const std::os::raw::c_void,
-            icon.png.len() as u64,
-        );
-        let ns_image = NSImage::initWithData_(NSImage::alloc(nil), nsdata);
-        let _: () = msg_send![ns_image, setSize: NSSize::new(icon_width, height)];
-        let _: () = msg_send![ns_image, setTemplate: NO];
-        ns_image
-    }
+    let data = NSData::with_bytes(&icon.png);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    image.setSize(NSSize::new(icon_width, height));
+    image.setTemplate(false);
+    Some(image)
 }
 
-/// Shows `icon`, `height` points tall, in `image_view`, which then holds the only reference to
-/// the new `NSImage`.
-unsafe fn set_image(image_view: id, icon: &RenderedIcon, height: f64) {
+/// Shows `icon`, `height` points tall, in `image_view`. A PNG AppKit can't read leaves the view
+/// without an image.
+fn set_image(image_view: &NSImageView, icon: &RenderedIcon, height: f64) {
     let image = ns_image(icon, height);
-    image_view.setImage_(image);
-    let _: () = msg_send![image, release];
+    if image.is_none() {
+        log::warn!(
+            "AppKit can't read the {}×{} popup icon",
+            icon.width,
+            icon.height
+        );
+    }
+    image_view.setImage(image.as_deref());
 }
 
-fn make_image_view(icon: &RenderedIcon, frame: NSRect, height: f64) -> id {
-    unsafe {
-        let view = NSImageView::alloc(nil);
-        let view: id = msg_send![view, initWithFrame: frame];
-        set_image(view, icon, height);
-        view
-    }
+fn make_image_view(
+    mtm: MainThreadMarker,
+    icon: &RenderedIcon,
+    frame: NSRect,
+    height: f64,
+) -> Retained<NSImageView> {
+    let view = NSImageView::initWithFrame(NSImageView::alloc(mtm), frame);
+    set_image(&view, icon, height);
+    view
 }
 
 /// The mic and camera icons for `state`, from the process-wide cache.
@@ -168,30 +162,35 @@ fn icons_for(state: PopupState) -> Result<(Arc<RenderedIcon>, Arc<RenderedIcon>)
 /// 1pt-wide vertical separator. Explicit size constraints tell the gravity-based
 /// NSStackView its width without activating the Auto Layout feedback loop that
 /// causes the window to grow.
-unsafe fn make_separator_view(line_height: f64) -> id {
-    let sep: id = msg_send![class!(NSView), alloc];
-    let sep: id = msg_send![sep, initWithFrame: NSRect::new(
-        NSPoint::new(0., 0.),
-        NSSize::new(1., line_height),
-    )];
-    let _: () = msg_send![sep, setWantsLayer: YES];
-    let layer: id = msg_send![sep, layer];
-    let color: id = msg_send![class!(NSColor), colorWithWhite: 0.5_f64 alpha: 0.5_f64];
-    let cg_color: *const std::os::raw::c_void = msg_send![color, CGColor];
-    let _: () = msg_send![layer, setBackgroundColor: cg_color];
+fn make_separator_view(mtm: MainThreadMarker, line_height: f64) -> Retained<NSView> {
+    let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(1., line_height));
+    let separator = NSView::initWithFrame(NSView::alloc(mtm), frame);
+    separator.setWantsLayer(true);
+    if let Some(layer) = separator.layer() {
+        let color = NSColor::colorWithWhite_alpha(0.5, 0.5);
+        layer.setBackgroundColor(Some(&*color.CGColor()));
+    }
     // Size constraints without position constraints — NSStackView controls position.
-    // NSLayoutConstraint.h, all NSInteger: NSLayoutAttributeWidth = 7, NSLayoutAttributeHeight = 8,
-    // NSLayoutAttributeNotAnAttribute = 0, NSLayoutRelationEqual = 0.
-    let _: () = msg_send![sep, setTranslatesAutoresizingMaskIntoConstraints: NO];
-    let w: id = msg_send![class!(NSLayoutConstraint),
-        constraintWithItem: sep attribute: 7i64 relatedBy: 0i64
-        toItem: nil attribute: 0i64 multiplier: 1.0_f64 constant: 1.0_f64];
-    let _: () = msg_send![sep, addConstraint: w];
-    let h: id = msg_send![class!(NSLayoutConstraint),
-        constraintWithItem: sep attribute: 8i64 relatedBy: 0i64
-        toItem: nil attribute: 0i64 multiplier: 1.0_f64 constant: line_height];
-    let _: () = msg_send![sep, addConstraint: h];
-    sep
+    separator.setTranslatesAutoresizingMaskIntoConstraints(false);
+    for (attribute, constant) in [
+        (NSLayoutAttribute::Width, 1.),
+        (NSLayoutAttribute::Height, line_height),
+    ] {
+        // SAFETY: the first item is a view; a constant size relates it to no second item.
+        let constraint = unsafe {
+            NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
+                &separator,
+                attribute,
+                NSLayoutRelation::Equal,
+                None,
+                NSLayoutAttribute::NotAnAttribute,
+                1.,
+                constant,
+            )
+        };
+        separator.addConstraint(&constraint);
+    }
+    separator
 }
 
 /// What the popup content shows; `Popup` redraws it only when this changes.
@@ -202,60 +201,58 @@ pub struct PopupState {
     pub theme: Theme,
 }
 
-/// Non-owning ids: the stack view `view` (owned by the window's content view) retains the rest.
-#[derive(Copy, Clone)]
+/// The views `render` updates. The window's content view holds `view`, the stack view, which
+/// holds the others; these references keep them for `render`.
 pub struct PopupContent {
-    mic_label: id,
-    mic_image: id,
-    camera_image: id,
-    camera_label: id,
-    pub view: id,
+    mic_label: Retained<NSTextField>,
+    mic_image: Retained<NSImageView>,
+    camera_image: Retained<NSImageView>,
+    camera_label: Retained<NSTextField>,
+    pub view: Retained<NSStackView>,
     /// The icons' height in points, for `render`.
     icon_height: f64,
 }
 
 impl PopupContent {
     /// The content of a popup `size` large, drawn at `scale` (`popup::size_scale`).
-    pub fn new(state: PopupState, size: LogicalSize<f64>, scale: f64) -> Result<Self> {
-        // Fetch the icons before allocating any view, so an error leaks none.
+    pub fn new(
+        mtm: MainThreadMarker,
+        state: PopupState,
+        size: LogicalSize<f64>,
+        scale: f64,
+    ) -> Result<Self> {
+        // Fetch the icons first, so an error creates no view.
         let (mic_icon, camera_icon) = icons_for(state)?;
-        let metrics = Metrics::at(scale, system_font_size());
+        // `+[NSFont systemFontSize]`, the size the labels scale from.
+        let metrics = Metrics::at(scale, NSFont::systemFontSize());
         let frame = get_frame_rect(size, metrics.line_height);
 
         let mic_label = get_textfield(
+            mtm,
             get_mic_mute_description_text(state.mic_muted),
-            get_text_color(state.mic_muted, state.theme),
+            &get_text_color(state.mic_muted, state.theme),
             frame,
             metrics.font_size,
         );
-        let mic_image = make_image_view(&mic_icon, frame, metrics.icon_height);
-        let camera_image = make_image_view(&camera_icon, frame, metrics.icon_height);
+        let mic_image = make_image_view(mtm, &mic_icon, frame, metrics.icon_height);
+        let camera_image = make_image_view(mtm, &camera_icon, frame, metrics.icon_height);
         let camera_off = !state.camera_in_use;
         let camera_label = get_textfield(
+            mtm,
             get_camera_mute_description_text(camera_off),
-            get_text_color(camera_off, state.theme),
+            &get_text_color(camera_off, state.theme),
             frame,
             metrics.font_size,
         );
 
-        let view = unsafe {
-            let stack: *mut Object = msg_send![class!(NSStackView), alloc];
-            let stack: id = msg_send![stack, initWithFrame: frame];
-            let _: () = msg_send![stack, setSpacing: metrics.spacing];
-            let gravity = NS_STACK_VIEW_GRAVITY_CENTER;
-            let _: () = msg_send![stack, addView: mic_image inGravity: gravity];
-            let _: () = msg_send![mic_image, release];
-            let _: () = msg_send![stack, addView: mic_label inGravity: gravity];
-            let _: () = msg_send![mic_label, release];
-            let sep = make_separator_view(frame.size.height);
-            let _: () = msg_send![stack, addView: sep inGravity: gravity];
-            let _: () = msg_send![sep, release];
-            let _: () = msg_send![stack, addView: camera_image inGravity: gravity];
-            let _: () = msg_send![camera_image, release];
-            let _: () = msg_send![stack, addView: camera_label inGravity: gravity];
-            let _: () = msg_send![camera_label, release];
-            stack
-        };
+        let view = NSStackView::initWithFrame(NSStackView::alloc(mtm), frame);
+        view.setSpacing(metrics.spacing);
+        let gravity = NSStackViewGravity::Center;
+        view.addView_inGravity(&mic_image, gravity);
+        view.addView_inGravity(&mic_label, gravity);
+        view.addView_inGravity(&make_separator_view(mtm, frame.size.height), gravity);
+        view.addView_inGravity(&camera_image, gravity);
+        view.addView_inGravity(&camera_label, gravity);
 
         Ok(Self {
             mic_label,
@@ -271,20 +268,18 @@ impl PopupContent {
     pub fn render(&self, state: PopupState) -> Result<()> {
         let (mic_icon, camera_icon) = icons_for(state)?;
         let camera_off = !state.camera_in_use;
-        unsafe {
-            set_label(
-                self.mic_label,
-                get_mic_mute_description_text(state.mic_muted),
-                get_text_color(state.mic_muted, state.theme),
-            );
-            set_image(self.mic_image, &mic_icon, self.icon_height);
-            set_image(self.camera_image, &camera_icon, self.icon_height);
-            set_label(
-                self.camera_label,
-                get_camera_mute_description_text(camera_off),
-                get_text_color(camera_off, state.theme),
-            );
-        }
+        set_label(
+            &self.mic_label,
+            get_mic_mute_description_text(state.mic_muted),
+            &get_text_color(state.mic_muted, state.theme),
+        );
+        set_image(&self.mic_image, &mic_icon, self.icon_height);
+        set_image(&self.camera_image, &camera_icon, self.icon_height);
+        set_label(
+            &self.camera_label,
+            get_camera_mute_description_text(camera_off),
+            &get_text_color(camera_off, state.theme),
+        );
         Ok(())
     }
 }
@@ -331,6 +326,24 @@ mod tests {
                 font_size: 24.,
             }
         );
+    }
+
+    /// objc2-app-kit takes `NSTextAlignment` from `NSText.h`, which picks its values with
+    /// `TARGET_ABI_USES_IOS_VALUES`: the iOS value 1 on Apple silicon, the macOS value 2 on Intel.
+    #[test]
+    fn labels_center_with_the_sdk_value_for_the_architecture() {
+        let center = if cfg!(target_arch = "x86_64") { 2 } else { 1 };
+        assert_eq!(NSTextAlignment::Center.0, center);
+        // `NSStackView.h`: NSStackViewGravityCenter = 2 on every architecture.
+        assert_eq!(NSStackViewGravity::Center.0, 2);
+    }
+
+    #[test]
+    fn labels_are_red_while_off_and_black_or_white_otherwise() {
+        assert_eq!(text_rgb(true, Theme::Light), (0.9372, 0.2666, 0.2666));
+        assert_eq!(text_rgb(true, Theme::Dark), (0.9725, 0.4431, 0.4431));
+        assert_eq!(text_rgb(false, Theme::Light), (0., 0., 0.));
+        assert_eq!(text_rgb(false, Theme::Dark), (1., 1., 1.));
     }
 
     #[test]

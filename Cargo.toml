@@ -40,11 +40,48 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # SMAppService.mainApp (macOS 13+) for Launch at Login; NSError describes its failures.
 # NSBundle tells the installed app from a bare executable, which can't post notifications.
 objc2 = "0.6"
+# The popup, the About window, and the mute sounds. NSView::layer needs objc2-quartz-core,
+# NSColor::CGColor objc2-core-graphics.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSAlert",
+  "NSApplication",
+  "NSButton",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSImage",
+  "NSImageView",
+  "NSLayoutConstraint",
+  "NSResponder",
+  "NSScreen",
+  "NSSound",
+  "NSStackView",
+  "NSText",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
+  "NSWorkspace",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+  "objc2-quartz-core",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "NSBundle",
+  "NSData",
   "NSError",
+  "NSGeometry",
   "NSString",
+  "NSURL",
+  "objc2-core-foundation",
+] }
+# The popup separator's color: CALayer's backgroundColor setter is behind objc2-core-graphics,
+# which objc2-app-kit doesn't turn on here.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+  "std",
+  "CALayer",
+  "objc2-core-graphics",
 ] }
 objc2-service-management = { version = "0.3", default-features = false, features = [
   "std",
