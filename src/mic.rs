@@ -51,8 +51,10 @@ fn is_volume_muted(volume: f32) -> bool {
     volume <= VOLUME_MUTED_EPSILON
 }
 
-fn target_state(state: Option<bool>, desired_muted: bool) -> bool {
-    state.unwrap_or(!desired_muted)
+/// The state a request asks for: `state`, or for a toggle (`None`) the opposite of `is_muted`,
+/// the state the tray and popup show.
+fn target_state(state: Option<bool>, is_muted: bool) -> bool {
+    state.unwrap_or(!is_muted)
 }
 
 fn state_name(state: bool) -> &'static str {
@@ -2126,8 +2128,12 @@ impl<B: AudioBackend> MicController<B> {
         self.levels.save_if_due(Instant::now());
     }
 
+    /// Mutes or unmutes every device: `Some(state)` sets that state, and `None` toggles the one
+    /// the tray and popup show, `muted`. A toggle never flips `desired_muted`: after a mute that
+    /// left a device live, the UI still shows unmuted, so the next press mutes again and retries
+    /// that device rather than unmuting the ones that did mute.
     pub fn toggle(&mut self, state: Option<bool>) -> Result<&Self> {
-        let state = target_state(state, self.desired_muted);
+        let state = target_state(state, self.muted);
         self.mute_all(state)
     }
 
@@ -2559,10 +2565,59 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_logic_uses_desired_state() {
+    fn a_toggle_flips_the_shown_state_and_a_request_sets_its_own() {
         assert!(target_state(None, false));
         assert!(!target_state(None, true));
         assert!(!target_state(Some(false), true));
+        assert!(target_state(Some(true), true));
+    }
+
+    #[test]
+    fn a_toggle_after_a_partial_mute_mutes_again_and_never_unmutes_the_muted_devices() {
+        let mut broken = Device::native("USB Mic", false);
+        broken.fail_set_mute = true;
+        let mut controller = controller(FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, broken),
+        ]));
+
+        assert!(controller.toggle(None).is_err());
+        // The USB mic stays live, so the tray and popup still show unmuted.
+        assert!(!controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+
+        // Pressing Mute again mutes again, retrying the USB mic.
+        assert!(controller.toggle(None).is_err());
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert!(controller.should_enforce_mute());
+        assert!(!controller.backend.writes.contains(&Write::Mute(1, false)));
+
+        controller.backend.device_mut(2).unwrap().fail_set_mute = false;
+        controller.toggle(None).unwrap();
+
+        assert!(controller.muted);
+        assert!(controller.should_enforce_mute());
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn a_toggle_unmutes_when_every_device_reads_muted_though_the_intent_is_unmuted() {
+        let mut controller = controller(FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::native("Headset", false)),
+        ]));
+        // While unmuted, the headset's own button mutes it, and excluding the built-in mic
+        // leaves only muted devices: the tray and popup show muted, which nobody asked for.
+        controller.backend.change_mute_externally(2, true);
+        controller.set_excluded(uids(&["Built-in"]));
+        assert!(controller.muted);
+        assert!(!controller.should_enforce_mute());
+
+        controller.toggle(None).unwrap();
+
+        assert!(!controller.muted, "the press unmutes, as the tray shows");
+        assert!(!controller.should_enforce_mute());
+        assert_eq!(controller.backend.writes, vec![Write::Mute(2, false)]);
     }
 
     #[test]

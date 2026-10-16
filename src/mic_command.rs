@@ -4,7 +4,7 @@
 /// What to do with the user's mute intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicCommand {
-    /// Unmute when muted, mute otherwise.
+    /// Unmute when the tray and popup show muted (`MicController::muted`), mute otherwise.
     Toggle,
     Mute,
     Unmute,

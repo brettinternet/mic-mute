@@ -150,7 +150,7 @@ macOS limits these notifications:
 
 Controls what the mute shortcut does.
 
-- `"toggle"` (default): each press mutes or unmutes.
+- `"toggle"` (default): each press mutes or unmutes, following what the tray shows. While a microphone that can't be muted keeps the tray at unmuted, a press mutes again and retries it.
 - `"push_to_talk"`: holding the shortcut unmutes the microphones, and releasing it mutes them again.
 
 In push-to-talk mode the microphones rest muted:
