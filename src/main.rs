@@ -70,25 +70,21 @@ fn main() {
     install_panic_hook();
 
     // An invalid settings.json is never written over: run on the defaults until it's fixed.
-    let (mut settings, is_settings_file_valid) = match Settings::load() {
-        Ok(settings) => (settings, true),
+    let mut settings = match Settings::load() {
+        Ok(settings) => settings,
         Err(err) => {
             log::warn!("{}; using the default settings until it's fixed", err);
-            (Settings::default(), false)
+            Settings::default()
         }
     };
 
     // What macOS starts at login wins over the setting: mirror it, so the tray shows the truth
     // and a stale setting doesn't silently remove the login item. `reconcile` also moves a
-    // LaunchAgent from an earlier version to a login item (macOS 13+).
+    // LaunchAgent from an earlier version to a login item (macOS 13+). `update` keeps the
+    // mirrored value in memory only while the file is invalid.
     if let Some(state) = launch_at_login::reconcile() {
         if state.is_on() != settings.launch_at_login {
-            settings.launch_at_login = state.is_on();
-            if is_settings_file_valid {
-                if let Err(e) = settings.save() {
-                    log::error!("Failed to save settings: {}", e);
-                }
-            }
+            settings.update(|s| s.launch_at_login = state.is_on());
         }
     }
 

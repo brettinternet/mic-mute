@@ -157,8 +157,9 @@ impl AboutButton {
 }
 
 /// Runs `button`'s action on `settings`, the settings in use: Open Settings opens the file,
-/// and Reset Settings saves `reset_settings` and adopts it. Returns whether `settings`
-/// changed, so the caller applies them.
+/// and Reset Settings resets them with `reset_settings` through `Settings::update`, which
+/// first reloads a file edited since the app last read it and logs a failed save. Returns
+/// whether `settings` changed, so the caller applies them all.
 pub fn run_action(button: AboutButton, settings: &mut Settings) -> Result<bool> {
     match button {
         AboutButton::Ok => Ok(false),
@@ -167,10 +168,8 @@ pub fn run_action(button: AboutButton, settings: &mut Settings) -> Result<bool> 
             Ok(false)
         }
         AboutButton::ResetSettings => {
-            let reset = reset_settings(settings);
-            reset.save().context("Failed to save the reset settings")?;
-            *settings = reset;
-            Ok(true)
+            let update = settings.update(|s| *s = reset_settings(s));
+            Ok(update.is_changed())
         }
     }
 }
