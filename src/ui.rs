@@ -3,7 +3,7 @@ use crate::event_loop::{EventIds, EventLoopTarget};
 use crate::feedback::{Feedback, MicUpdate};
 use crate::mic::DeviceState;
 use crate::mic_command::MicCommand;
-use crate::popup::{Popup, PopupLayout};
+use crate::popup::{Popup, PopupFlashes, PopupLayout};
 use crate::settings::{ExcludedDevice, Settings};
 use crate::settings_window::SettingsChange;
 use crate::shortcuts::Shortcuts;
@@ -13,7 +13,7 @@ use log::trace;
 use muda::MenuId;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 use tray_icon::TrayIconEvent;
 
 /// The popup's position and size from `settings`.
@@ -21,6 +21,14 @@ fn popup_layout(settings: &Settings) -> PopupLayout {
     PopupLayout {
         position: settings.popup_position.value(),
         size: settings.popup_size.value(),
+    }
+}
+
+/// How long the popup shows "Mic on" and "Mic off" after a request, from `settings`.
+fn popup_flashes(settings: &Settings) -> PopupFlashes {
+    PopupFlashes {
+        mic_on: settings.popup_mic_on_ms.value().duration(),
+        mic_off: settings.popup_mic_off_ms.value().duration(),
     }
 }
 
@@ -44,8 +52,6 @@ pub struct UI {
     camera_muted: bool,
     /// The sound and notification on a mute change.
     feedback: Feedback,
-    /// How long the popup shows "Mic on" after the user unmutes (`popup_mic_on_ms`).
-    mic_on_flash: Duration,
     /// The `launch_at_login` value macOS last took, or that startup mirrored from it; `None`
     /// after a failed push (`launch_at_login::should_push`).
     launch_at_login_applied: Option<bool>,
@@ -68,6 +74,7 @@ impl UI {
             mic_muted,
             settings.show_popup,
             popup_layout(settings),
+            popup_flashes(settings),
         )
         .context("Failed to setup popup window")?;
         let shortcuts =
@@ -103,7 +110,6 @@ impl UI {
             mic_muted,
             camera_muted,
             feedback: Feedback::new(settings.play_sound, settings.show_notification),
-            mic_on_flash: settings.popup_mic_on_ms.value().duration(),
             // main() mirrored the login item into the setting before the loop started.
             launch_at_login_applied: Some(settings.launch_at_login),
         };
@@ -140,19 +146,26 @@ impl UI {
         Ok(self)
     }
 
-    /// Ends a popup flash: hides the popup unless it stays up while muted.
-    pub fn hide_popup_unless_pinned(&mut self) -> Result<&mut Self> {
+    /// When the popup's flash ends: "Mic off" after a mute while it hides after each mute,
+    /// "Mic on" after an unmute, or a `status` URL's. `None` while there is none.
+    pub fn popup_hide_at(&self) -> Option<Instant> {
+        self.popup.hide_at()
+    }
+
+    /// Ends the popup's flash once it's over at `now`: hides the popup unless it stays up while
+    /// muted.
+    pub fn end_popup_flash(&mut self, now: Instant) -> Result<&mut Self> {
         self.popup
-            .hide_unless_pinned()
+            .end_flash(now)
             .context("Failed to hide UI popup")?;
         Ok(self)
     }
 
-    /// Shows the popup with the current state, also while `show_popup` is off, until
-    /// `hide_popup_unless_pinned`.
-    pub fn show_popup_status(&mut self) -> Result<&mut Self> {
+    /// Shows the popup with the current state, also while `show_popup` is off, until at least
+    /// `until`, when `end_popup_flash` hides it unless it stays up while muted.
+    pub fn show_popup_status(&mut self, until: Instant) -> Result<&mut Self> {
         self.popup
-            .show_status()
+            .show_status(until)
             .context("Failed to show the status popup")?;
         Ok(self)
     }
@@ -222,6 +235,7 @@ impl UI {
             SettingsChange::PopupPosition(_)
             | SettingsChange::PopupSize(_)
             | SettingsChange::PopupMicOnMs(_)
+            | SettingsChange::PopupMicOffMs(_)
             | SettingsChange::PlaySound(_)
             | SettingsChange::ShowNotification(_) => self.apply_feedback(settings),
             // Read where they're used: the event loop reads these from `settings`.
@@ -235,28 +249,28 @@ impl UI {
         Ok(())
     }
 
-    /// Applies the sound, the notification, and the popup's position, size, and "Mic on" flash,
-    /// logging the values the file sets that aren't used as written.
+    /// Applies the sound, the notification, and the popup's position, size, and "Mic on" and
+    /// "Mic off" flashes, logging the values the file sets that aren't used as written.
     fn apply_feedback(&mut self, settings: &Settings) {
         log_feedback_problems(settings);
         self.feedback
             .set_options(settings.play_sound, settings.show_notification);
-        self.mic_on_flash = settings.popup_mic_on_ms.value().duration();
         if let Err(e) = self.popup.set_layout(popup_layout(settings)) {
             log::error!("Failed to apply the popup's position and size: {:#}", e);
+        }
+        if let Err(e) = self.popup.set_flashes(popup_flashes(settings)) {
+            log::error!("Failed to apply the popup's flashes: {:#}", e);
         }
     }
 
     /// Plays the sound and posts the notification the settings ask for after `update` took the
-    /// microphones from `was_muted` to `muted`: only a request that changed the state gives
-    /// either (`feedback::change_to_report`).
-    pub fn give_feedback(&mut self, update: MicUpdate, was_muted: bool, muted: bool) {
+    /// microphones from `was_muted` to `muted` at `now`: only a request that changed the state
+    /// gives either (`feedback::change_to_report`). Then starts the popup's flash for a request:
+    /// "Mic off" after a mute while the popup hides after each mute, "Mic on" after an unmute;
+    /// the poll's re-mutes leave the popup as it is.
+    pub fn give_feedback(&mut self, update: MicUpdate, was_muted: bool, muted: bool, now: Instant) {
         self.feedback.on_mic_update(update, was_muted, muted);
-    }
-
-    /// How long the popup stays up showing "Mic on" after the user unmutes.
-    pub fn mic_on_flash(&self) -> Duration {
-        self.mic_on_flash
+        self.popup.on_mic_update(update, was_muted, muted, now);
     }
 
     /// Registers or removes the login item (a LaunchAgent on macOS 11 and 12) when `enabled`

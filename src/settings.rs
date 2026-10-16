@@ -69,7 +69,7 @@ pub struct Settings {
     pub mute_on_display_sleep: bool,
 
     // Feedback on a mute change: a sound, a notification, and the popup's position, size,
-    // and "Mic on" flash.
+    // "Mic on" flash, and "Mic off" display.
     /// Plays a system sound when the user mutes or unmutes.
     #[serde(default)]
     pub play_sound: bool,
@@ -85,6 +85,10 @@ pub struct Settings {
     /// How long the popup shows "Mic on" after the user unmutes.
     #[serde(default)]
     pub popup_mic_on_ms: Lenient<MicOnFlash>,
+    /// How long the popup shows "Mic off" after a mute: while the microphones stay muted
+    /// (`null`, the default), or a number of milliseconds, after which it hides.
+    #[serde(default)]
+    pub popup_mic_off_ms: Lenient<MicOffFlash>,
     /// Fields this version doesn't know (written by a newer version or a fork), saved back
     /// unchanged. Empty when the file has none, as in `impl Default`.
     #[serde(flatten)]
@@ -117,6 +121,7 @@ impl Default for Settings {
             popup_position: Lenient::default(),
             popup_size: Lenient::default(),
             popup_mic_on_ms: Lenient::default(),
+            popup_mic_off_ms: Lenient::default(),
             extra: serde_json::Map::new(),
             // The defaults don't come from the file.
             file_version: FileVersion::Unknown,
@@ -233,9 +238,9 @@ pub enum LaunchState {
     Last,
 }
 
-// Feedback on a mute change: the popup's position, size, and "Mic on" flash. These are read
-// leniently (`Lenient`): a value this build doesn't accept falls back to its default with a
-// warning instead of making the whole file invalid.
+// Feedback on a mute change: the popup's position, size, "Mic on" flash, and "Mic off" display.
+// These are read leniently (`Lenient`): a value this build doesn't accept falls back to its
+// default with a warning instead of making the whole file invalid.
 
 /// A setting whose value in settings.json may be wrong without breaking the file: a value this
 /// build doesn't accept falls back (`LenientValue::parse`), `problem` says why for the log, and
@@ -476,6 +481,65 @@ impl LenientValue for MicOnFlash {
     }
 }
 
+/// `popup_mic_off_ms`: how long the popup shows "Mic off" after a mute. `null`, the default,
+/// keeps it up for as long as the microphones stay muted, as it always was; a number of
+/// milliseconds hides it that long after each mute, so it doesn't stay on screen. 0 shows
+/// nothing on a mute.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MicOffFlash {
+    /// `None` while the popup stays up while muted; at most `MAX_MS`.
+    ms: Option<u64>,
+}
+
+impl MicOffFlash {
+    /// Ten seconds, as for "Mic on": a popup that stays longer is what `null` is for.
+    pub const MAX_MS: u64 = 10_000;
+    /// The popup stays up while the microphones are muted.
+    pub const WHILE_MUTED: Self = Self { ms: None };
+
+    /// A flash of `ms` milliseconds, capped at `MAX_MS`.
+    pub fn from_millis(ms: u64) -> Self {
+        Self {
+            ms: Some(ms.min(Self::MAX_MS)),
+        }
+    }
+
+    /// How long the popup shows "Mic off" after a mute; `None` while it stays up while muted.
+    pub fn duration(self) -> Option<Duration> {
+        self.ms.map(Duration::from_millis)
+    }
+}
+
+impl LenientValue for MicOffFlash {
+    const KEY: &'static str = "popup_mic_off_ms";
+
+    /// `null`, or a whole number of milliseconds; a longer flash than `MAX_MS` is capped, and
+    /// anything else keeps the popup up while muted, as `null` does.
+    fn parse(json: &serde_json::Value) -> Result<Self, (Self, String)> {
+        if json.is_null() {
+            return Ok(Self::WHILE_MUTED);
+        }
+        match json.as_u64() {
+            Some(ms) if ms <= Self::MAX_MS => Ok(Self::from_millis(ms)),
+            Some(ms) => Err((
+                Self::from_millis(ms),
+                format!("is above the maximum, {}", Self::MAX_MS),
+            )),
+            None => Err((
+                Self::WHILE_MUTED,
+                format!(
+                    "isn't null or a whole number of milliseconds from 0 to {}",
+                    Self::MAX_MS
+                ),
+            )),
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        self.ms.map_or(serde_json::Value::Null, Into::into)
+    }
+}
+
 impl Settings {
     /// What's wrong with the feedback settings the file sets to values this build doesn't use
     /// as written; one line each, for the log.
@@ -484,6 +548,7 @@ impl Settings {
             self.popup_position.problem(),
             self.popup_size.problem(),
             self.popup_mic_on_ms.problem(),
+            self.popup_mic_off_ms.problem(),
         ]
         .into_iter()
         .flatten()
@@ -954,6 +1019,7 @@ mod tests {
             popup_position: Lenient::new(PopupPosition::TopRight),
             popup_size: Lenient::new(PopupSize::Large),
             popup_mic_on_ms: Lenient::new(MicOnFlash::from_millis(0)),
+            popup_mic_off_ms: Lenient::new(MicOffFlash::from_millis(1_500)),
             extra: serde_json::Map::new(),
             file_version: FileVersion::Unknown,
         };
@@ -975,6 +1041,7 @@ mod tests {
         assert_eq!(loaded.popup_position, s.popup_position);
         assert_eq!(loaded.popup_size, s.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, s.popup_mic_on_ms);
+        assert_eq!(loaded.popup_mic_off_ms, s.popup_mic_off_ms);
 
         let _ = fs::remove_file(&tmp_path);
     }
@@ -1055,6 +1122,7 @@ mod tests {
             "popup_position",
             "popup_size",
             "popup_mic_on_ms",
+            "popup_mic_off_ms",
         ] {
             assert!(
                 !loaded.extra.contains_key(known),
@@ -1081,6 +1149,7 @@ mod tests {
         assert_eq!(loaded.popup_position, defaults.popup_position);
         assert_eq!(loaded.popup_size, defaults.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, defaults.popup_mic_on_ms);
+        assert_eq!(loaded.popup_mic_off_ms, defaults.popup_mic_off_ms);
         assert!(loaded.extra.is_empty());
     }
 
@@ -1102,6 +1171,7 @@ mod tests {
                 "mute_on_lock",
                 "mute_on_sleep",
                 "play_sound",
+                "popup_mic_off_ms",
                 "popup_mic_on_ms",
                 "popup_position",
                 "popup_size",
@@ -1915,6 +1985,12 @@ mod tests {
             defaults.popup_mic_on_ms.value().duration(),
             Duration::from_secs(1)
         );
+        assert_eq!(
+            defaults.popup_mic_off_ms.value(),
+            MicOffFlash::WHILE_MUTED,
+            "the popup stays up while muted"
+        );
+        assert_eq!(defaults.popup_mic_off_ms.value().duration(), None);
         assert!(defaults.feedback_problems().is_empty());
     }
 
@@ -1930,6 +2006,7 @@ mod tests {
         assert_eq!(loaded.popup_position, defaults.popup_position);
         assert_eq!(loaded.popup_size, defaults.popup_size);
         assert_eq!(loaded.popup_mic_on_ms, defaults.popup_mic_on_ms);
+        assert_eq!(loaded.popup_mic_off_ms, defaults.popup_mic_off_ms);
         assert!(loaded.feedback_problems().is_empty());
         assert!(loaded.extra.is_empty());
     }
@@ -1946,6 +2023,7 @@ mod tests {
                 popup_position: Lenient::new(position),
                 popup_size: Lenient::new(size),
                 popup_mic_on_ms: Lenient::new(MicOnFlash::from_millis(2_500)),
+                popup_mic_off_ms: Lenient::new(MicOffFlash::from_millis(750)),
                 ..Settings::default()
             };
 
@@ -1953,6 +2031,7 @@ mod tests {
             assert_eq!(json["popup_position"], serde_json::json!(position.name()));
             assert_eq!(json["popup_size"], serde_json::json!(size.name()));
             assert_eq!(json["popup_mic_on_ms"], serde_json::json!(2_500));
+            assert_eq!(json["popup_mic_off_ms"], serde_json::json!(750));
             assert_eq!(json["play_sound"], serde_json::json!(true));
             assert_eq!(json["show_notification"], serde_json::json!(true));
 
@@ -1961,6 +2040,7 @@ mod tests {
             assert_eq!(loaded.popup_position.value(), position);
             assert_eq!(loaded.popup_size.value(), size);
             assert_eq!(loaded.popup_mic_on_ms, settings.popup_mic_on_ms);
+            assert_eq!(loaded.popup_mic_off_ms, settings.popup_mic_off_ms);
             assert!(
                 loaded.feedback_problems().is_empty(),
                 "{position:?} {size:?}"
@@ -1986,7 +2066,8 @@ mod tests {
         "show_popup": false,
         "popup_position": "top-right",
         "popup_size": 2,
-        "popup_mic_on_ms": "3s"
+        "popup_mic_on_ms": "3s",
+        "popup_mic_off_ms": -500
     }"#;
 
     #[test]
@@ -2000,6 +2081,7 @@ mod tests {
         assert_eq!(loaded.popup_position.value(), PopupPosition::BottomCenter);
         assert_eq!(loaded.popup_size.value(), PopupSize::Medium);
         assert_eq!(loaded.popup_mic_on_ms.value(), MicOnFlash::default());
+        assert_eq!(loaded.popup_mic_off_ms.value(), MicOffFlash::WHILE_MUTED);
         assert_eq!(
             loaded.feedback_problems(),
             [
@@ -2009,6 +2091,8 @@ mod tests {
                 "popup_size 2 isn't one of \"small\", \"medium\", \"large\"; using \"medium\"",
                 "popup_mic_on_ms \"3s\" isn't a whole number of milliseconds from 0 to 10000; \
                  using 1000",
+                "popup_mic_off_ms -500 isn't null or a whole number of milliseconds from 0 to \
+                 10000; using null",
             ]
         );
     }
@@ -2027,6 +2111,7 @@ mod tests {
         assert_eq!(saved["popup_position"], serde_json::json!("top-right"));
         assert_eq!(saved["popup_size"], serde_json::json!(2));
         assert_eq!(saved["popup_mic_on_ms"], serde_json::json!("3s"));
+        assert_eq!(saved["popup_mic_off_ms"], serde_json::json!(-500));
         assert_eq!(saved["show_in_dock"], serde_json::json!(true));
     }
 
@@ -2078,6 +2163,100 @@ mod tests {
             let json: serde_json::Value = serde_json::from_str(rejected).unwrap();
             let (fallback, _) = MicOnFlash::parse(&json).unwrap_err();
             assert_eq!(fallback, MicOnFlash::default(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn a_null_or_missing_mic_off_flash_keeps_the_popup_up_while_muted() {
+        let missing: Settings = serde_json::from_str("{}").unwrap();
+        let null: Settings = serde_json::from_str(r#"{ "popup_mic_off_ms": null }"#).unwrap();
+
+        for loaded in [&missing, &null] {
+            assert_eq!(loaded.popup_mic_off_ms.value(), MicOffFlash::WHILE_MUTED);
+            assert_eq!(loaded.popup_mic_off_ms.value().duration(), None);
+            assert!(loaded.feedback_problems().is_empty());
+            assert!(loaded.extra.is_empty());
+        }
+        // Saves write the key, as `null`.
+        let saved = serde_json::to_value(&missing).unwrap();
+        assert_eq!(
+            saved.get("popup_mic_off_ms"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[test]
+    fn a_mic_off_flash_round_trips_through_the_file() {
+        let dir = TempDir::new();
+        let path = dir.settings_path();
+        for flash in [
+            MicOffFlash::WHILE_MUTED,
+            MicOffFlash::from_millis(0),
+            MicOffFlash::from_millis(2_000),
+            MicOffFlash::WHILE_MUTED,
+        ] {
+            let settings = Settings {
+                popup_mic_off_ms: Lenient::new(flash),
+                ..Settings::default()
+            };
+
+            settings.save_to(&path).unwrap();
+
+            let loaded = Settings::load_from(&path).unwrap();
+            assert_eq!(loaded.popup_mic_off_ms.value(), flash);
+            assert!(loaded.feedback_problems().is_empty(), "{flash:?}");
+        }
+    }
+
+    #[test]
+    fn mic_off_flash_is_capped_at_ten_seconds() {
+        let cases = [
+            (0, 0),
+            (1, 1),
+            (2_500, 2_500),
+            (10_000, 10_000),
+            (60_000, 10_000),
+            (u64::MAX, 10_000),
+        ];
+        for (ms, expected) in cases {
+            assert_eq!(
+                MicOffFlash::from_millis(ms).duration(),
+                Some(Duration::from_millis(expected)),
+                "{ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn a_longer_mic_off_flash_is_capped_with_a_warning_and_kept_in_the_file() {
+        let loaded: Settings = serde_json::from_str(r#"{ "popup_mic_off_ms": 60000 }"#).unwrap();
+
+        assert_eq!(
+            loaded.popup_mic_off_ms.value().duration(),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            loaded.feedback_problems(),
+            ["popup_mic_off_ms 60000 is above the maximum, 10000; using 10000"]
+        );
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(saved["popup_mic_off_ms"], serde_json::json!(60_000));
+    }
+
+    #[test]
+    fn mic_off_flash_accepts_only_null_or_whole_milliseconds() {
+        for accepted in ["null", "0", "1", "2500", "10000"] {
+            let json: serde_json::Value = serde_json::from_str(accepted).unwrap();
+            assert!(MicOffFlash::parse(&json).is_ok(), "{accepted}");
+        }
+        // Each keeps the popup up while muted, as `null` does.
+        let rejected = [
+            "-1", "1.5", "1000.0", "\"1000\"", "\"null\"", "true", "false", "[1000]", "{}",
+        ];
+        for rejected in rejected {
+            let json: serde_json::Value = serde_json::from_str(rejected).unwrap();
+            let (fallback, _) = MicOffFlash::parse(&json).unwrap_err();
+            assert_eq!(fallback, MicOffFlash::WHILE_MUTED, "{rejected}");
         }
     }
 }

@@ -1,4 +1,5 @@
 use crate::event_loop::EventLoopTarget;
+use crate::feedback::MicUpdate;
 use crate::popup_content::{PopupContent, PopupState};
 use crate::settings::{PopupPosition, PopupSize};
 use crate::utils::get_cursor_pos;
@@ -8,6 +9,7 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility};
 use objc2_foundation::NSRect;
+use std::time::{Duration, Instant};
 use tao::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
@@ -142,6 +144,97 @@ fn should_show_popup(enabled: bool, muted: bool) -> bool {
     enabled && muted
 }
 
+/// Whether the popup stays up on its own, outside any flash: muted with the popup on, unless it
+/// hides after each mute (`popup_mic_off_ms`), when only a flash shows it.
+fn should_pin_popup(enabled: bool, muted: bool, flashes: PopupFlashes) -> bool {
+    should_show_popup(enabled, muted) && flashes.keeps_up_while_muted()
+}
+
+/// How long the popup shows each state after a request changes it: "Mic on" after an unmute
+/// (`popup_mic_on_ms`), and "Mic off" after a mute (`popup_mic_off_ms`), which `None` keeps up
+/// for as long as the microphones stay muted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PopupFlashes {
+    pub mic_on: Duration,
+    pub mic_off: Option<Duration>,
+}
+
+impl PopupFlashes {
+    /// Whether the popup stays up while muted, rather than hiding after each mute.
+    fn keeps_up_while_muted(self) -> bool {
+        self.mic_off.is_none()
+    }
+}
+
+/// When the popup's flashes end: the latest request's, and a `status` URL's. Once the later one
+/// is over (`end_due`), the popup hides unless it is pinned; until then the event loop folds
+/// `hide_at` into its `WaitUntil`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FlashDeadlines {
+    /// The latest request's flash: "Mic off" after a mute while the popup hides after each mute,
+    /// "Mic on" after an unmute. Each request replaces it, so a mute during "Mic on" restarts
+    /// the mute display, and an unmute ends "Mic off".
+    request: Option<Instant>,
+    /// A `status` URL's flash: a later one extends it, and requests never cut it short.
+    status: Option<Instant>,
+}
+
+impl FlashDeadlines {
+    /// Starts the flash for `update`, which took the microphones from `was_muted` to `muted` at
+    /// `now`, timed by `flashes`. Returns whether the flash shows the popup, which an enabled
+    /// popup then does:
+    ///
+    /// - A request that leaves them muted flashes "Mic off" for `flashes.mic_off`, from the
+    ///   start each time, or, while the popup stays up while muted, ends the request's flash:
+    ///   a pinned popup needs none.
+    /// - One that leaves them unmuted flashes "Mic on" for `flashes.mic_on`. It shows a hidden
+    ///   popup only when it unmuted and the popup hides after each mute: one that stays up while
+    ///   muted is up already, and an unmute that changed nothing only extends a flash on screen.
+    /// - A 0 ms flash shows nothing and ends in the same pass.
+    /// - The poll's re-mutes (`MicUpdate::Enforcement`) show nothing and change no deadline.
+    fn on_mic_update(
+        &mut self,
+        update: MicUpdate,
+        was_muted: bool,
+        muted: bool,
+        flashes: PopupFlashes,
+        now: Instant,
+    ) -> bool {
+        if update == MicUpdate::Enforcement {
+            return false;
+        }
+        let duration = if muted {
+            flashes.mic_off
+        } else {
+            Some(flashes.mic_on)
+        };
+        // A deadline `Instant` can't hold ends the flash at once rather than never.
+        self.request = duration.map(|duration| now.checked_add(duration).unwrap_or(now));
+        let can_show = muted || (was_muted && !flashes.keeps_up_while_muted());
+        can_show && duration.is_some_and(|duration| !duration.is_zero())
+    }
+
+    /// Keeps the popup up until at least `until`, for a `status` URL.
+    fn on_status(&mut self, until: Instant) {
+        self.status = self.status.max(Some(until));
+    }
+
+    /// When the last flash ends; `None` while there is none.
+    fn hide_at(&self) -> Option<Instant> {
+        self.request.max(self.status)
+    }
+
+    /// Ends the flashes once the last is over at `now`. Returns whether they ended, so the popup
+    /// hides unless it is pinned.
+    fn end_due(&mut self, now: Instant) -> bool {
+        let is_over = self.hide_at().is_some_and(|deadline| now >= deadline);
+        if is_over {
+            *self = Self::default();
+        }
+        is_over
+    }
+}
+
 /// The parts of the popup a redraw from `shown` to `next` must touch.
 #[derive(Debug, PartialEq, Eq)]
 struct Redraw {
@@ -193,6 +286,10 @@ pub struct Popup {
     enabled: bool,
     /// Where the popup sits and how large it is; `content` is drawn for this size.
     layout: PopupLayout,
+    /// How long it shows "Mic on" and "Mic off" after a request.
+    flashes: PopupFlashes,
+    /// When the flashes on screen end.
+    deadlines: FlashDeadlines,
     /// The latest state from `update_with_camera`.
     mic_muted: bool,
     camera_in_use: bool,
@@ -208,6 +305,7 @@ impl Popup {
         mic_muted: bool,
         enabled: bool,
         layout: PopupLayout,
+        flashes: PopupFlashes,
     ) -> Result<Self> {
         let mtm =
             MainThreadMarker::new().context("The popup must be created on the main thread")?;
@@ -261,6 +359,8 @@ impl Popup {
             current_monitor: initial_monitor,
             enabled,
             layout,
+            flashes,
+            deadlines: FlashDeadlines::default(),
             mic_muted,
             camera_in_use,
             shown,
@@ -273,16 +373,48 @@ impl Popup {
         self.window.theme()
     }
 
-    /// Redraws what changed, then brings the popup to the front whenever it should show; the
-    /// front-ordering runs on every call, not only on a change. `camera_muted` is
+    /// Redraws what changed, then brings the popup to the front whenever it is pinned
+    /// (`should_pin_popup`); the front-ordering runs on every call, not only on a change. Only a
+    /// request's flash (`on_mic_update`) shows a popup that hides after each mute: for one, the
+    /// poll's re-mutes and camera changes only redraw. `camera_muted` is
     /// `CameraController::muted` (`true` while no camera is in use).
     pub fn update_with_camera(&mut self, mic_muted: bool, camera_muted: bool) -> Result<&mut Self> {
         self.mic_muted = mic_muted;
         self.camera_in_use = !camera_muted;
         self.update_placement()?;
         self.redraw()?;
-        if should_show_popup(self.enabled, mic_muted) {
+        if self.is_pinned() {
             self.show_front();
+        }
+        Ok(self)
+    }
+
+    /// Starts the flash for `update`, which took the microphones from `was_muted` to `muted` at
+    /// `now` (`FlashDeadlines::on_mic_update`), and shows the popup when the flash does. Runs
+    /// after `update_with_camera`, which drew the new state and placed the popup. A disabled
+    /// popup shows no flash, so it schedules none: nothing then follows the cursor for it.
+    pub fn on_mic_update(&mut self, update: MicUpdate, was_muted: bool, muted: bool, now: Instant) {
+        if !self.enabled {
+            return;
+        }
+        if self
+            .deadlines
+            .on_mic_update(update, was_muted, muted, self.flashes, now)
+        {
+            self.show_front();
+        }
+    }
+
+    /// When the popup's flashes end and it hides, unless it is pinned; `None` while there is no
+    /// flash.
+    pub fn hide_at(&self) -> Option<Instant> {
+        self.deadlines.hide_at()
+    }
+
+    /// Ends the flashes once the last is over at `now`, hiding the popup unless it is pinned.
+    pub fn end_flash(&mut self, now: Instant) -> Result<&mut Self> {
+        if self.deadlines.end_due(now) {
+            self.hide_unless_pinned()?;
         }
         Ok(self)
     }
@@ -312,19 +444,48 @@ impl Popup {
         Ok(self)
     }
 
-    /// Shows the popup with the current state, even while it is disabled or the mic is
-    /// unmuted, until [`Self::hide_unless_pinned`]: a `status` URL asks for it.
-    pub fn show_status(&mut self) -> Result<&mut Self> {
+    /// Shows the popup with the current state until at least `until`, even while it is disabled
+    /// or the mic is unmuted: a `status` URL asks for it. `end_flash` then hides it, unless it
+    /// is pinned.
+    pub fn show_status(&mut self, until: Instant) -> Result<&mut Self> {
+        self.deadlines.on_status(until);
         self.update_placement()?;
         self.redraw()?;
         self.order_front();
         Ok(self)
     }
 
-    /// Ends the "Mic on" flash after an unmute, or a status flash: hides the popup unless it
-    /// should stay up, muted with the popup enabled.
-    pub fn hide_unless_pinned(&mut self) -> Result<&mut Self> {
-        if !should_show_popup(self.enabled, self.mic_muted) {
+    /// Hides the popup unless it is pinned: muted, enabled, and kept up while muted. A popup
+    /// that hides after each mute never stays.
+    fn hide_unless_pinned(&mut self) -> Result<&mut Self> {
+        if !self.is_pinned() {
+            self.hide()?;
+        }
+        Ok(self)
+    }
+
+    /// Whether the popup stays up on its own (`should_pin_popup`).
+    fn is_pinned(&self) -> bool {
+        should_pin_popup(self.enabled, self.mic_muted, self.flashes)
+    }
+
+    /// Times the popup's flashes with `flashes`. Does nothing for the durations in use, so
+    /// `UI::apply_settings` can repeat it. A flash on screen keeps the end it had. A switch to
+    /// hiding after each mute hides a popup kept up while muted at once, or, during a flash,
+    /// when the flash ends; a switch back shows the popup while muted.
+    pub fn set_flashes(&mut self, flashes: PopupFlashes) -> Result<&mut Self> {
+        if flashes == self.flashes {
+            return Ok(self);
+        }
+        let was_kept_up = self.flashes.keeps_up_while_muted();
+        self.flashes = flashes;
+        trace!("Popup flashes {:?}", flashes);
+        if flashes.keeps_up_while_muted() == was_kept_up {
+            return Ok(self);
+        }
+        if self.is_pinned() {
+            self.show_front();
+        } else if self.deadlines.hide_at().is_none() {
             self.hide()?;
         }
         Ok(self)
@@ -361,12 +522,13 @@ impl Popup {
         Ok(())
     }
 
-    /// Enabling the popup while the mic is muted shows it at once; disabling it hides it.
+    /// Enabling the popup while the mic is muted shows it at once, unless it hides after each
+    /// mute: then the next request's flash shows it. Disabling it hides it.
     pub fn set_enabled(&mut self, enabled: bool) -> Result<&mut Self> {
         self.enabled = enabled;
         if !enabled {
             self.hide()?;
-        } else if should_show_popup(enabled, self.mic_muted) {
+        } else if self.is_pinned() {
             self.show_front();
         }
         Ok(self)
@@ -646,6 +808,255 @@ mod tests {
         assert!(should_show_popup(true, true));
         assert!(!should_show_popup(false, true));
         assert!(!should_show_popup(true, false));
+    }
+
+    const MIC_ON: Duration = Duration::from_millis(1_000);
+    const MIC_OFF: Duration = Duration::from_millis(1_500);
+
+    /// The popup stays up while muted (`popup_mic_off_ms` null), as it always did.
+    const KEPT_UP: PopupFlashes = PopupFlashes {
+        mic_on: MIC_ON,
+        mic_off: None,
+    };
+    /// The popup hides `MIC_OFF` after each mute.
+    const TRANSIENT: PopupFlashes = PopupFlashes {
+        mic_on: MIC_ON,
+        mic_off: Some(MIC_OFF),
+    };
+
+    fn ms(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn only_a_popup_kept_up_while_muted_is_pinned() {
+        assert!(should_pin_popup(true, true, KEPT_UP));
+        assert!(
+            !should_pin_popup(true, true, TRANSIENT),
+            "hides after a mute"
+        );
+        for flashes in [KEPT_UP, TRANSIENT] {
+            assert!(!should_pin_popup(false, true, flashes), "{flashes:?}");
+            assert!(!should_pin_popup(true, false, flashes), "{flashes:?}");
+            assert!(!should_pin_popup(false, false, flashes), "{flashes:?}");
+        }
+    }
+
+    #[test]
+    fn a_mute_flashes_mic_off_when_the_popup_hides_after_each_mute() {
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+
+        let shows = deadlines.on_mic_update(MicUpdate::Request, false, true, TRANSIENT, now);
+
+        assert!(shows);
+        assert_eq!(deadlines.hide_at(), Some(now + MIC_OFF));
+        assert!(!deadlines.end_due(now + MIC_OFF - ms(1)), "still on");
+        assert!(deadlines.end_due(now + MIC_OFF), "over, so the popup hides");
+        assert_eq!(deadlines.hide_at(), None);
+    }
+
+    #[test]
+    fn a_mute_while_muted_shows_mic_off_again() {
+        // A mute URL, or a lock trigger, after the last "Mic off" ended.
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+
+        assert!(deadlines.on_mic_update(MicUpdate::Request, true, true, TRANSIENT, now));
+        assert_eq!(deadlines.hide_at(), Some(now + MIC_OFF));
+    }
+
+    #[test]
+    fn a_popup_kept_up_while_muted_gets_no_mute_flash() {
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+        // An unmute's "Mic on" is on when the mute comes.
+        assert!(!deadlines.on_mic_update(MicUpdate::Request, true, false, KEPT_UP, now));
+        assert_eq!(deadlines.hide_at(), Some(now + MIC_ON));
+
+        let shows =
+            deadlines.on_mic_update(MicUpdate::Request, false, true, KEPT_UP, now + ms(300));
+
+        assert!(!shows, "`update_with_camera` shows a pinned popup");
+        assert_eq!(deadlines.hide_at(), None, "pinned, it needs no deadline");
+    }
+
+    #[test]
+    fn the_polls_re_mutes_never_show_the_popup_or_move_a_deadline() {
+        let now = Instant::now();
+        for flashes in [KEPT_UP, TRANSIENT] {
+            let mut deadlines = FlashDeadlines::default();
+            for (was_muted, muted) in [(true, true), (false, true), (true, false), (false, false)] {
+                let shows =
+                    deadlines.on_mic_update(MicUpdate::Enforcement, was_muted, muted, flashes, now);
+                assert!(!shows, "{flashes:?} {was_muted} → {muted}");
+                assert_eq!(
+                    deadlines.hide_at(),
+                    None,
+                    "{flashes:?} {was_muted} → {muted}"
+                );
+            }
+        }
+
+        // Nor does a re-mute during a mute's flash restart it.
+        let mut deadlines = FlashDeadlines::default();
+        deadlines.on_mic_update(MicUpdate::Request, false, true, TRANSIENT, now);
+        let later = now + ms(1_000);
+        assert!(!deadlines.on_mic_update(MicUpdate::Enforcement, true, true, TRANSIENT, later));
+        assert_eq!(deadlines.hide_at(), Some(now + MIC_OFF));
+    }
+
+    #[test]
+    fn muting_again_restarts_the_mute_display() {
+        let now = Instant::now();
+        let again = now + ms(400);
+        let mut deadlines = FlashDeadlines::default();
+        deadlines.on_mic_update(MicUpdate::Request, false, true, TRANSIENT, now);
+
+        assert!(deadlines.on_mic_update(MicUpdate::Request, true, true, TRANSIENT, again));
+
+        assert_eq!(deadlines.hide_at(), Some(again + MIC_OFF));
+        assert!(
+            !deadlines.end_due(now + MIC_OFF),
+            "the first mute's end passed"
+        );
+    }
+
+    #[test]
+    fn a_mute_during_mic_on_ends_it_and_shows_mic_off_for_its_own_time() {
+        let flashes = PopupFlashes {
+            mic_on: ms(5_000),
+            mic_off: Some(ms(500)),
+        };
+        let now = Instant::now();
+        let mute = now + ms(1_000);
+        let mut deadlines = FlashDeadlines::default();
+        assert!(deadlines.on_mic_update(MicUpdate::Request, true, false, flashes, now));
+
+        assert!(deadlines.on_mic_update(MicUpdate::Request, false, true, flashes, mute));
+
+        assert_eq!(
+            deadlines.hide_at(),
+            Some(mute + ms(500)),
+            "not the 5 s of Mic on"
+        );
+    }
+
+    #[test]
+    fn an_unmute_ends_mic_off_and_shows_mic_on_for_its_own_time() {
+        let flashes = PopupFlashes {
+            mic_on: ms(200),
+            mic_off: Some(ms(5_000)),
+        };
+        let now = Instant::now();
+        let unmute = now + ms(1_000);
+        let mut deadlines = FlashDeadlines::default();
+        deadlines.on_mic_update(MicUpdate::Request, false, true, flashes, now);
+
+        assert!(deadlines.on_mic_update(MicUpdate::Request, true, false, flashes, unmute));
+
+        assert_eq!(deadlines.hide_at(), Some(unmute + ms(200)));
+    }
+
+    #[test]
+    fn an_unmute_shows_a_hidden_popup_only_when_it_hides_after_each_mute() {
+        let now = Instant::now();
+        let mut transient = FlashDeadlines::default();
+        assert!(
+            transient.on_mic_update(MicUpdate::Request, true, false, TRANSIENT, now),
+            "the mute's flash may be over, so Mic on shows the popup again"
+        );
+        assert_eq!(transient.hide_at(), Some(now + MIC_ON));
+
+        let mut kept_up = FlashDeadlines::default();
+        assert!(
+            !kept_up.on_mic_update(MicUpdate::Request, true, false, KEPT_UP, now),
+            "kept up while muted, the popup already shows; a disabled one stays hidden"
+        );
+        assert_eq!(kept_up.hide_at(), Some(now + MIC_ON), "Mic on still ends");
+    }
+
+    #[test]
+    fn an_unmute_that_changed_nothing_only_extends_mic_on() {
+        let now = Instant::now();
+        let again = now + ms(600);
+        for flashes in [KEPT_UP, TRANSIENT] {
+            let mut deadlines = FlashDeadlines::default();
+            deadlines.on_mic_update(MicUpdate::Request, true, false, flashes, now);
+
+            let shows = deadlines.on_mic_update(MicUpdate::Request, false, false, flashes, again);
+
+            assert!(!shows, "{flashes:?}");
+            assert_eq!(deadlines.hide_at(), Some(again + MIC_ON), "{flashes:?}");
+        }
+    }
+
+    #[test]
+    fn zero_ms_flashes_show_nothing_and_end_in_the_same_pass() {
+        let flashes = PopupFlashes {
+            mic_on: Duration::ZERO,
+            mic_off: Some(Duration::ZERO),
+        };
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+
+        assert!(!deadlines.on_mic_update(MicUpdate::Request, false, true, flashes, now));
+        assert!(deadlines.end_due(now));
+        assert!(!deadlines.on_mic_update(MicUpdate::Request, true, false, flashes, now));
+        assert!(deadlines.end_due(now));
+        assert_eq!(deadlines.hide_at(), None);
+    }
+
+    #[test]
+    fn a_status_flash_lasts_its_time_through_mutes_and_unmutes() {
+        let now = Instant::now();
+        let status_end = now + ms(2_000);
+        let quick = PopupFlashes {
+            mic_on: Duration::ZERO,
+            mic_off: Some(ms(300)),
+        };
+        let mut deadlines = FlashDeadlines::default();
+        deadlines.on_status(status_end);
+
+        deadlines.on_mic_update(MicUpdate::Request, false, true, quick, now + ms(500));
+        assert_eq!(deadlines.hide_at(), Some(status_end));
+        deadlines.on_mic_update(MicUpdate::Request, true, false, quick, now + ms(600));
+        assert_eq!(deadlines.hide_at(), Some(status_end));
+
+        // A mute's flash that outlasts it keeps the popup up longer.
+        deadlines.on_mic_update(MicUpdate::Request, false, true, TRANSIENT, now + ms(1_900));
+        assert_eq!(deadlines.hide_at(), Some(now + ms(1_900) + MIC_OFF));
+        assert!(!deadlines.end_due(status_end));
+    }
+
+    #[test]
+    fn a_later_status_extends_its_flash_and_an_earlier_one_keeps_it() {
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+
+        deadlines.on_status(now + ms(2_000));
+        deadlines.on_status(now + ms(3_000));
+        assert_eq!(deadlines.hide_at(), Some(now + ms(3_000)));
+        deadlines.on_status(now + ms(2_500));
+        assert_eq!(deadlines.hide_at(), Some(now + ms(3_000)));
+    }
+
+    #[test]
+    fn the_flashes_end_once_the_last_is_over_and_only_once() {
+        let now = Instant::now();
+        let mut deadlines = FlashDeadlines::default();
+        assert!(!deadlines.end_due(now), "no flash, nothing to end");
+
+        deadlines.on_mic_update(MicUpdate::Request, true, false, TRANSIENT, now);
+        deadlines.on_status(now + ms(2_000));
+
+        assert!(
+            !deadlines.end_due(now + MIC_ON),
+            "the status flash is still on"
+        );
+        assert!(deadlines.end_due(now + ms(2_000)));
+        assert!(!deadlines.end_due(now + ms(2_000)), "already ended");
+        assert_eq!(deadlines.hide_at(), None);
     }
 
     const MUTED_IDLE_DARK: PopupState = PopupState {

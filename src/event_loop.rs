@@ -100,14 +100,11 @@ pub struct EventIds {
 }
 
 /// Runs `request`, with the sound and notification the settings ask for when it changes the
-/// state. Without one, it is the poll: re-mutes, silently, while the user wants mute, otherwise
-/// watches unmuted devices. Returns whether a request just unmuted, so the popup should hide
-/// after its "Mic on" flash.
-fn update_mic(
-    ui: &RwLock<UI>,
-    controller: &RwLock<MicController>,
-    request: Option<MicCommand>,
-) -> bool {
+/// state, and the popup's flash: "Mic off" after a mute while the popup hides after each mute,
+/// "Mic on" after an unmute, which the popup ends itself (`UI::popup_hide_at`). Without one, it
+/// is the poll: re-mutes, silently and without showing the popup, while the user wants mute,
+/// otherwise watches unmuted devices.
+fn update_mic(ui: &RwLock<UI>, controller: &RwLock<MicController>, request: Option<MicCommand>) {
     let mut controller = controller.write();
     let was_muted = controller.muted;
     let state = match request {
@@ -116,7 +113,7 @@ fn update_mic(
         None => {
             controller.watch_unmuted();
             controller.save_input_levels_if_due();
-            return false;
+            return;
         }
     };
     match controller.toggle(state).map(|_| ()) {
@@ -132,31 +129,23 @@ fn update_mic(
             Some(_) => MicUpdate::Request,
             None => MicUpdate::Enforcement,
         };
-        ui.give_feedback(update, was_muted, controller.muted);
+        ui.give_feedback(update, was_muted, controller.muted, Instant::now());
     }
     controller.save_input_levels_if_due();
-    request.is_some() && !controller.muted
 }
 
 /// Runs a change the user asked for, and records the resulting intent for
-/// `launch_state: "last"`. Returns when to hide the popup: when the "Mic on" flash after an
-/// unmute ends (`popup_mic_on_ms`).
+/// `launch_state: "last"`. The popup keeps the end of the flash it shows for the change, so no
+/// caller can leave it on screen.
 fn request_mic(
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
     last_state: &mut LastMuteState,
     command: MicCommand,
-) -> Option<Instant> {
-    let has_unmuted = update_mic(ui, controller, Some(command));
+) {
+    update_mic(ui, controller, Some(command));
     let intent = controller.read().should_enforce_mute();
     last_state.record(intent);
-    has_unmuted.then(|| Instant::now() + ui.read().mic_on_flash())
-}
-
-/// Keeps the popup up until the later of `hide_at` and `until`; `None` sorts before every
-/// deadline.
-fn keep_popup_until(hide_at: &mut Option<Instant>, until: Option<Instant>) {
-    *hide_at = (*hide_at).max(until);
 }
 
 /// When a device change reported at `now` runs the poll: at once, unless the last poll ran less
@@ -197,28 +186,34 @@ fn log_poll_interval(was_listening: &mut Option<bool>, is_listening: bool) {
 }
 
 /// Whether the popup may be on screen, so it must follow the cursor's monitor: while muted with
-/// the popup on, and while it flashes after an unmute or a `status` URL (`hide_popup_at`). A
-/// hidden popup is placed when it shows.
-fn is_cursor_tracked(is_muted: bool, is_popup_enabled: bool, is_flashing: bool) -> bool {
-    (is_muted && is_popup_enabled) || is_flashing
+/// the popup on and kept up while muted (`popup_mic_off_ms` null), and while it flashes after a
+/// mute, an unmute, or a `status` URL (`UI::popup_hide_at`). A hidden popup is placed when it
+/// shows.
+fn is_cursor_tracked(
+    is_muted: bool,
+    is_popup_enabled: bool,
+    is_kept_up_while_muted: bool,
+    is_flashing: bool,
+) -> bool {
+    (is_muted && is_popup_enabled && is_kept_up_while_muted) || is_flashing
 }
 
-/// Runs a URL's action and returns when to hide the popup. An action that can unmute runs only
-/// with `allow_url_unmute`: any app or web page can open the URL.
+/// Runs a URL's action. An action that can unmute runs only with `allow_url_unmute`: any app or
+/// web page can open the URL.
 fn run_url_action(
     action: UrlAction,
     ui: &RwLock<UI>,
     controller: &RwLock<MicController>,
     last_state: &mut LastMuteState,
     allow_url_unmute: bool,
-) -> Option<Instant> {
+) {
     if !action.is_allowed(allow_url_unmute) {
         log::warn!(
             "Refused the {} URL action: it can unmute, which needs \"allow_url_unmute\": true in \
              settings.json",
             action.name()
         );
-        return None;
+        return;
     }
     let Some(command) = action.command() else {
         let muted = controller.read().muted;
@@ -227,13 +222,14 @@ fn run_url_action(
             action.name(),
             if muted { "muted" } else { "unmuted" }
         );
-        if let Err(err) = ui.write().show_popup_status() {
+        let until = Instant::now() + STATUS_POPUP_DURATION;
+        if let Err(err) = ui.write().show_popup_status(until) {
             log::error!("Failed to show the status popup: {:#}", err);
         }
-        return Some(Instant::now() + STATUS_POPUP_DURATION);
+        return;
     };
     log::info!("Running the {} URL action", action.name());
-    request_mic(ui, controller, last_state, command)
+    request_mic(ui, controller, last_state, command);
 }
 
 /// Hands the devices settings.json excludes to the controller. A tray click, a hand edit, and
@@ -456,7 +452,6 @@ pub fn start(
     // When the poll a reported device change asked for runs; see `device_change_poll_at`.
     let mut device_poll_at: Option<Instant> = None;
     let mut last_cursor_check = Instant::now();
-    let mut hide_popup_at: Option<Instant> = None;
     let mut is_exiting = false;
     let mut devices_menu_failures = FailureLog::new(
         "Failed to update the Microphones menu",
@@ -616,8 +611,7 @@ pub fn start(
                 exit_requested = true;
             } else if event.id == button_toggle_mute {
                 trace!("Toggle mic tray menu item selected");
-                let hide_at = request_mic(ui, &controller, &mut last_state, MicCommand::Toggle);
-                keep_popup_until(&mut hide_popup_at, hide_at);
+                request_mic(ui, &controller, &mut last_state, MicCommand::Toggle);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
                 // Each toggle sets the value opposite to the one the menu showed, so it means
@@ -705,8 +699,7 @@ pub fn start(
             let command = ui.read().tray_click_command(&event);
             if let Some(command) = command {
                 trace!("Tray icon right-clicked: {:?}", command);
-                let hide_at = request_mic(ui, &controller, &mut last_state, command);
-                keep_popup_until(&mut hide_popup_at, hide_at);
+                request_mic(ui, &controller, &mut last_state, command);
             }
         }
 
@@ -753,17 +746,14 @@ pub fn start(
                     mode,
                     command
                 );
-                let hide_at = request_mic(ui, &controller, &mut last_state, command);
-                keep_popup_until(&mut hide_popup_at, hide_at);
+                request_mic(ui, &controller, &mut last_state, command);
             }
         }
 
         // URL actions, including any that arrived before the UI existed.
         while let Some(action) = url_actions.pop() {
             let allow_url_unmute = settings.read().allow_url_unmute;
-            let hide_at =
-                run_url_action(action, ui, &controller, &mut last_state, allow_url_unmute);
-            keep_popup_until(&mut hide_popup_at, hide_at);
+            run_url_action(action, ui, &controller, &mut last_state, allow_url_unmute);
         }
 
         // After the shortcut and URLs, so a mute here wins. In push_to_talk mode every event
@@ -890,11 +880,24 @@ pub fn start(
             show_devices(ui, &controller, &settings, &mut devices_menu_failures);
         }
 
+        // When the popup's flash ends: "Mic off" after a mute while the popup hides after each
+        // mute, "Mic on" after an unmute, or a status URL's. The popup keeps the deadline, so
+        // every request path schedules its end.
+        let mut hide_popup_at = ui.read().popup_hide_at();
+
         // The popup follows the cursor's monitor on its own cadence, while it may be on screen.
         let is_muted = controller.read().muted;
-        let is_popup_enabled = settings.read().show_popup;
-        let is_tracking_cursor =
-            is_cursor_tracked(is_muted, is_popup_enabled, hide_popup_at.is_some());
+        let (is_popup_enabled, is_kept_up_while_muted) = {
+            let settings = settings.read();
+            let mic_off = settings.popup_mic_off_ms.value();
+            (settings.show_popup, mic_off.duration().is_none())
+        };
+        let is_tracking_cursor = is_cursor_tracked(
+            is_muted,
+            is_popup_enabled,
+            is_kept_up_while_muted,
+            hide_popup_at.is_some(),
+        );
         if is_tracking_cursor && last_cursor_check.elapsed() >= CURSOR_CHECK_INTERVAL {
             last_cursor_check = Instant::now();
             if let Err(err) = ui.write().detect() {
@@ -902,14 +905,14 @@ pub fn start(
             }
         }
 
-        // Hide the popup when the "Mic on" flash after an unmute or a status URL's flash ends,
-        // unless it stays up while muted. A 0 ms flash ends in the pass that unmuted, before
-        // AppKit draws "Mic on".
+        // Hide the popup when its flash ends, unless it stays up while muted. A 0 ms flash ends
+        // in the pass that started it, before AppKit draws it.
         if hide_popup_at.is_some_and(|deadline| Instant::now() >= deadline) {
-            hide_popup_at = None;
-            if let Err(err) = ui.write().hide_popup_unless_pinned() {
+            let mut ui = ui.write();
+            if let Err(err) = ui.end_popup_flash(Instant::now()) {
                 log::error!("Failed to hide popup: {:#}", err);
             }
+            hide_popup_at = ui.popup_hide_at();
         }
 
         if exit_requested {
@@ -956,30 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn the_popup_stays_up_until_the_latest_deadline() {
-        let now = Instant::now();
-        let soon = now + crate::settings::MicOnFlash::default().duration();
-        let later = now + STATUS_POPUP_DURATION;
-
-        let mut hide_at = None;
-        keep_popup_until(&mut hide_at, None);
-        assert_eq!(hide_at, None);
-        keep_popup_until(&mut hide_at, Some(later));
-        keep_popup_until(&mut hide_at, Some(soon));
-        assert_eq!(
-            hide_at,
-            Some(later),
-            "an earlier deadline doesn't cut it short"
-        );
-        keep_popup_until(&mut hide_at, None);
-        assert_eq!(
-            hide_at,
-            Some(later),
-            "a request that didn't unmute keeps it"
-        );
-    }
-
-    #[test]
     fn a_device_change_polls_at_once_unless_a_poll_just_ran() {
         let last_poll = Instant::now();
         let spaced = last_poll + DEVICE_CHANGE_POLL_SPACING;
@@ -1001,17 +980,40 @@ mod tests {
     #[test]
     fn the_popup_follows_the_cursor_only_while_it_may_be_on_screen() {
         assert!(
-            is_cursor_tracked(true, true, false),
+            is_cursor_tracked(true, true, true, false),
             "muted with the popup on"
         );
         assert!(
-            is_cursor_tracked(false, false, true),
+            is_cursor_tracked(false, false, true, true),
             "a flash, even disabled"
         );
-        assert!(!is_cursor_tracked(true, false, false), "the popup is off");
         assert!(
-            !is_cursor_tracked(false, true, false),
+            !is_cursor_tracked(true, false, true, false),
+            "the popup is off"
+        );
+        assert!(
+            !is_cursor_tracked(false, true, true, false),
             "unmuted, after the flash"
+        );
+    }
+
+    #[test]
+    fn a_popup_that_hides_after_each_mute_follows_the_cursor_only_during_a_flash() {
+        assert!(
+            is_cursor_tracked(true, true, false, true),
+            "muted, while Mic off shows"
+        );
+        assert!(
+            !is_cursor_tracked(true, true, false, false),
+            "muted, after Mic off hid"
+        );
+        assert!(
+            is_cursor_tracked(false, true, false, true),
+            "unmuted, while Mic on shows"
+        );
+        assert!(
+            !is_cursor_tracked(false, true, false, false),
+            "unmuted, after Mic on hid"
         );
     }
 
