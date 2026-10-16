@@ -1128,6 +1128,18 @@ impl DeviceListeners {
     }
 }
 
+/// What the launch does with the mute state. `main` decides it from the settings and
+/// `mute-state.json` (`mute_triggers::launch_mute_reason`) before it builds the controller, so a
+/// launch that mutes never first unmutes what an unclean exit left muted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchIntent {
+    /// Undo what an unclean exit left behind, then adopt the hardware state as the user's intent.
+    KeepHardwareState,
+    /// The launch mutes: what an unclean exit left muted stays muted and journaled, as the app's
+    /// own mute, and the intent starts muted.
+    Mute,
+}
+
 pub struct MicController<B = CoreAudioBackend> {
     pub muted: bool,
     desired_muted: bool,
@@ -1174,12 +1186,13 @@ impl<B: AudioBackend> Debug for MicController<B> {
 impl MicController<CoreAudioBackend> {
     /// A controller for the real devices, with its records in the settings folder. It leaves
     /// alone the devices whose UIDs `excluded` lists.
-    pub fn new(excluded: BTreeSet<String>) -> Self {
+    pub fn new(excluded: BTreeSet<String>, intent: LaunchIntent) -> Self {
         Self::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(state_file(JOURNAL_FILE_NAME)),
             InputLevels::load(state_file(LEVELS_FILE_NAME)),
             excluded,
+            intent,
         )
     }
 }
@@ -1193,6 +1206,7 @@ impl<B: AudioBackend> MicController<B> {
         journal: RestoreJournal,
         levels: InputLevels,
         excluded: BTreeSet<String>,
+        intent: LaunchIntent,
     ) -> Self {
         let mut controller = Self {
             muted: false,
@@ -1215,8 +1229,12 @@ impl<B: AudioBackend> MicController<B> {
         trace!("Creating audio controller");
         let names = controller.names();
         trace!("Found {} devices: {}", names.len(), names.join(", "));
-        // Undo what an unclean exit left behind before the hardware state becomes user intent.
-        controller.restore_after_unclean_exit();
+        match intent {
+            // Undo what an unclean exit left behind before the hardware state becomes intent.
+            LaunchIntent::KeepHardwareState => controller.restore_after_unclean_exit(),
+            // Restoring first would leave those devices live until the launch mutes again.
+            LaunchIntent::Mute => controller.adopt_after_unclean_exit(),
+        }
         let ids = match controller.get_input_device_ids() {
             Ok(ids) => ids,
             Err(err) => {
@@ -1227,7 +1245,10 @@ impl<B: AudioBackend> MicController<B> {
         };
         controller.record_audible_levels(&ids);
         controller.muted = controller.is_muted_all();
-        controller.desired_muted = controller.muted;
+        controller.desired_muted = match intent {
+            LaunchIntent::KeepHardwareState => controller.muted,
+            LaunchIntent::Mute => true,
+        };
         controller.refresh_device_states(&ids, Instant::now());
         controller
     }
@@ -1257,6 +1278,23 @@ impl<B: AudioBackend> MicController<B> {
         }
         self.journal.save_logged();
         self.connected_journaled = self.connected_journaled_keys();
+    }
+
+    /// Keeps what an unclean exit left muted, for a launch that mutes: the journal's entries are
+    /// the app's own mute from here on, which an unmute or exit undoes. An entry for a device that
+    /// is away stays until it is back. `connected_journaled` starts empty, as before the first
+    /// unmuted poll, so a failed unmute gets its one retry.
+    fn adopt_after_unclean_exit(&mut self) {
+        if !self.journal.is_empty() {
+            info!(
+                "{} lists {} device(s) left changed by an unclean exit; the launch mutes, so they \
+                 stay muted",
+                JOURNAL_FILE_NAME,
+                self.journal.len()
+            );
+        }
+        // Rewrites a file whose invalid entries were dropped; a no-op otherwise.
+        self.journal.save_logged();
     }
 
     fn connected_journaled_keys(&self) -> HashSet<DeviceKey> {
@@ -2587,6 +2625,7 @@ mod tests {
     }
 
     impl Stores {
+        /// Launches as `launch_state: "keep"` does, outside push-to-talk mode.
         fn launch(&self, backend: FakeBackend) -> MicController<FakeBackend> {
             self.launch_excluding(backend, &[])
         }
@@ -2597,11 +2636,27 @@ mod tests {
             backend: FakeBackend,
             excluded: &[&str],
         ) -> MicController<FakeBackend> {
+            self.launch_with(backend, excluded, LaunchIntent::KeepHardwareState)
+        }
+
+        /// Launches as a launch that mutes does: in push-to-talk mode, or with `launch_state`
+        /// "muted", or "last" after a muted quit.
+        fn launch_muting(&self, backend: FakeBackend) -> MicController<FakeBackend> {
+            self.launch_with(backend, &[], LaunchIntent::Mute)
+        }
+
+        fn launch_with(
+            &self,
+            backend: FakeBackend,
+            excluded: &[&str],
+            intent: LaunchIntent,
+        ) -> MicController<FakeBackend> {
             MicController::with_backend(
                 backend,
                 RestoreJournal::load(self.journal.boxed()),
                 InputLevels::load(self.levels.boxed()),
                 uids(excluded),
+                intent,
             )
         }
 
@@ -2623,6 +2678,7 @@ mod tests {
             RestoreJournal::load(stores.journal.boxed()),
             InputLevels::load(stores.levels.boxed()),
             BTreeSet::new(),
+            LaunchIntent::KeepHardwareState,
         );
 
         assert_eq!(stores.journal.saves(), 0);
@@ -3493,7 +3549,8 @@ mod tests {
         let mut crashed = stores.launch(native_and_volume_devices());
         crashed.mute_all(true).unwrap();
 
-        // A crash: the controller is gone without restoring, and the devices stay muted.
+        // A crash: the controller is gone without restoring, and the devices stay muted. The
+        // launch keeps the hardware state, so it restores them first.
         let relaunched = stores.launch(crashed.backend);
 
         assert!(!relaunched.muted);
@@ -3501,6 +3558,78 @@ mod tests {
         assert_eq!(relaunched.backend.device(1).unwrap().mute, Some(false));
         assert_eq!(relaunched.backend.device(2).unwrap().volume, Some(0.65));
         assert!(relaunched.journal.is_empty());
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn a_launch_that_mutes_keeps_what_an_unclean_exit_left_muted_as_its_own_mute() {
+        let stores = Stores::default();
+        let mut crashed = stores.launch(native_and_volume_devices());
+        crashed.mute_all(true).unwrap();
+        let mut backend = crashed.backend;
+        backend.writes.clear();
+
+        let mut relaunched = stores.launch_muting(backend);
+
+        assert!(
+            relaunched.backend.writes.is_empty(),
+            "nothing is live before the launch mute"
+        );
+        assert!(relaunched.muted);
+        assert!(relaunched.should_enforce_mute());
+        let journal = stores.journal_json();
+        assert_eq!(journal["devices"]["Built-in UID"]["native_mute"], true);
+        assert_eq!(journal["devices"]["USB Mic UID"]["saved_volume"], 0.65);
+
+        // The launch mute at Init writes nothing; an unmute undoes the adopted mute.
+        relaunched.toggle(Some(true)).unwrap();
+        assert!(relaunched.backend.writes.is_empty());
+        relaunched.mute_all(false).unwrap();
+
+        assert_eq!(relaunched.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(relaunched.backend.device(2).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn a_device_away_at_a_launch_that_mutes_stays_muted_when_it_returns_until_exit() {
+        let stores = Stores::default();
+        let mut crashed = stores.launch(native_and_volume_devices());
+        crashed.mute_all(true).unwrap();
+        let mut backend = crashed.backend;
+        let usb = backend.unplug(2);
+        let mut relaunched = stores.launch_muting(backend);
+        relaunched.toggle(Some(true)).unwrap();
+
+        relaunched.backend.plug(9, usb);
+        relaunched.toggle(Some(true)).unwrap();
+
+        assert_eq!(relaunched.backend.device(9).unwrap().volume, Some(0.0));
+        assert_eq!(relaunched.journal.saved_volume(&key("USB Mic")), Some(0.65));
+
+        relaunched.restore_on_exit().unwrap();
+
+        assert_eq!(relaunched.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(relaunched.backend.device(9).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    #[test]
+    fn a_device_away_at_a_launch_that_mutes_is_restored_when_it_returns_after_an_unmute() {
+        let stores = Stores::default();
+        let mut crashed = stores.launch(native_and_volume_devices());
+        crashed.mute_all(true).unwrap();
+        let mut backend = crashed.backend;
+        let usb = backend.unplug(2);
+        let mut relaunched = stores.launch_muting(backend);
+        relaunched.mute_all(false).unwrap();
+        relaunched.watch_unmuted();
+        assert_eq!(relaunched.journal.saved_volume(&key("USB Mic")), Some(0.65));
+
+        relaunched.backend.plug(9, usb);
+        relaunched.watch_unmuted();
+
+        assert_eq!(relaunched.backend.device(9).unwrap().volume, Some(0.65));
         assert_eq!(stores.journal.contents(), None);
     }
 

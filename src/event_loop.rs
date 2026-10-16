@@ -6,12 +6,11 @@ use crate::feedback::MicUpdate;
 use crate::launch_at_login;
 use crate::mic::{FailureLog, MicController};
 use crate::mic_command::MicCommand;
-use crate::mute_triggers::{self, LastMuteState, MUTE_STATE_FILE_NAME};
+use crate::mute_triggers::{self, LastMuteState};
 use crate::push_to_talk::PushToTalk;
 use crate::session_events::SessionEvents;
 use crate::settings::Settings;
 use crate::settings_window::{FileProblem, SettingsChange, SettingsWindow, WindowEvent};
-use crate::store;
 use crate::ui::UI;
 use crate::url_scheme::{UrlAction, UrlActions};
 use crate::utils;
@@ -358,12 +357,16 @@ pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
 }
 
 /// Runs the event loop until the app quits. The loop creates the tray, popup, and hotkey
-/// itself, on `StartCause::Init`.
+/// itself, on `StartCause::Init`, then mutes when `launch_mute` gives a reason, which main
+/// decided before it built the controller. `last_state` is the mute state the user last chose,
+/// for `launch_state: "last"`.
 pub fn start(
     mut event_loop: EventLoop<Message>,
     controller: Arc<RwLock<MicController>>,
     camera: Arc<RwLock<CameraController>>,
     settings: Arc<RwLock<Settings>>,
+    mut last_state: LastMuteState,
+    launch_mute: Option<&'static str>,
 ) {
     // `None` until the loop runs; see `is_loop_start`.
     let mut ui_and_ids: Option<(RwLock<UI>, EventIds)> = None;
@@ -376,8 +379,6 @@ pub fn start(
     // Screen lock and sleep, watched from Init on: they end a push-to-talk hold, and the
     // mute_on_* settings mute on them.
     let mut session_events: Option<SessionEvents> = None;
-    // The mute state the user last chose, for `launch_state: "last"`.
-    let mut last_state = LastMuteState::load(store::state_file(MUTE_STATE_FILE_NAME));
 
     // Start in the past so the first iteration triggers the poll immediately.
     let mut last_poll = Instant::now()
@@ -497,8 +498,7 @@ pub fn start(
         };
         // Push-to-talk and `launch_state` can mute at launch; nothing unmutes.
         if is_launching {
-            let reason = mute_triggers::launch_mute_reason(&settings.read(), last_state.muted());
-            if let Some(reason) = reason {
+            if let Some(reason) = launch_mute {
                 log::info!("Muting at launch: {}", reason);
                 request_mic(ui, &controller, &mut last_state, MicCommand::Mute);
             }

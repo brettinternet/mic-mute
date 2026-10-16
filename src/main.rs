@@ -27,7 +27,8 @@ mod utils;
 
 use crate::camera::CameraController;
 use crate::event_loop::{restore_microphone_on_exit, start};
-use crate::mic::MicController;
+use crate::mic::{LaunchIntent, MicController};
+use crate::mute_triggers::{LastMuteState, MUTE_STATE_FILE_NAME};
 use crate::settings::Settings;
 use crate::utils::arc_lock;
 use log::{info, trace};
@@ -92,8 +93,16 @@ fn main() {
         }
     }
 
+    // Decided before the controller exists: restoring what an unclean exit left muted, only for
+    // the loop to mute it again once it runs, would leave the microphones live in between.
+    let last_state = LastMuteState::load(store::state_file(MUTE_STATE_FILE_NAME));
+    let launch_mute = mute_triggers::launch_mute_reason(&settings, last_state.muted());
+    let intent = match launch_mute {
+        Some(_) => LaunchIntent::Mute,
+        None => LaunchIntent::KeepHardwareState,
+    };
     // Never fails: devices it can't read yet count as failed, and every poll tries them again.
-    let controller = MicController::new(settings.excluded_uids());
+    let controller = MicController::new(settings.excluded_uids(), intent);
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
@@ -128,5 +137,12 @@ fn main() {
     // The loop creates the tray, popup, and hotkey once it runs: tray-icon requires that.
     let event_loop = event_loop::create();
     let settings = arc_lock(settings);
-    start(event_loop, controller, camera, settings);
+    start(
+        event_loop,
+        controller,
+        camera,
+        settings,
+        last_state,
+        launch_mute,
+    );
 }

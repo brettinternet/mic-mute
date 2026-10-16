@@ -76,7 +76,7 @@ Mic Mute is best-effort, **not** a hardware privacy switch.
 - Never mutes the devices unchecked in the tray's Microphones menu (the [`excluded_devices`](./docs/settings.md#excluded_devices) setting), and leaves them out of the mute state: an excluded microphone may be live while the tray and popup show muted.
 - A change CoreAudio doesn't report, such as a microphone that gains its input channels only after it appears, waits for the next poll, which can leave a mute gap of up to a second (200 ms while a CoreAudio listener can't be registered).
 - Drivers can lie; use hardware mute, unplug, or macOS permissions for high assurance.
-- Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead; a microphone unplugged by then is restored when it reconnects.
+- Quitting restores the microphones Mic Mute muted: tray → Exit, Dock → Quit, <kbd>Cmd</kbd> <kbd>Q</kbd>, logging out, `osascript -e 'quit app "Mic Mute"'`, `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, and internal errors (panics). After `kill -9`, a crash, or power loss, the next launch restores them instead, unless it mutes at launch (push-to-talk mode, or [`launch_state`](./docs/settings.md#launch_state)): then they stay muted. A microphone unplugged by then is restored once it's back while Mic Mute is unmuted.
 - Microphones without native mute are muted by setting their input volume to 0. Unmuting restores the level they had; a microphone Mic Mute has never seen audible comes back at 50%.
 
 ## Launch at Login
