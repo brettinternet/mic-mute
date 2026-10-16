@@ -9,7 +9,7 @@ use crate::mic_command::MicCommand;
 use crate::mute_triggers::{self, LastMuteState, MUTE_STATE_FILE_NAME};
 use crate::push_to_talk::PushToTalk;
 use crate::session_events::SessionEvents;
-use crate::settings::Settings;
+use crate::settings::{Settings, ShortcutMode, Update};
 use crate::settings_window::{FileProblem, SettingsChange, SettingsWindow, WindowEvent};
 use crate::store;
 use crate::ui::UI;
@@ -263,9 +263,71 @@ fn show_devices(
     }
 }
 
-/// Saves and applies a change made in the Settings window, the way the tray toggles do: under
-/// `settings.write()`, then `ui.write()` once the settings guard is dropped. A change to the
-/// shortcut's mode or hotkey can end a push-to-talk hold, which mutes.
+/// Saves `change` to the settings with `Settings::update` under `settings.write()`, and drops
+/// the guard before touching the UI. On `Update::Changed`, the caller applies the change. On
+/// `Update::Reloaded`, settings.json was edited since the app last read or wrote it, so the
+/// change went into the edited file's settings, which replaced the app's: this then applies
+/// every setting, as a reload does.
+fn save_change(
+    change: impl FnOnce(&mut Settings),
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    settings: &RwLock<Settings>,
+    push_to_talk: &mut PushToTalk,
+    last_state: &mut LastMuteState,
+) -> Update {
+    let (update, old_mode, reloaded) = {
+        let mut s = settings.write();
+        let old_mode = s.mode;
+        let update = s.update(change);
+        let reloaded = matches!(update, Update::Reloaded(_)).then(|| s.clone());
+        (update, old_mode, reloaded)
+    };
+    if let Some(new_settings) = reloaded {
+        apply_all_settings(
+            "a change saved into an edited settings.json",
+            &new_settings,
+            old_mode,
+            ui,
+            controller,
+            push_to_talk,
+            last_state,
+        );
+    }
+    update
+}
+
+/// Applies every setting in `new_settings`, which replaced settings in `old_mode`, as a reload
+/// does: after About → Reset Settings, or a change saved into an edited settings.json
+/// (`source`, for the log). A change to the shortcut's mode or hotkey can end a push-to-talk
+/// hold, which mutes.
+fn apply_all_settings(
+    source: &str,
+    new_settings: &Settings,
+    old_mode: ShortcutMode,
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    push_to_talk: &mut PushToTalk,
+    last_state: &mut LastMuteState,
+) {
+    let is_hotkey_replaced = {
+        let mut ui = ui.write();
+        let hotkey_before = ui.mic_shortcut_id();
+        if let Err(e) = ui.apply_settings(new_settings) {
+            log::error!("Failed to apply settings: {:#}", e);
+        }
+        ui.mic_shortcut_id() != hotkey_before
+    };
+    let mute = push_to_talk.on_settings_change(old_mode, new_settings.mode, is_hotkey_replaced);
+    if let Some(command) = mute {
+        log::info!("Muting: the shortcut's mode or hotkey changed ({})", source);
+        request_mic(ui, controller, last_state, command);
+    }
+}
+
+/// Saves and applies a change made in the Settings window, the way the tray toggles do
+/// (`save_change`). A change to the shortcut's mode or hotkey can end a push-to-talk hold,
+/// which mutes.
 fn apply_window_change(
     change: &SettingsChange,
     ui: &RwLock<UI>,
@@ -274,18 +336,16 @@ fn apply_window_change(
     push_to_talk: &mut PushToTalk,
     last_state: &mut LastMuteState,
 ) {
-    let (old_mode, new_settings) = {
-        let mut s = settings.write();
-        let old_mode = s.mode;
-        if !change.apply_to(&mut s) {
-            return;
-        }
-        trace!("Settings window: {:?}", change);
-        if let Err(e) = s.save() {
-            log::error!("Failed to save settings: {:#}", e);
-        }
-        (old_mode, s.clone())
+    trace!("Settings window: {:?}", change);
+    let old_mode = settings.read().mode;
+    let apply = |s: &mut Settings| {
+        change.apply_to(s);
     };
+    let update = save_change(apply, ui, controller, settings, push_to_talk, last_state);
+    if !matches!(update, Update::Changed(_)) {
+        return;
+    }
+    let new_settings = settings.read().clone();
     let is_hotkey_replaced = {
         let mut ui = ui.write();
         let hotkey_before = ui.mic_shortcut_id();
@@ -553,35 +613,49 @@ pub fn start(
                 keep_popup_until(&mut hide_popup_at, hide_at);
             } else if event.id == button_launch_at_login {
                 trace!("Launch at login toggled");
-                let mut s = settings.write();
-                s.launch_at_login = !s.launch_at_login;
-                let enabled = s.launch_at_login;
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
+                // Each toggle sets the value opposite to the one the menu showed, so it means
+                // the same when `save_change` reloads a hand edit first.
+                let enabled = !settings.read().launch_at_login;
+                let update = save_change(
+                    |s| s.launch_at_login = enabled,
+                    ui,
+                    &controller,
+                    &settings,
+                    &mut push_to_talk,
+                    &mut last_state,
+                );
+                if let Update::Changed(_) = update {
+                    ui.write().set_launch_at_login(enabled);
                 }
-                drop(s);
-                ui.write().set_launch_at_login(enabled);
             } else if event.id == button_show_in_dock {
                 trace!("Show in dock toggled");
-                let mut s = settings.write();
-                s.show_in_dock = !s.show_in_dock;
-                let visible = s.show_in_dock;
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
+                let visible = !settings.read().show_in_dock;
+                let update = save_change(
+                    |s| s.show_in_dock = visible,
+                    ui,
+                    &controller,
+                    &settings,
+                    &mut push_to_talk,
+                    &mut last_state,
+                );
+                if let Update::Changed(_) = update {
+                    launch_at_login::set_dock_visible(visible);
                 }
-                drop(s);
-                launch_at_login::set_dock_visible(visible);
             } else if event.id == button_show_popup {
                 trace!("Show popup toggled");
-                let mut s = settings.write();
-                s.show_popup = !s.show_popup;
-                let visible = s.show_popup;
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
-                }
-                drop(s);
-                if let Err(e) = ui.write().set_popup_enabled(visible) {
-                    log::error!("Failed to apply popup setting: {}", e);
+                let visible = !settings.read().show_popup;
+                let update = save_change(
+                    |s| s.show_popup = visible,
+                    ui,
+                    &controller,
+                    &settings,
+                    &mut push_to_talk,
+                    &mut last_state,
+                );
+                if let Update::Changed(_) = update {
+                    if let Err(e) = ui.write().set_popup_enabled(visible) {
+                        log::error!("Failed to apply popup setting: {}", e);
+                    }
                 }
             } else if event.id == button_settings_window {
                 trace!("Settings tray menu item selected");
@@ -596,12 +670,15 @@ pub fn start(
                 }
             } else if let Some(device) = clicked_device {
                 trace!("Microphones menu: {} ({}) toggled", device.name, device.uid);
-                let mut s = settings.write();
-                s.toggle_device_exclusion(&device.uid, &device.name);
-                if let Err(e) = s.save() {
-                    log::error!("Failed to save settings: {}", e);
-                }
-                drop(s);
+                let is_excluded = !settings.read().is_device_excluded(&device.uid);
+                save_change(
+                    |s| s.set_device_excluded(&device, is_excluded),
+                    ui,
+                    &controller,
+                    &settings,
+                    &mut push_to_talk,
+                    &mut last_state,
+                );
                 // The poll hands the change to the controller and shows it; run it now.
                 is_poll_requested = true;
             } else if event.id == button_open_sound_settings {
@@ -630,25 +707,15 @@ pub fn start(
             };
             // Reset Settings: apply every setting at once.
             if let Some((old_mode, new_settings)) = changed {
-                let hotkey_before = shortcut_mic.load(Ordering::Relaxed);
-                {
-                    let mut ui = ui.write();
-                    if let Err(e) = ui.apply_settings(&new_settings) {
-                        log::error!("Failed to apply settings: {}", e);
-                    } else {
-                        shortcut_mic.store(ui.mic_shortcut_id(), Ordering::Relaxed);
-                    }
-                }
-                let is_hotkey_replaced = shortcut_mic.load(Ordering::Relaxed) != hotkey_before;
-                let mute = push_to_talk.on_settings_change(
+                apply_all_settings(
+                    "About → Reset Settings",
+                    &new_settings,
                     old_mode,
-                    new_settings.mode,
-                    is_hotkey_replaced,
+                    ui,
+                    &controller,
+                    &mut push_to_talk,
+                    &mut last_state,
                 );
-                if let Some(command) = mute {
-                    log::info!("Muting: the reset changed the shortcut's mode or hotkey");
-                    request_mic(ui, &controller, &mut last_state, command);
-                }
             }
         }
 

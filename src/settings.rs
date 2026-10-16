@@ -1,9 +1,10 @@
 use crate::utils::write_atomically;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -84,6 +85,10 @@ pub struct Settings {
     /// unchanged. Empty when the file has none, as in `impl Default`.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+    /// What settings.json held when these settings were loaded from it or saved to it, so
+    /// `update` can tell a hand edit made since. Not a setting: it's never saved.
+    #[serde(skip)]
+    pub file_version: FileVersion,
 }
 
 impl Default for Settings {
@@ -108,6 +113,8 @@ impl Default for Settings {
             popup_size: Lenient::default(),
             popup_mic_on_ms: Lenient::default(),
             extra: serde_json::Map::new(),
+            // The defaults don't come from the file.
+            file_version: FileVersion::Unknown,
         }
     }
 }
@@ -176,19 +183,22 @@ impl Settings {
             .collect()
     }
 
-    /// Excludes the device with `uid`, saving `name` with it, or includes it again when it is
-    /// excluded. Returns whether it is excluded now.
-    pub fn toggle_device_exclusion(&mut self, uid: &str, name: &str) -> bool {
-        let count = self.excluded_devices.len();
-        self.excluded_devices.retain(|device| device.uid != uid);
-        if self.excluded_devices.len() < count {
-            return false;
+    /// Whether the device with `uid` is excluded.
+    pub fn is_device_excluded(&self, uid: &str) -> bool {
+        self.excluded_devices.iter().any(|device| device.uid == uid)
+    }
+
+    /// Excludes `device`, saving its name with it, or, when `is_excluded` is false, includes
+    /// it again by removing every entry with its UID. A device already excluded keeps its
+    /// entry. A tray click sets the state opposite to the one the menu showed, rather than
+    /// toggling, so it means the same when `update` first reloads a hand edit.
+    pub fn set_device_excluded(&mut self, device: &ExcludedDevice, is_excluded: bool) {
+        if !is_excluded {
+            self.excluded_devices
+                .retain(|entry| entry.uid != device.uid);
+        } else if !self.is_device_excluded(&device.uid) {
+            self.excluded_devices.push(device.clone());
         }
-        self.excluded_devices.push(ExcludedDevice {
-            uid: uid.to_string(),
-            name: name.to_string(),
-        });
-        true
     }
 }
 
@@ -565,14 +575,98 @@ pub enum Fallback {
     Previous,
 }
 
-/// What `Settings::save` did.
+/// What `Settings::save_to` did.
 #[derive(Debug)]
 pub enum SaveOutcome {
-    /// The file now holds these settings; `mtime` is its new modification time.
-    Saved { mtime: Option<SystemTime> },
+    /// The file now holds these settings, at `version`.
+    Saved { version: FileVersion },
     /// The file on disk is invalid, so it was left untouched. The change applies only in
     /// memory, until the file is fixed or the app quits.
     KeptInMemory(LoadError),
+}
+
+/// What `Settings::update` did.
+#[derive(Debug)]
+pub enum Update {
+    /// The change changed nothing, so nothing was saved.
+    Unchanged,
+    /// The change was saved, or kept in memory while the file is invalid. Apply it alone.
+    Changed(Result<SaveOutcome>),
+    /// settings.json changed since these settings were loaded from it or saved to it, so they
+    /// were reloaded from it before the change, and the change went into the file's settings;
+    /// `None` when the file already had it, so nothing was saved. Apply every setting, as a
+    /// reload does, not only the change.
+    Reloaded(Option<Result<SaveOutcome>>),
+}
+
+impl Update {
+    /// Whether the settings changed: by the change, or by reloading the file.
+    pub fn is_changed(&self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
+
+    /// What saving did; `None` when nothing was saved because nothing needed to be.
+    fn saved(&self) -> Option<&Result<SaveOutcome>> {
+        match self {
+            Self::Unchanged | Self::Reloaded(None) => None,
+            Self::Changed(saved) | Self::Reloaded(Some(saved)) => Some(saved),
+        }
+    }
+}
+
+/// What settings.json held when some settings were loaded from it or saved to it. A save
+/// compares it with the file (`is_current`) to tell whether the file changed since: a hand
+/// edit the settings poll hasn't reloaded yet, or a fix to a file that was invalid.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum FileVersion {
+    /// Not known: the settings didn't come from the file, as the defaults that stand in for a
+    /// file that was invalid at startup. No file is at this version.
+    #[default]
+    Unknown,
+    /// There was no file.
+    Missing,
+    /// The file's modification time and a hash of its contents.
+    Present {
+        mtime: Option<SystemTime>,
+        contents_hash: u64,
+    },
+}
+
+impl FileVersion {
+    fn of(contents: &[u8], mtime: Option<SystemTime>) -> Self {
+        let mut hasher = DefaultHasher::new();
+        contents.hash(&mut hasher);
+        Self::Present {
+            mtime,
+            contents_hash: hasher.finish(),
+        }
+    }
+
+    /// Whether the file is still at this version, `now` being the version it is at now: still
+    /// missing, or with the same contents and the same modification time, known on both sides.
+    fn is_current(self, now: Self) -> bool {
+        match (self, now) {
+            (Self::Missing, Self::Missing) => true,
+            (
+                Self::Present {
+                    mtime,
+                    contents_hash,
+                },
+                Self::Present {
+                    mtime: now_mtime,
+                    contents_hash: now_hash,
+                },
+            ) => is_same_mtime(mtime, now_mtime) && contents_hash == now_hash,
+            _ => false,
+        }
+    }
+
+    fn mtime(self) -> Option<SystemTime> {
+        match self {
+            Self::Present { mtime, .. } => mtime,
+            Self::Unknown | Self::Missing => None,
+        }
+    }
 }
 
 /// Modification time of settings.json right after this process last saved it, until the
@@ -586,6 +680,18 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 /// Two modification times match only when both are known.
 fn is_same_mtime(a: Option<SystemTime>, b: Option<SystemTime>) -> bool {
     a.is_some() && a == b
+}
+
+/// Remembers the app's own save for `Settings::take_own_save`, or logs why it wrote nothing.
+fn note_save_outcome(outcome: &SaveOutcome) {
+    match outcome {
+        SaveOutcome::Saved { version } => {
+            *OWN_SAVE_MTIME.lock() = version.mtime();
+        }
+        SaveOutcome::KeptInMemory(err) => {
+            log::warn!("Keeping the settings change in memory only: {}", err);
+        }
+    }
 }
 
 impl Settings {
@@ -602,7 +708,12 @@ impl Settings {
     pub fn load_from(path: &Path) -> Result<Self, LoadError> {
         let data = match std::fs::read(path) {
             Ok(data) => data,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    file_version: FileVersion::Missing,
+                    ..Self::default()
+                })
+            }
             Err(source) => {
                 return Err(LoadError::Read {
                     path: path.to_path_buf(),
@@ -610,10 +721,14 @@ impl Settings {
                 })
             }
         };
-        serde_json::from_slice(&data).map_err(|source| LoadError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })
+        let mut settings: Self =
+            serde_json::from_slice(&data).map_err(|source| LoadError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        // Read after the contents: an edit in between changes the hash, so it still counts.
+        settings.file_version = FileVersion::of(&data, file_mtime(path));
+        Ok(settings)
     }
 
     fn config_path() -> Option<PathBuf> {
@@ -633,19 +748,13 @@ impl Settings {
         is_same_mtime(mtime, own_save)
     }
 
-    /// Saves to settings.json (see `save_to`) and remembers the file's new mtime so the
-    /// settings poll doesn't reload the app's own write.
+    /// Saves these settings as they are to settings.json (see `save_to`) and remembers the
+    /// file's new mtime so the settings poll doesn't reload the app's own write. Only for
+    /// writing a missing file; save a change with `update`, which keeps a hand edit.
     pub fn save(&self) -> Result<SaveOutcome> {
         let path = Self::config_path().context("Failed to resolve the settings directory")?;
         let outcome = self.save_to(&path)?;
-        match &outcome {
-            SaveOutcome::Saved { mtime } => {
-                *OWN_SAVE_MTIME.lock() = *mtime;
-            }
-            SaveOutcome::KeptInMemory(err) => {
-                log::warn!("Keeping the settings change in memory only: {}", err);
-            }
-        }
+        note_save_outcome(&outcome);
         Ok(outcome)
     }
 
@@ -663,8 +772,84 @@ impl Settings {
         write_atomically(path, &data)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(SaveOutcome::Saved {
-            mtime: file_mtime(path),
+            version: FileVersion::of(&data, file_mtime(path)),
         })
+    }
+
+    /// Applies `change` and saves the settings to settings.json with `update_at`. Logs a save
+    /// that failed or that an invalid file prevented, and remembers the file's new mtime so the
+    /// settings poll doesn't reload the app's own write.
+    pub fn update(&mut self, change: impl FnOnce(&mut Self)) -> Update {
+        let update = match Self::config_path() {
+            Some(path) => self.update_at(&path, change),
+            None => {
+                let is_changed = self.apply(change);
+                if is_changed {
+                    Update::Changed(Err(anyhow!("Failed to resolve the settings directory")))
+                } else {
+                    Update::Unchanged
+                }
+            }
+        };
+        if let Update::Reloaded(_) = update {
+            log::info!(
+                "settings.json changed since Mic Mute last read it; reloaded it before the change"
+            );
+        }
+        match update.saved() {
+            Some(Ok(outcome)) => note_save_outcome(outcome),
+            Some(Err(e)) => log::error!("Failed to save settings: {:#}", e),
+            None => {}
+        }
+        update
+    }
+
+    /// Applies `change` to these settings and saves them to `path` with `save_to`, so a
+    /// change never saves over a hand edit the settings poll hasn't reloaded yet.
+    ///
+    /// When the file changed since these settings were loaded from it or saved to it (its
+    /// modification time or its contents differ from `file_version`), they are reloaded from
+    /// it first, and the change goes into the file's settings: an edit made just before, or a
+    /// fix to a file that was invalid at startup, is kept rather than replaced. An invalid
+    /// file is never reloaded or written: the change then applies only in memory. Otherwise
+    /// these settings end up as what was saved, change included, and they keep the change when
+    /// writing fails, too. A change that changes nothing saves nothing.
+    pub fn update_at(&mut self, path: &Path, change: impl FnOnce(&mut Self)) -> Update {
+        let is_reloaded = match Self::load_from(path) {
+            Ok(on_disk) if !self.file_version.is_current(on_disk.file_version) => {
+                *self = on_disk;
+                true
+            }
+            Ok(_) => false,
+            Err(err) => {
+                let is_changed = self.apply(change);
+                return if is_changed {
+                    Update::Changed(Ok(SaveOutcome::KeptInMemory(err)))
+                } else {
+                    Update::Unchanged
+                };
+            }
+        };
+        let saved = self.apply(change).then(|| {
+            let saved = self.save_to(path);
+            if let Ok(SaveOutcome::Saved { version }) = &saved {
+                self.file_version = *version;
+            }
+            saved
+        });
+        match (is_reloaded, saved) {
+            (true, saved) => Update::Reloaded(saved),
+            (false, Some(saved)) => Update::Changed(saved),
+            (false, None) => Update::Unchanged,
+        }
+    }
+
+    /// Runs `change` on these settings; returns whether it changed what they save as.
+    fn apply(&mut self, change: impl FnOnce(&mut Self)) -> bool {
+        let before = serde_json::to_value(&*self).ok();
+        change(self);
+        // Settings that can't be serialized count as changed, so saving them says why.
+        before.is_none() || serde_json::to_value(&*self).ok() != before
     }
 }
 
@@ -764,6 +949,7 @@ mod tests {
             popup_size: Lenient::new(PopupSize::Large),
             popup_mic_on_ms: Lenient::new(MicOnFlash::from_millis(0)),
             extra: serde_json::Map::new(),
+            file_version: FileVersion::Unknown,
         };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
@@ -1173,11 +1359,13 @@ mod tests {
 
         let outcome = Settings::default().save_to(&path).unwrap();
 
-        let SaveOutcome::Saved { mtime } = outcome else {
+        let SaveOutcome::Saved { version } = outcome else {
             panic!("expected Saved, got {outcome:?}");
         };
-        assert!(mtime.is_some());
-        assert_eq!(mtime, file_mtime(&path));
+        assert!(version.mtime().is_some());
+        assert_eq!(version.mtime(), file_mtime(&path));
+        let loaded = Settings::load_from(&path).unwrap();
+        assert!(version.is_current(loaded.file_version));
     }
 
     #[test]
@@ -1209,6 +1397,232 @@ mod tests {
             !Settings::take_own_save(Some(t)),
             "a mismatch is forgotten too"
         );
+    }
+
+    // update_at: a change saved before the settings poll reloads a hand edit.
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_change_after_a_hand_edit_keeps_the_edit_and_the_change() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, r#"{ "show_popup": true }"#);
+        let mut settings = Settings::load_from(&path).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "show_popup": false, "mode": "push_to_talk", "future": [1] }"#,
+        )
+        .unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(
+            matches!(
+                update,
+                Update::Reloaded(Some(Ok(SaveOutcome::Saved { .. })))
+            ),
+            "{update:?}"
+        );
+        let saved = read_json(&path);
+        assert_eq!(saved["show_popup"], serde_json::json!(false));
+        assert_eq!(saved["mode"], serde_json::json!("push_to_talk"));
+        assert_eq!(saved["future"], serde_json::json!([1]));
+        assert_eq!(saved["show_in_dock"], serde_json::json!(true));
+        // The settings in memory are what was saved.
+        assert_eq!(serde_json::to_value(&settings).unwrap(), saved);
+        assert_eq!(settings.mode, ShortcutMode::PushToTalk);
+    }
+
+    #[test]
+    fn a_change_leaves_an_invalid_file_untouched() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, r#"{ "show_popup": true }"#);
+        let mut settings = Settings::load_from(&path).unwrap();
+        std::fs::write(&path, MISSING_COMMA).unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(
+            matches!(
+                update,
+                Update::Changed(Ok(SaveOutcome::KeptInMemory(LoadError::Parse { .. })))
+            ),
+            "{update:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MISSING_COMMA);
+        assert!(!dir.tmp_path().exists());
+        assert!(settings.show_in_dock, "the change applies in memory");
+        assert!(settings.show_popup);
+    }
+
+    #[test]
+    fn a_change_to_the_defaults_leaves_a_file_invalid_since_startup_untouched() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+        assert!(Settings::load_from(&path).is_err());
+        let mut settings = Settings::default();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(
+            matches!(update, Update::Changed(Ok(SaveOutcome::KeptInMemory(_)))),
+            "{update:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MISSING_COMMA);
+        assert!(settings.show_in_dock);
+    }
+
+    #[test]
+    fn a_change_after_fixing_a_file_invalid_at_startup_goes_into_the_fixed_file() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, MISSING_COMMA);
+        // main() runs on the defaults while the file is invalid; this change isn't saved.
+        let mut settings = Settings::default();
+        settings.update_at(&path, |s| s.play_sound = true);
+        std::fs::write(
+            &path,
+            r#"{
+                "mic_shortcut": { "modifiers": ["ctrl"], "key": "F13" },
+                "show_popup": false,
+                "launch_at_login": true
+            }"#,
+        )
+        .unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(
+            matches!(
+                update,
+                Update::Reloaded(Some(Ok(SaveOutcome::Saved { .. })))
+            ),
+            "{update:?}"
+        );
+        let saved = Settings::load_from(&path).unwrap();
+        assert_eq!(saved.mic_shortcut.key, "F13");
+        assert!(!saved.show_popup && saved.launch_at_login && saved.show_in_dock);
+        assert!(
+            !saved.play_sound,
+            "the fixed file replaces changes it never saved"
+        );
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap(),
+            serde_json::to_value(&saved).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_change_to_an_unchanged_file_saves_without_reloading_it() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, r#"{ "show_popup": true }"#);
+        let mut settings = Settings::load_from(&path).unwrap();
+        // Only in memory, so a reload would drop it.
+        settings.play_sound = true;
+
+        let first = settings.update_at(&path, |s| s.show_in_dock = true);
+        // The app's own save is the version these settings know now.
+        let second = settings.update_at(&path, |s| s.show_notification = true);
+
+        assert!(
+            matches!(first, Update::Changed(Ok(SaveOutcome::Saved { .. }))),
+            "{first:?}"
+        );
+        assert!(
+            matches!(second, Update::Changed(Ok(SaveOutcome::Saved { .. }))),
+            "{second:?}"
+        );
+        let saved = Settings::load_from(&path).unwrap();
+        assert!(saved.play_sound && saved.show_in_dock && saved.show_notification);
+    }
+
+    #[test]
+    fn a_change_creates_a_file_missing_at_load_without_reloading() {
+        let dir = TempDir::new();
+        let path = dir.settings_path();
+        let mut settings = Settings::load_from(&path).unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(
+            matches!(update, Update::Changed(Ok(SaveOutcome::Saved { .. }))),
+            "{update:?}"
+        );
+        assert!(Settings::load_from(&path).unwrap().show_in_dock);
+    }
+
+    #[test]
+    fn a_change_that_changes_nothing_writes_nothing() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, r#"{"show_in_dock":true}"#);
+        let mut settings = Settings::load_from(&path).unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(matches!(update, Update::Unchanged), "{update:?}");
+        assert!(!update.is_changed());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"show_in_dock":true}"#
+        );
+    }
+
+    #[test]
+    fn a_hand_edit_that_already_has_the_change_is_adopted_without_a_write() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{}");
+        let mut settings = Settings::load_from(&path).unwrap();
+        let edit = r#"{"show_in_dock":true,"show_popup":false}"#;
+        std::fs::write(&path, edit).unwrap();
+
+        let update = settings.update_at(&path, |s| s.show_in_dock = true);
+
+        assert!(matches!(update, Update::Reloaded(None)), "{update:?}");
+        assert!(update.is_changed());
+        assert!(settings.show_in_dock && !settings.show_popup);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edit);
+        // The edit is the version these settings know now.
+        let next = settings.update_at(&path, |s| s.play_sound = true);
+        assert!(matches!(next, Update::Changed(_)), "{next:?}");
+    }
+
+    #[test]
+    fn excluding_a_device_a_hand_edit_already_excluded_keeps_it_excluded() {
+        let dir = TempDir::new();
+        let path = write_file(&dir, "{}");
+        let mut settings = Settings::load_from(&path).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "excluded_devices": ["MSLoopbackDriverDevice_UID"] }"#,
+        )
+        .unwrap();
+        // The menu showed the device as included, so the click excludes it.
+        let is_excluded = !settings.is_device_excluded("MSLoopbackDriverDevice_UID");
+
+        let update = settings.update_at(&path, |s| {
+            s.set_device_excluded(&teams_audio(), is_excluded)
+        });
+
+        assert!(matches!(update, Update::Reloaded(None)), "{update:?}");
+        assert!(settings.is_device_excluded("MSLoopbackDriverDevice_UID"));
+    }
+
+    #[test]
+    fn a_file_version_is_current_only_with_the_same_contents_and_mtime() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let version = FileVersion::of(b"{}", Some(t));
+
+        assert!(version.is_current(FileVersion::of(b"{}", Some(t))));
+        assert!(!version.is_current(FileVersion::of(b"{ }", Some(t))));
+        assert!(!version.is_current(FileVersion::of(b"{}", Some(t + Duration::from_nanos(1)))));
+        assert!(!version.is_current(FileVersion::of(b"{}", None)));
+        assert!(!FileVersion::of(b"{}", None).is_current(FileVersion::of(b"{}", None)));
+        assert!(!version.is_current(FileVersion::Missing));
+        assert!(FileVersion::Missing.is_current(FileVersion::Missing));
+        for now in [FileVersion::Unknown, FileVersion::Missing, version] {
+            assert!(!FileVersion::Unknown.is_current(now), "{now:?}");
+        }
     }
 
     // excluded_devices
@@ -1287,16 +1701,37 @@ mod tests {
     }
 
     #[test]
-    fn toggling_a_device_excludes_it_then_includes_it_again() {
+    fn a_device_is_excluded_then_included_again() {
         let mut settings = Settings::default();
 
-        assert!(
-            settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Microsoft Teams Audio")
-        );
+        settings.set_device_excluded(&teams_audio(), true);
         assert_eq!(settings.excluded_devices, vec![teams_audio()]);
+        assert!(settings.is_device_excluded("MSLoopbackDriverDevice_UID"));
 
-        assert!(!settings.toggle_device_exclusion("MSLoopbackDriverDevice_UID", "Renamed"));
+        settings.set_device_excluded(&teams_audio(), false);
         assert!(settings.excluded_devices.is_empty());
+        assert!(!settings.is_device_excluded("MSLoopbackDriverDevice_UID"));
+    }
+
+    #[test]
+    fn excluding_an_excluded_device_or_including_an_included_one_changes_nothing() {
+        let mut settings: Settings =
+            serde_json::from_str(r#"{ "excluded_devices": ["MSLoopbackDriverDevice_UID"] }"#)
+                .unwrap();
+        let before = settings.excluded_devices.clone();
+
+        settings.set_device_excluded(&teams_audio(), true);
+        assert_eq!(
+            settings.excluded_devices, before,
+            "keeps the existing entry"
+        );
+
+        let steam = ExcludedDevice {
+            uid: "Steam UID".to_string(),
+            name: "Steam Streaming Microphone".to_string(),
+        };
+        settings.set_device_excluded(&steam, false);
+        assert_eq!(settings.excluded_devices, before);
     }
 
     #[test]
@@ -1305,8 +1740,12 @@ mod tests {
             r#"{ "excluded_devices": ["Teams UID", "Steam UID", { "uid": "Teams UID", "name": "Teams" }] }"#,
         )
         .unwrap();
+        let teams = ExcludedDevice {
+            uid: "Teams UID".to_string(),
+            name: "Teams".to_string(),
+        };
 
-        assert!(!settings.toggle_device_exclusion("Teams UID", "Teams"));
+        settings.set_device_excluded(&teams, false);
 
         assert_eq!(
             settings.excluded_uids().into_iter().collect::<Vec<_>>(),
