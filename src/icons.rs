@@ -76,9 +76,17 @@ const CAMERA_BADGE_SVG: &[u8] = include_bytes!("../assets/camera-badge.svg");
 /// The popup's icons are 48 px, 2 px per SVG unit, so the large popup's 24 pt icons stay sharp
 /// on a 2x display, and AppKit scales them down for the smaller sizes.
 const POPUP_SIZE: u32 = 48;
-/// The tray's icons are 18 px: tray-icon draws an icon at its pixel size in points, up to 22 pt,
-/// and the tray icon has always been 18 pt.
-const TRAY_SIZE: u32 = 18;
+/// The tray's icons are 36 px, 2 px per point, so the 18 pt tray icon stays sharp on a 2x
+/// display. tray-icon sizes an icon to its pixel size in points, up to 22 pt, so `Tray` sets it
+/// back to `tray_points` of its pixels.
+const TRAY_SIZE: u32 = 36;
+/// Pixels per point in the tray's icons.
+const TRAY_PIXELS_PER_POINT: u32 = 2;
+
+/// How many points `pixels` of a tray icon span in the menu bar: 18 pt for the 36 px icons.
+pub fn tray_points(pixels: u32) -> f64 {
+    f64::from(pixels) / f64::from(TRAY_PIXELS_PER_POINT)
+}
 
 /// One icon in one color and resolution, with or without the camera badge. Only `tray_mic`,
 /// `popup_mic`, and `popup_camera` build variants: 12 distinct ones, 4 for the tray and 8 for
@@ -465,12 +473,31 @@ mod tests {
     }
 
     #[test]
-    fn tray_icons_are_18_px_and_popup_icons_48_px() {
-        let tray = tray_mic(true, false)
-            .variant
-            .rendered()
-            .expect("tray icon renders");
-        assert_eq!((tray.width, tray.height), (18, 18));
+    fn tray_points_are_half_the_pixels() {
+        assert_eq!(tray_points(36), 18.0);
+        assert_eq!(tray_points(44), 22.0);
+        assert_eq!(tray_points(1), 0.5);
+        assert_eq!(tray_points(0), 0.0);
+    }
+
+    #[test]
+    fn every_tray_icon_is_36_px_shown_at_18_pt() {
+        for muted in [true, false] {
+            for camera_in_use in [true, false] {
+                let icon = tray_mic(muted, camera_in_use)
+                    .variant
+                    .rendered()
+                    .expect("tray icon renders");
+                let state = format!("muted {muted}, camera in use {camera_in_use}");
+                assert_eq!((icon.width, icon.height), (36, 36), "{state}");
+                let points = (tray_points(icon.width), tray_points(icon.height));
+                assert_eq!(points, (18.0, 18.0), "{state}");
+            }
+        }
+    }
+
+    #[test]
+    fn popup_icons_are_48_px() {
         for variant in [
             popup_mic(true, Theme::Light),
             popup_camera(true, Theme::Dark),
@@ -541,7 +568,7 @@ mod tests {
             }
         }
 
-        // Clear of both glyphs at 1 px per unit and at the tray's size, the one it shows at.
+        // Clear of both glyphs at 1 px per unit and at the tray's size, the one it renders at.
         for size in [SVG_UNITS, TRAY_SIZE] {
             let dot = alpha(&[CAMERA_BADGE_SVG], size);
             for glyph in [Glyph::Mic, Glyph::MicOff] {

@@ -221,7 +221,7 @@ The tray menu's About item shows the mute shortcut in use, the settings file's l
 
 The About window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Choosing About again brings the open window to the front, updated if the shortcut in use has changed. Each button closes the window.
 
-- **Open Settings** opens `settings.json` in the app macOS opens `.json` files with; to pick another, choose one under Open with in the file's Get Info window. If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
+- **Open Settings** opens `settings.json` in the default text editor, the app macOS opens plain-text files with: TextEdit, unless you've picked another for `.txt` files (Get Info → Open with → Change All). If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
 - **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. It also empties `excluded_devices`, so Mic Mute mutes every microphone again, and turns `play_sound` and `show_notification` off; macOS keeps its own answer about Mic Mute's notifications. The defaults apply at once and are saved like any other settings change.
 
 ## Editing settings

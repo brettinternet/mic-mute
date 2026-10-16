@@ -7,24 +7,54 @@
 //! which closes the window, and then runs `run_action`.
 use crate::settings::Settings;
 use crate::shortcuts::{current_status, ShortcutStatus};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSAlert, NSApplication, NSWorkspace};
-use objc2_foundation::{NSInteger, NSString, NSURL};
-use std::path::PathBuf;
+use objc2_app_kit::{NSAlert, NSApplication};
+use objc2_foundation::{NSInteger, NSString};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::thread::{self, JoinHandle};
 
 /// The file `Settings::save` writes.
 fn settings_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("mic-mute").join("settings.json"))
 }
 
-/// Opens settings.json in the app macOS opens JSON files with, through `NSWorkspace`, so no
-/// child process is left to reap. A fresh install has no file yet and a missing file can't
-/// open, so it is first written with `settings`, the settings in use. An existing file opens
-/// as it is, even an invalid one.
+/// `open -t path`: opens `path` in the default text editor, the app macOS opens plain text
+/// with, rather than in the app it opens `.json` files with, which may be Xcode.
+fn open_in_text_editor(path: &Path) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command.arg("-t").arg(path);
+    command
+}
+
+/// Waits for `open`, which exits once the editor has the file, on a thread of its own: the
+/// event loop never blocks, and no zombie process is left. The thread only waits and logs a
+/// failure; it touches no AppKit object, takes no lock, and can't panic. A thread that can't
+/// start leaves that one `open` unreaped.
+fn wait_for_open(mut open: Child, path: PathBuf) -> Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("open-settings".to_string())
+        .spawn(move || match open.wait() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                log::error!(
+                    "Failed to open {}: open -t ended with {}",
+                    path.display(),
+                    status
+                )
+            }
+            Err(e) => log::error!("Failed to wait for open -t {}: {}", path.display(), e),
+        })
+        .context("Failed to start the thread that waits for open")
+}
+
+/// Opens settings.json in the default text editor. A fresh install has no file yet and `open`
+/// fails on a missing path, so the file is first written with `settings`, the settings in use.
+/// An existing file opens as it is, even an invalid one.
 fn open_settings_file(settings: &Settings) -> Result<()> {
     let path = settings_path().context("Failed to locate the settings directory")?;
     if matches!(path.try_exists(), Ok(false)) {
@@ -32,13 +62,11 @@ fn open_settings_file(settings: &Settings) -> Result<()> {
             .save()
             .context("Failed to create the settings file")?;
     }
-    let path_text = path
-        .to_str()
-        .with_context(|| format!("{} isn't valid UTF-8", path.display()))?;
-    let url = NSURL::fileURLWithPath(&NSString::from_str(path_text));
-    if !NSWorkspace::sharedWorkspace().openURL(&url) {
-        bail!("Failed to open {}", path.display());
-    }
+    let open = open_in_text_editor(&path)
+        .spawn()
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    // Dropping the handle detaches the thread, which ends with `open`.
+    wait_for_open(open, path)?;
     Ok(())
 }
 
@@ -314,6 +342,7 @@ mod tests {
     use crate::settings::ShortcutConfig;
     use crate::shortcuts::{parse_shortcut, Shortcut, ShortcutProblem};
     use objc2::msg_send;
+    use std::ffi::OsStr;
 
     fn default_shortcut() -> Shortcut {
         parse_shortcut(&ShortcutConfig::default()).unwrap()
@@ -574,5 +603,33 @@ mod tests {
             None,
             "taking the stale click used it up"
         );
+    }
+
+    #[test]
+    fn open_settings_opens_the_file_in_the_default_text_editor() {
+        let path = Path::new("/Users/someone/Library/Application Support/mic-mute/settings.json");
+        let command = open_in_text_editor(path);
+        assert_eq!(command.get_program(), "/usr/bin/open");
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(args, [OsStr::new("-t"), path.as_os_str()]);
+    }
+
+    #[test]
+    fn waiting_for_open_reaps_it_even_when_it_fails() {
+        // Stands in for `open`, which tests never run, failing as `open` can.
+        let child = Command::new("/usr/bin/false")
+            .spawn()
+            .expect("false starts");
+        let pid = libc::pid_t::try_from(child.id()).expect("the pid fits a pid_t");
+        wait_for_open(child, PathBuf::from("/nonexistent/settings.json"))
+            .expect("the thread starts")
+            .join()
+            .expect("the thread doesn't panic");
+        // SAFETY: with WNOHANG and no status pointer, waitpid only reports whether `pid` is a
+        // child of this process; it would reap one left unreaped.
+        let found = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        let error = std::io::Error::last_os_error();
+        assert_eq!(found, -1, "the child was left unreaped");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD), "{error}");
     }
 }
