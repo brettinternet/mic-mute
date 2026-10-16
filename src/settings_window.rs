@@ -64,6 +64,7 @@ const FOOTER_TEXT: &str = "Changes apply at once and are saved to \
 pub enum SettingsChange {
     LaunchAtLogin(bool),
     ShowInDock(bool),
+    RightClickTogglesMute(bool),
     Shortcut(ShortcutConfig),
     Mode(ShortcutMode),
     ShowPopup(bool),
@@ -87,6 +88,7 @@ impl SettingsChange {
         match self {
             Self::LaunchAtLogin(on) => replace(&mut settings.launch_at_login, *on),
             Self::ShowInDock(on) => replace(&mut settings.show_in_dock, *on),
+            Self::RightClickTogglesMute(on) => replace(&mut settings.right_click_toggles_mute, *on),
             Self::Shortcut(config) => replace(&mut settings.mic_shortcut, config.clone()),
             Self::Mode(mode) => replace(&mut settings.mode, *mode),
             Self::ShowPopup(on) => replace(&mut settings.show_popup, *on),
@@ -719,6 +721,7 @@ struct View {
     launch_at_login: bool,
     launch_at_login_title: &'static str,
     show_in_dock: bool,
+    right_click_toggles_mute: bool,
     shortcut: String,
     shortcut_note: Option<String>,
     is_shortcut_note_error: bool,
@@ -757,6 +760,7 @@ fn view_for(
             settings.launch_at_login && needs_approval,
         ),
         show_in_dock: settings.show_in_dock,
+        right_click_toggles_mute: settings.right_click_toggles_mute,
         shortcut,
         shortcut_note,
         is_shortcut_note_error,
@@ -783,6 +787,7 @@ fn view_for(
 enum Control {
     LaunchAtLogin,
     ShowInDock,
+    RightClickTogglesMute,
     RecordShortcut,
     Mode,
     ShowPopup,
@@ -801,9 +806,10 @@ enum Control {
 }
 
 impl Control {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::LaunchAtLogin,
         Self::ShowInDock,
+        Self::RightClickTogglesMute,
         Self::RecordShortcut,
         Self::Mode,
         Self::ShowPopup,
@@ -1152,6 +1158,7 @@ struct Controls {
     notice_note: Retained<NSTextField>,
     launch_at_login: Retained<NSButton>,
     show_in_dock: Retained<NSButton>,
+    right_click_toggles_mute: Retained<NSButton>,
     shortcut: Retained<NSTextField>,
     /// Change… while idle, Cancel while recording.
     record: Retained<NSButton>,
@@ -1209,6 +1216,12 @@ impl Controls {
             mtm,
         );
         let show_in_dock = checkbox("Show in Dock", Control::ShowInDock, target, mtm);
+        let right_click_toggles_mute = checkbox(
+            "Right-click the menu bar icon to mute or unmute",
+            Control::RightClickTogglesMute,
+            target,
+            mtm,
+        );
 
         let shortcut = label("", mtm);
         let record = push_button(RECORD_TITLE, Control::RecordShortcut, target, mtm);
@@ -1329,6 +1342,7 @@ impl Controls {
             Row::Header(general),
             Row::Setting(&empty, &launch_at_login),
             Row::Setting(&empty, &show_in_dock),
+            Row::Setting(&empty, &right_click_toggles_mute),
             Row::Header(shortcut_header),
             Row::Setting(shortcut_label, &shortcut_row),
             Row::Setting(&empty, &shortcut_note),
@@ -1352,8 +1366,8 @@ impl Controls {
             Row::Setting(&empty, &url_warning),
         ];
         // The rows of the two notes, which hide while there's nothing to say.
-        const SHORTCUT_NOTE_ROW: NSInteger = 5;
-        const POPUP_NOTE_ROW: NSInteger = 12;
+        const SHORTCUT_NOTE_ROW: NSInteger = 6;
+        const POPUP_NOTE_ROW: NSInteger = 13;
         let grid = grid(&rows, mtm);
         let shortcut_note_row = grid.rowAtIndex(SHORTCUT_NOTE_ROW);
         let popup_note_row = grid.rowAtIndex(POPUP_NOTE_ROW);
@@ -1375,6 +1389,7 @@ impl Controls {
             notice_note,
             launch_at_login,
             show_in_dock,
+            right_click_toggles_mute,
             shortcut,
             record,
             shortcut_note,
@@ -1427,6 +1442,9 @@ impl Controls {
         }
         if differs(old, new, |view| &view.show_in_dock) {
             set_checked(&self.show_in_dock, new.show_in_dock);
+        }
+        if differs(old, new, |view| &view.right_click_toggles_mute) {
+            set_checked(&self.right_click_toggles_mute, new.right_click_toggles_mute);
         }
         if differs(old, new, |view| &view.shortcut) {
             is_resized = true;
@@ -1743,6 +1761,9 @@ impl SettingsWindow {
                 SettingsChange::LaunchAtLogin(is_checked(&controls.launch_at_login))
             }
             Control::ShowInDock => SettingsChange::ShowInDock(is_checked(&controls.show_in_dock)),
+            Control::RightClickTogglesMute => SettingsChange::RightClickTogglesMute(is_checked(
+                &controls.right_click_toggles_mute,
+            )),
             Control::Mode => SettingsChange::Mode(choice_at(
                 &MODE_CHOICES,
                 controls.mode.indexOfSelectedItem(),
@@ -1838,6 +1859,7 @@ mod tests {
         let changes = [
             SettingsChange::LaunchAtLogin(true),
             SettingsChange::ShowInDock(true),
+            SettingsChange::RightClickTogglesMute(true),
             SettingsChange::Shortcut(ShortcutConfig {
                 modifiers: vec!["ctrl".to_string()],
                 key: "F13".to_string(),
@@ -1863,6 +1885,7 @@ mod tests {
         let saved = serde_json::to_value(&settings).unwrap();
         assert_eq!(saved["launch_at_login"], true);
         assert_eq!(saved["show_in_dock"], true);
+        assert_eq!(saved["right_click_toggles_mute"], true);
         assert_eq!(
             saved["mic_shortcut"],
             serde_json::json!({ "modifiers": ["ctrl"], "key": "F13" })
@@ -1986,6 +2009,7 @@ mod tests {
             r#"{
                 "launch_at_login": true,
                 "show_in_dock": true,
+                "right_click_toggles_mute": true,
                 "mode": "push_to_talk",
                 "show_popup": false,
                 "popup_position": "top_left",
@@ -2005,6 +2029,7 @@ mod tests {
         let view = view_for(&settings, &status_ok(), None, false, None);
 
         assert!(view.launch_at_login && view.show_in_dock && !view.show_popup);
+        assert!(view.right_click_toggles_mute);
         assert_eq!(view.launch_at_login_title, "Launch at Login");
         assert_eq!(view.shortcut, "⇧⌘M");
         assert_eq!(view.shortcut_note, None);
@@ -2027,6 +2052,7 @@ mod tests {
     fn the_view_of_the_defaults_matches_a_fresh_install() {
         let view = view_for(&Settings::default(), &status_ok(), None, false, None);
         assert!(!view.launch_at_login && !view.show_in_dock && view.show_popup);
+        assert!(!view.right_click_toggles_mute);
         assert_eq!(MODE_CHOICES[view.mode].0, ShortcutMode::Toggle);
         assert_eq!(
             POSITION_CHOICES[view.position].0,

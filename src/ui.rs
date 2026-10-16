@@ -2,6 +2,7 @@ use crate::config::AppVars;
 use crate::event_loop::{EventIds, EventLoopTarget};
 use crate::feedback::{Feedback, MicUpdate};
 use crate::mic::DeviceState;
+use crate::mic_command::MicCommand;
 use crate::popup::{Popup, PopupLayout};
 use crate::settings::{ExcludedDevice, Settings};
 use crate::settings_window::SettingsChange;
@@ -13,6 +14,7 @@ use muda::MenuId;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tray_icon::TrayIconEvent;
 
 /// The popup's position and size from `settings`.
 fn popup_layout(settings: &Settings) -> PopupLayout {
@@ -107,6 +109,9 @@ impl UI {
         };
         ui.show_launch_at_login(settings.launch_at_login);
         ui.sync_shortcut();
+        // Before the first click: the loop handles none between building the tray and this.
+        ui.tray
+            .set_right_click_toggles_mute(settings.right_click_toggles_mute);
         Ok((ui, event_ids))
     }
 
@@ -170,6 +175,10 @@ impl UI {
         }
         self.sync_shortcut();
 
+        // Before the steps that can return early; it can't fail.
+        self.tray
+            .set_right_click_toggles_mute(settings.right_click_toggles_mute);
+
         // Before the steps that can return early: it logs its own errors.
         self.apply_feedback(settings);
 
@@ -205,6 +214,9 @@ impl UI {
             SettingsChange::ShowInDock(visible) => {
                 self.tray.show_in_dock.set_checked(*visible);
                 crate::launch_at_login::set_dock_visible(*visible);
+            }
+            SettingsChange::RightClickTogglesMute(enabled) => {
+                self.tray.set_right_click_toggles_mute(*enabled)
             }
             SettingsChange::ShowPopup(enabled) => self.set_popup_enabled(*enabled)?,
             SettingsChange::PopupPosition(_)
@@ -335,5 +347,11 @@ impl UI {
     /// The device a click on the Microphones menu item `id` excludes or includes, if any.
     pub fn clicked_device(&self, id: &MenuId) -> Option<ExcludedDevice> {
         self.tray.clicked_device(id)
+    }
+
+    /// The command a tray icon event asks for: a toggle on a right-click's release while
+    /// `right_click_toggles_mute` is on (`Tray::click_command`), otherwise none.
+    pub fn tray_click_command(&self, event: &TrayIconEvent) -> Option<MicCommand> {
+        self.tray.click_command(event)
     }
 }

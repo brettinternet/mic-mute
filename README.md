@@ -17,6 +17,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
     - Note: If native CoreAudio mute is unavailable or ignores changes, Mic Mute falls back to input volume controls, including virtual main volume. Devices exposing neither are skipped.
   - [x] Provide global hotkey muting
   - [x] Push-to-talk: hold the shortcut to unmute, release it to mute again
+  - [x] Optionally [right-click the menu bar icon](./docs/settings.md#right_click_toggles_mute) to mute or unmute; a left-click still opens the menu
   - [x] Optionally mute at launch, when the screen locks, or when the Mac or its displays sleep; nothing unmutes automatically
   - [x] Mute a newly connected microphone, and undo another app's unmute, as soon as CoreAudio reports the change, while microphones should be off; a regular poll catches what CoreAudio doesn't report
 - Visual confirmation of mute status
@@ -37,7 +38,7 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
 
 Choose **Settings…** in the tray menu (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) to change the settings without editing `settings.json`:
 
-- **General:** Launch at Login and Show in Dock.
+- **General:** Launch at Login, Show in Dock, and whether a right-click on the menu bar icon mutes or unmutes instead of opening the menu.
 - **Shortcut:** the mute shortcut in use, and why the configured one isn't, if it isn't; **Change…** records a new one when you press it; toggle or push-to-talk mode.
 - **Popup:** whether it shows while muted, its position and size, and how long it shows "Mic on" after an unmute.
 - **Feedback:** a sound and a notification when the microphones mute or unmute.
