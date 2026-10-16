@@ -136,6 +136,15 @@ pub fn menu_title(needs_approval: bool) -> &'static str {
     }
 }
 
+/// Whether `set(wanted)` must run: only when `wanted` differs from `last_applied`, the value
+/// macOS last took (`set`) or that startup mirrored from it (`reconcile`). `None` after a failed
+/// `set`: macOS may hold either value, so the next one runs. Pushing an unchanged value after
+/// every settings change would register again a login item the user removed in System
+/// Settings.
+pub fn should_push(wanted: bool, last_applied: Option<bool>) -> bool {
+    last_applied != Some(wanted)
+}
+
 fn publish(state: Option<LoginItemState>) {
     let needs_approval = state == Some(LoginItemState::RequiresApproval);
     NEEDS_APPROVAL.store(needs_approval, Ordering::Relaxed);
@@ -768,6 +777,27 @@ mod tests {
             Some(Disabled)
         );
         assert_eq!(state_seen_outside_bundle(Mechanism::LoginItem, false), None);
+    }
+
+    #[test]
+    fn an_unchanged_setting_is_not_pushed_to_macos() {
+        for value in [true, false] {
+            assert!(!should_push(value, Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_toggled_setting_is_pushed_to_macos() {
+        for value in [true, false] {
+            assert!(should_push(!value, Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn every_value_is_pushed_after_a_failed_push() {
+        for value in [true, false] {
+            assert!(should_push(value, None), "{value}");
+        }
     }
 
     #[test]

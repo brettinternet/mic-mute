@@ -79,6 +79,7 @@ macOS (Background Task Management) records a login item against the app's code s
 - If macOS waits for your approval, the tray item reads "Launch at Login (Approve in System Settings)": allow Mic Mute in System Settings → General → Login Items.
 - Only an app bundle in a stable place, such as `/Applications`, changes the login item. A copy opened from a download without moving it (App Translocation) and a development build from `cargo run` leave it alone.
 - Deleting the app doesn't remove its login item: turn Launch at Login off first, or remove Mic Mute in Login Items afterwards.
+- Mic Mute sees a login item you remove in Login Items at its next launch; until then the tray item stays checked. Saving other settings never adds it back.
 - `sudo sfltool dumpbtm` prints the records macOS keeps (search for `com.brettinternet.mic-mute`); without `sudo` it waits for an administrator to authorize it.
 
 ## Releases
