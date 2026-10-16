@@ -3,6 +3,9 @@ name = "mic-mute"
 description = "System-wide mic mute for macOS"
 version = "0.5.1"
 edition = "2021"
+# The highest rust-version among the dependencies: tray-icon 0.26 and muda 0.21. The crate itself
+# needs 1.88 (`as_chunks` in icons.rs).
+rust-version = "1.90"
 authors = ["Brett Gardiner"]
 license = "MIT"
 
@@ -12,11 +15,11 @@ default-run = "mic-mute"
 log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
-tao = "0.35"
-tray-icon = "0.24"
-muda = "0.19"
+tao = "0.37"
+tray-icon = "0.26"
+muda = "0.21"
 image = { version = "0.25", default-features = false, features = ["png"] }
-resvg = { version = "0.47", default-features = false }
+resvg = { version = "0.48", default-features = false }
 global-hotkey = "0.8"
 libc = "0.2"
 parking_lot = "0.12"

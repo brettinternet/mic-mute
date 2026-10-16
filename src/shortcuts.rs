@@ -13,8 +13,8 @@ use std::fmt;
 
 /// A validated mute shortcut: one key and its modifiers.
 ///
-/// `Code` and `Modifiers` are keyboard-types' types, which global-hotkey and muda both
-/// re-export, so the tray accelerator is built from the same values as the hotkey.
+/// `Code` and `Modifiers` are global-hotkey's keyboard-types (0.7) types. muda uses 0.8, so
+/// `tray.rs::accelerator_for` builds the tray accelerator from the same values by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shortcut {
     mods: Modifiers,

@@ -3,12 +3,11 @@ use crate::icons::{self, IconVariant, TrayImage};
 use crate::mic::{DeviceState, DeviceStatus};
 use crate::settings::ExcludedDevice;
 use crate::shortcuts::Shortcut;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use global_hotkey::hotkey::Modifiers as HotKeyModifiers;
 use log::trace;
-use muda::accelerator::{Key, KeyAccelerator};
-use muda::{
-    accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
-};
+use muda::accelerator::{Accelerator, Code, Modifiers};
+use muda::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use std::fmt;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -267,9 +266,32 @@ fn get_icon(variant: IconVariant) -> Result<Icon> {
     Ok(icon)
 }
 
-/// The Mute item's key-equivalent label for `shortcut`.
-fn accelerator_for(shortcut: Shortcut) -> Accelerator {
-    Accelerator::new(Some(shortcut.modifiers()), shortcut.code())
+/// Each shortcut modifier in global-hotkey's keyboard-types (0.7) and in muda's (0.8), which
+/// names Command `META` and deprecates the `SUPER` that `parse_shortcut` gives it.
+const MODIFIERS: [(HotKeyModifiers, Modifiers); 5] = [
+    (HotKeyModifiers::SHIFT, Modifiers::SHIFT),
+    (HotKeyModifiers::CONTROL, Modifiers::CONTROL),
+    (HotKeyModifiers::ALT, Modifiers::ALT),
+    (HotKeyModifiers::SUPER, Modifiers::META),
+    (HotKeyModifiers::META, Modifiers::META),
+];
+
+/// The Mute item's key-equivalent label for `shortcut`. global-hotkey and muda use different
+/// keyboard-types versions, so the key goes across by its name (`KeyM`, `F13`, …).
+///
+/// # Errors
+///
+/// When muda's keyboard-types has no key of that name.
+fn accelerator_for(shortcut: Shortcut) -> Result<Accelerator> {
+    let mods = MODIFIERS
+        .iter()
+        .filter(|(hotkey, _)| shortcut.modifiers().contains(*hotkey))
+        .fold(Modifiers::empty(), |mods, (_, menu)| mods | *menu);
+    let name = shortcut.code().to_string();
+    let code = name
+        .parse::<Code>()
+        .map_err(|_| anyhow!("the tray menu has no {name} key"))?;
+    Ok(Accelerator::new(mods, code))
 }
 
 impl fmt::Debug for Tray {
@@ -338,14 +360,16 @@ impl Tray {
             .context("Failed to append menu items")?;
 
         let tooltip = format!("{} service is running", app_vars.name);
-        let systray = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu.clone()))
             .with_tooltip(tooltip_text(&tooltip, None, shown.camera_in_use))
-            .with_icon(icon)
-            .with_icon_as_template(shown.image.is_template)
-            .with_menu_on_left_click(true)
-            .build()
-            .context("Failed to create tray icon")?;
+            .with_menu_on_left_click(true);
+        let builder = if shown.image.is_template {
+            builder.with_icon_templated(icon)
+        } else {
+            builder.with_icon(icon)
+        };
+        let systray = builder.build().context("Failed to create tray icon")?;
 
         trace!("Tray item created");
         let tray = Self {
@@ -374,15 +398,19 @@ impl Tray {
         self.update_tooltip(next.camera_in_use)
     }
 
-    /// Sets the icon and its template flag in one call: tray-icon's `set_icon` always clears the
-    /// flag. A failed icon stays unrecorded, so the next `update` retries it.
+    /// Sets the icon and its template flag in one call: tray-icon's `set_icon` draws a plain icon,
+    /// `set_icon_templated` a template one. A failed icon stays unrecorded, so the next `update`
+    /// retries it.
     fn update_icon(&mut self, image: TrayImage) -> Result<()> {
         if image == self.shown.image {
             return Ok(());
         }
         let icon = get_icon(image.variant)?;
-        self.systray
-            .set_icon_with_as_template(Some(icon), image.is_template)?;
+        if image.is_template {
+            self.systray.set_icon_templated(Some(icon))?;
+        } else {
+            self.systray.set_icon(Some(icon))?;
+        }
         self.shown.image = image;
         trace!("Updated tray icon: {:?}", image);
         Ok(())
@@ -424,9 +452,8 @@ impl Tray {
         let Some(shortcut) = mic_shortcut else {
             return self.clear_mute_accelerator();
         };
-        let shown = self
-            .toggle_mute
-            .set_accelerator(Some(accelerator_for(shortcut)))
+        let shown = accelerator_for(shortcut)
+            .and_then(|accelerator| Ok(self.toggle_mute.set_accelerator(Some(accelerator))?))
             .with_context(|| format!("Failed to show the {shortcut} shortcut in the tray menu"));
         if shown.is_err() {
             self.clear_mute_accelerator()?;
@@ -434,16 +461,26 @@ impl Tray {
         shown
     }
 
-    /// muda 0.19 on macOS keeps an item's old key equivalent on `set_accelerator(None)`
-    /// and on a failed `set_accelerator`; an empty key equivalent is what it gives items
-    /// created without one.
+    /// muda 0.21 on macOS keeps an item's old key equivalent on `set_accelerator(None)` and on a
+    /// failed `set_accelerator`, and every key it takes shows one. An item it adds to a menu gets
+    /// the accelerator the item holds, so the Mute item leaves the menu and comes back in place.
     fn clear_mute_accelerator(&mut self) -> Result<()> {
+        // Also replaces an accelerator muda can't show, which would fail the insert below.
         self.toggle_mute
-            .set_key_accelerator(Some(KeyAccelerator::new(
-                None,
-                Key::Character(String::new()),
-            )))
-            .context("Failed to clear the mute shortcut in the tray menu")
+            .set_accelerator(None)
+            .context("Failed to clear the mute shortcut in the tray menu")?;
+        let position = self
+            .menu
+            .items()
+            .iter()
+            .position(|item| item.id() == self.toggle_mute.id())
+            .context("Failed to find the Mute item in the tray menu")?;
+        self.menu
+            .remove(&self.toggle_mute)
+            .context("Failed to clear the mute shortcut in the tray menu")?;
+        self.menu
+            .insert(&self.toggle_mute, position)
+            .context("Failed to put the Mute item back in the tray menu")
     }
 
     pub fn toggle_mute_id(&self) -> &MenuId {
@@ -530,25 +567,42 @@ mod tests {
     use super::*;
     use crate::settings::ShortcutConfig;
     use crate::shortcuts::parse_shortcut;
-    use muda::accelerator::{Code, Modifiers};
+
+    fn shortcut(modifiers: &[&str], key: &str) -> Shortcut {
+        let config = ShortcutConfig {
+            modifiers: modifiers.iter().map(|m| m.to_string()).collect(),
+            key: key.to_string(),
+        };
+        parse_shortcut(&config).unwrap()
+    }
 
     #[test]
     fn accelerator_matches_muda_parse_of_the_same_shortcut() {
         let shortcut = parse_shortcut(&ShortcutConfig::default()).unwrap();
         let expected: Accelerator = "shift+cmd+KeyM".parse().unwrap();
-        assert_eq!(accelerator_for(shortcut), expected);
+        assert_eq!(accelerator_for(shortcut).unwrap(), expected);
     }
 
     #[test]
     fn accelerator_keeps_every_modifier() {
-        let config = ShortcutConfig {
-            modifiers: ["ctrl", "alt", "shift", "meta"].map(String::from).to_vec(),
-            key: "F13".to_string(),
-        };
-        let accelerator = accelerator_for(parse_shortcut(&config).unwrap());
-        let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::SUPER;
-        assert_eq!(accelerator.modifiers(), all);
-        assert_eq!(accelerator.key(), Code::F13);
+        let accelerator = accelerator_for(shortcut(&["ctrl", "alt", "shift", "meta"], "F13"));
+        let all = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::META;
+        assert_eq!(accelerator.unwrap().modifiers(), all);
+    }
+
+    #[test]
+    fn accelerator_keeps_the_key_across_keyboard_types_versions() {
+        let keys = [
+            (shortcut(&["ctrl"], "M"), Code::KeyM),
+            (shortcut(&["ctrl"], "7"), Code::Digit7),
+            (shortcut(&["ctrl"], "Space"), Code::Space),
+            (shortcut(&[], "F13"), Code::F13),
+            (shortcut(&[], "F24"), Code::F24),
+        ];
+        for (shortcut, code) in keys {
+            let accelerator = accelerator_for(shortcut).unwrap();
+            assert_eq!(accelerator.key(), code, "{shortcut}");
+        }
     }
 
     #[test]

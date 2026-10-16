@@ -73,10 +73,12 @@ impl Glyph {
 /// stroke-only.
 const CAMERA_BADGE_SVG: &[u8] = include_bytes!("../assets/camera-badge.svg");
 
-/// Pixels per SVG unit in the popup's icons: 48 px, so the large popup's 24 pt icons stay sharp
-/// on a 2x display, and AppKit scales them down for the smaller sizes. The tray's icons keep the
-/// SVGs' own 24 px.
-const POPUP_PIXELS_PER_UNIT: u32 = 2;
+/// The popup's icons are 48 px, 2 px per SVG unit, so the large popup's 24 pt icons stay sharp
+/// on a 2x display, and AppKit scales them down for the smaller sizes.
+const POPUP_SIZE: u32 = 48;
+/// The tray's icons are 18 px: tray-icon draws an icon at its pixel size in points, up to 22 pt,
+/// and the tray icon has always been 18 pt.
+const TRAY_SIZE: u32 = 18;
 
 /// One icon in one color and resolution, with or without the camera badge. Only `tray_mic`,
 /// `popup_mic`, and `popup_camera` build variants: 12 distinct ones, 4 for the tray and 8 for
@@ -87,8 +89,8 @@ pub struct IconVariant {
     /// Draws `CAMERA_BADGE_SVG` over the glyph.
     has_camera_badge: bool,
     color: IconColor,
-    /// Pixels per SVG unit.
-    pixels_per_unit: u32,
+    /// Width and height in pixels; every SVG is a 24-unit square.
+    size: u32,
 }
 
 /// An icon variant as the tray shows it.
@@ -108,7 +110,7 @@ pub fn tray_mic(muted: bool, camera_in_use: bool) -> TrayImage {
             glyph: Glyph::mic(muted),
             has_camera_badge: camera_in_use,
             color: if muted { RED } else { BLACK },
-            pixels_per_unit: 1,
+            size: TRAY_SIZE,
         },
         is_template: !muted,
     }
@@ -120,7 +122,7 @@ pub fn popup_mic(muted: bool, theme: Theme) -> IconVariant {
         glyph: Glyph::mic(muted),
         has_camera_badge: false,
         color: popup_icon_color(muted, theme),
-        pixels_per_unit: POPUP_PIXELS_PER_UNIT,
+        size: POPUP_SIZE,
     }
 }
 
@@ -135,7 +137,7 @@ pub fn popup_camera(in_use: bool, theme: Theme) -> IconVariant {
         },
         has_camera_badge: false,
         color: popup_icon_color(!in_use, theme),
-        pixels_per_unit: POPUP_PIXELS_PER_UNIT,
+        size: POPUP_SIZE,
     }
 }
 
@@ -174,7 +176,7 @@ impl IconVariant {
         } else {
             &[glyph]
         };
-        let (rgba, width, height) = rasterize_layers(layers, &self.color, self.pixels_per_unit)?;
+        let (rgba, width, height) = rasterize_layers(layers, &self.color, self.size)?;
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)
             .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
@@ -206,22 +208,22 @@ fn tree_size(tree: &resvg::usvg::Tree) -> (u32, u32) {
     (size.width() as u32, size.height() as u32)
 }
 
-/// Rasterizes SVG layers with the given stroke color at `pixels_per_unit` pixels per SVG unit,
-/// each drawn over the ones before it; every layer must have the first one's size. Returns
-/// un-premultiplied RGBA bytes plus the pixel size.
+/// Rasterizes SVG layers with the given stroke color, `width` pixels wide and as tall as the
+/// first layer's aspect ratio makes it, each drawn over the ones before it; every layer must have
+/// the first one's size. Returns un-premultiplied RGBA bytes plus the pixel size.
 fn rasterize_layers(
     layers: &[&[u8]],
     color: &IconColor,
-    pixels_per_unit: u32,
+    width: u32,
 ) -> Result<(Vec<u8>, u32, u32)> {
     let [first, overlays @ ..] = layers else {
         bail!("Failed to rasterize an icon without SVG layers");
     };
     let tree = parse_svg(first, color)?;
     let (w, h) = tree_size(&tree);
-    let (width, height) = (w * pixels_per_unit, h * pixels_per_unit);
+    let scale = width as f32 / w.max(1) as f32;
+    let height = (h as f32 * scale).round() as u32;
     let mut pixmap = Pixmap::new(width, height).context("Failed to allocate pixmap")?;
-    let scale = pixels_per_unit as f32;
     let transform = Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     for overlay in overlays {
@@ -262,6 +264,9 @@ fn unpremultiply(premultiplied: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    /// 1 px per SVG unit: every SVG is a 24-unit square.
+    const SVG_UNITS: u32 = 24;
 
     /// Icons the app embeds with `include_bytes!` (`Glyph::svg`, `CAMERA_BADGE_SVG`).
     const EMBEDDED_ICONS: [&str; 5] = [
@@ -311,7 +316,7 @@ mod tests {
         for path in &paths {
             let name = path.display();
             let svg = std::fs::read(path).expect("SVG should be readable");
-            let (rgba, w, h) = rasterize_layers(&[&svg], &RED, 1)
+            let (rgba, w, h) = rasterize_layers(&[&svg], &RED, SVG_UNITS)
                 .unwrap_or_else(|e| panic!("{name} failed to rasterize: {e:#}"));
             assert!(w > 0 && h > 0, "{name} rasterized to {w}x{h}");
             assert_eq!(rgba.len(), w as usize * h as usize * 4, "{name}");
@@ -325,8 +330,9 @@ mod tests {
     #[test]
     fn rasterize_layers_strokes_opaque_pixels_in_the_requested_color() {
         let color = popup_icon_color(true, Theme::Light);
-        let (rgba, _, _) = rasterize_layers(&[include_bytes!("../assets/mic.svg")], &color, 1)
-            .expect("mic.svg rasterizes");
+        let (rgba, _, _) =
+            rasterize_layers(&[include_bytes!("../assets/mic.svg")], &color, SVG_UNITS)
+                .expect("mic.svg rasterizes");
         let opaque: Vec<&[u8]> = rgba
             .chunks_exact(4)
             .filter(|pixel| pixel[3] == u8::MAX)
@@ -370,7 +376,7 @@ mod tests {
                 glyph,
                 has_camera_badge: false,
                 color,
-                pixels_per_unit: 2,
+                size: POPUP_SIZE,
             };
             assert_eq!(variant, expected);
         }
@@ -387,7 +393,7 @@ mod tests {
                     glyph,
                     has_camera_badge,
                     color,
-                    pixels_per_unit: 1,
+                    size: TRAY_SIZE,
                 },
                 is_template,
             };
@@ -459,12 +465,12 @@ mod tests {
     }
 
     #[test]
-    fn popup_icons_have_twice_the_pixels_of_the_tray_icons() {
+    fn tray_icons_are_18_px_and_popup_icons_48_px() {
         let tray = tray_mic(true, false)
             .variant
             .rendered()
             .expect("tray icon renders");
-        assert_eq!((tray.width, tray.height), (24, 24));
+        assert_eq!((tray.width, tray.height), (18, 18));
         for variant in [
             popup_mic(true, Theme::Light),
             popup_camera(true, Theme::Dark),
@@ -477,8 +483,8 @@ mod tests {
     #[test]
     fn a_doubled_render_covers_the_same_shape() {
         let svg: &[u8] = include_bytes!("../assets/mic.svg");
-        let (single, w, _) = rasterize_layers(&[svg], &BLACK, 1).expect("1x renders");
-        let (double, w2, _) = rasterize_layers(&[svg], &BLACK, 2).expect("2x renders");
+        let (single, w, _) = rasterize_layers(&[svg], &BLACK, SVG_UNITS).expect("1x renders");
+        let (double, w2, _) = rasterize_layers(&[svg], &BLACK, 2 * SVG_UNITS).expect("2x renders");
         assert_eq!(w2, w * 2);
         // Every pixel fully covered at 1x keeps ink in its 2x2 block at 2x.
         let alpha_at =
@@ -500,17 +506,17 @@ mod tests {
         assert!(covered > 0, "mic.svg has no fully covered pixels at 1x");
     }
 
-    /// The alpha channel of `layers` rasterized in black.
-    fn alpha(layers: &[&[u8]]) -> Vec<u8> {
-        let (rgba, _, _) = rasterize_layers(layers, &BLACK, 1).expect("layers rasterize");
+    /// The alpha channel of `layers` rasterized in black, `size` pixels square.
+    fn alpha(layers: &[&[u8]], size: u32) -> Vec<u8> {
+        let (rgba, _, _) = rasterize_layers(layers, &BLACK, size).expect("layers rasterize");
         rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
     }
 
     #[test]
     fn camera_badge_is_a_solid_dot_clear_of_both_mic_glyphs() {
         let (_, width, _) =
-            rasterize_layers(&[CAMERA_BADGE_SVG], &BLACK, 1).expect("badge renders");
-        let badge = alpha(&[CAMERA_BADGE_SVG]);
+            rasterize_layers(&[CAMERA_BADGE_SVG], &BLACK, SVG_UNITS).expect("badge renders");
+        let badge = alpha(&[CAMERA_BADGE_SVG], SVG_UNITS);
         let position = |index: usize| (index as u32 % width, index as u32 / width);
 
         // The pixels at least half covered span the dot's diameter. Every pixel whose center
@@ -535,28 +541,35 @@ mod tests {
             }
         }
 
-        for glyph in [Glyph::Mic, Glyph::MicOff] {
-            let plain = alpha(&[glyph.svg()]);
-            let badged = alpha(&[glyph.svg(), CAMERA_BADGE_SVG]);
-            for index in 0..badge.len() {
-                let (x, y) = position(index);
-                assert!(
-                    plain[index] == 0 || badge[index] == 0,
-                    "{glyph:?} and the badge both ink ({x}, {y})"
-                );
-                let expected = plain[index].max(badge[index]);
-                assert_eq!(badged[index], expected, "{glyph:?} at ({x}, {y})");
+        // Clear of both glyphs at 1 px per unit and at the tray's size, the one it shows at.
+        for size in [SVG_UNITS, TRAY_SIZE] {
+            let dot = alpha(&[CAMERA_BADGE_SVG], size);
+            for glyph in [Glyph::Mic, Glyph::MicOff] {
+                let plain = alpha(&[glyph.svg()], size);
+                let badged = alpha(&[glyph.svg(), CAMERA_BADGE_SVG], size);
+                for index in 0..dot.len() {
+                    let (x, y) = (index as u32 % size, index as u32 / size);
+                    assert!(
+                        plain[index] == 0 || dot[index] == 0,
+                        "{glyph:?} and the badge both ink ({x}, {y}) at {size} px"
+                    );
+                    let expected = plain[index].max(dot[index]);
+                    assert_eq!(
+                        badged[index], expected,
+                        "{glyph:?} at ({x}, {y}), {size} px"
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn rasterize_layers_rejects_missing_and_differently_sized_layers() {
-        assert!(rasterize_layers(&[], &BLACK, 1).is_err());
+        assert!(rasterize_layers(&[], &BLACK, SVG_UNITS).is_err());
 
         let small = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
             <path d="M1 1h14"/></svg>"#;
-        let err = rasterize_layers(&[Glyph::Mic.svg(), small], &BLACK, 1)
+        let err = rasterize_layers(&[Glyph::Mic.svg(), small], &BLACK, SVG_UNITS)
             .expect_err("a 16x16 layer over a 24x24 glyph");
         assert!(err.to_string().contains("16x16"), "{err:#}");
     }
