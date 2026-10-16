@@ -24,9 +24,6 @@ mod url_scheme;
 mod utils;
 // TODO: Use better Apple logging support? https://lib.rs/crates/oslog
 
-#[macro_use]
-extern crate objc;
-
 use crate::camera::CameraController;
 use crate::event_loop::{restore_microphone_on_exit, start};
 use crate::mic::MicController;

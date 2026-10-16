@@ -45,12 +45,33 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # NSWorkspace's center and the distributed center deliver the session events; NSApplication
 # shows or hides the Dock icon; NSURL opens Sound settings.
 objc2 = "0.6"
+# The popup, the About window, the mute sounds, the session events (NSWorkspace's center),
+# and the Dock toggle (NSApplication). NSView::layer needs objc2-quartz-core, NSColor::CGColor
+# objc2-core-graphics.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
+  "NSAlert",
   "NSApplication",
+  "NSButton",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSImage",
+  "NSImageView",
+  "NSLayoutConstraint",
   "NSResponder",
   "NSRunningApplication",
+  "NSScreen",
+  "NSSound",
+  "NSStackView",
+  "NSText",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
   "NSWorkspace",
+  "objc2-core-foundation",
+  "objc2-core-graphics",
+  "objc2-quartz-core",
 ] }
 # Camera-in-use detection (`camera.rs`); the crate links AVFoundation.
 objc2-av-foundation = { version = "0.3", default-features = false, features = [
@@ -62,11 +83,21 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "NSArray",
   "NSBundle",
+  "NSData",
   "NSDistributedNotificationCenter",
   "NSError",
+  "NSGeometry",
   "NSNotification",
   "NSString",
   "NSURL",
+  "objc2-core-foundation",
+] }
+# The popup separator's color: CALayer's backgroundColor setter is behind objc2-core-graphics,
+# which objc2-app-kit doesn't turn on here.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+  "std",
+  "CALayer",
+  "objc2-core-graphics",
 ] }
 objc2-service-management = { version = "0.3", default-features = false, features = [
   "std",

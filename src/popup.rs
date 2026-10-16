@@ -3,12 +3,11 @@ use crate::popup_content::{PopupContent, PopupState};
 use crate::settings::{PopupPosition, PopupSize};
 use crate::utils::get_cursor_pos;
 use anyhow::{Context, Result};
-use cocoa::{
-    appkit::{NSScreen, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility},
-    base::{id, YES},
-    foundation::NSRect,
-};
 use log::trace;
+use objc2::rc::Retained;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility};
+use objc2_foundation::NSRect;
 use tao::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     monitor::MonitorHandle,
@@ -98,32 +97,34 @@ fn menu_bar_height(frame: NSRect, visible_frame: NSRect) -> f64 {
 }
 
 /// `monitor`'s menu bar height from its `NSScreen`; 0 when AppKit has no screen for it.
-fn screen_menu_bar_height(monitor: &MonitorHandle) -> f64 {
-    let Some(screen) = monitor.ns_screen() else {
-        return 0.;
-    };
-    let screen = screen as id;
-    unsafe {
-        let height = menu_bar_height(NSScreen::frame(screen), NSScreen::visibleFrame(screen));
-        // `ns_screen` hands over a reference (`Retained::into_raw`); this is its one release.
-        let _: () = msg_send![screen, release];
-        height
-    }
+fn screen_menu_bar_height(monitor: &MonitorHandle, _mtm: MainThreadMarker) -> f64 {
+    // SAFETY: `ns_screen` hands over a reference to an NSScreen (`Retained::into_raw`), which
+    // `from_raw` takes and drops after the read; `_mtm` shows this runs on the main thread.
+    let screen = monitor
+        .ns_screen()
+        .and_then(|screen| unsafe { Retained::from_raw(screen.cast::<NSScreen>()) });
+    screen.map_or(0., |screen| {
+        menu_bar_height(screen.frame(), screen.visibleFrame())
+    })
 }
 
-fn monitor_area(monitor: &MonitorHandle) -> MonitorArea {
+fn monitor_area(monitor: &MonitorHandle, mtm: MainThreadMarker) -> MonitorArea {
     let scale = monitor.scale_factor();
     MonitorArea {
         position: monitor.position().to_logical::<f64>(scale),
         size: monitor.size().to_logical::<f64>(scale),
-        menu_bar_height: screen_menu_bar_height(monitor),
+        menu_bar_height: screen_menu_bar_height(monitor, mtm),
     }
 }
 
 /// Where a popup with `layout` goes on `monitor`.
-fn position_on(monitor: &MonitorHandle, layout: PopupLayout) -> LogicalPosition<f64> {
+fn position_on(
+    monitor: &MonitorHandle,
+    layout: PopupLayout,
+    mtm: MainThreadMarker,
+) -> LogicalPosition<f64> {
     popup_origin(
-        monitor_area(monitor),
+        monitor_area(monitor, mtm),
         window_size(layout.size),
         layout.position,
     )
@@ -168,21 +169,21 @@ fn monitor_contains_physical_position(
         && position.y < monitor_position.y + monitor_size.height
 }
 
-fn setup_window(window: id) {
-    unsafe {
-        window.setHasShadow_(YES);
-        // Rounded edges hack: https://stackoverflow.com/a/37418915
-        let mask = window.styleMask()
-            | NSWindowStyleMask::NSTitledWindowMask
-            | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
-        // Pass the NSUInteger itself: cocoa's bitflags struct has no guaranteed C layout.
-        let _: () = msg_send![window, setStyleMask: mask.bits()];
-        let _: () = msg_send![
-            window,
-            setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden
-        ];
-        let _: () = msg_send![window, setTitlebarAppearsTransparent: YES];
-    };
+/// `window`'s `NSWindow`, which lives as long as `window`.
+fn ns_window(window: &Window, _mtm: MainThreadMarker) -> &NSWindow {
+    // SAFETY: tao's pointer is the window's NSWindow, never null, and valid until `window`
+    // drops; `_mtm` shows this runs on the main thread, where AppKit objects may be used.
+    unsafe { &*window.ns_window().cast::<NSWindow>() }
+}
+
+fn setup_window(window: &NSWindow) {
+    window.setHasShadow(true);
+    // Rounded edges hack: https://stackoverflow.com/a/37418915
+    window.setStyleMask(
+        window.styleMask() | NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView,
+    );
+    window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    window.setTitlebarAppearsTransparent(true);
 }
 
 pub struct Popup {
@@ -197,6 +198,8 @@ pub struct Popup {
     camera_in_use: bool,
     /// What the title and content show; `redraw` leaves them alone while this is current.
     shown: PopupState,
+    /// The popup lives on the main thread, where its AppKit calls run.
+    mtm: MainThreadMarker,
 }
 
 impl Popup {
@@ -206,6 +209,8 @@ impl Popup {
         enabled: bool,
         layout: PopupLayout,
     ) -> Result<Self> {
+        let mtm =
+            MainThreadMarker::new().context("The popup must be created on the main thread")?;
         // The camera state arrives with the first update; until then the content says
         // "Camera on", as it always has.
         let camera_in_use = true;
@@ -230,7 +235,7 @@ impl Popup {
             .with_visible(false)
             .with_has_shadow(true);
         if let Some(monitor) = initial_monitor.as_ref() {
-            builder = builder.with_position(position_on(monitor, layout));
+            builder = builder.with_position(position_on(monitor, layout, mtm));
         }
         let window = builder.build(target).context("Failed to build window")?;
         window.set_visible(false);
@@ -242,14 +247,13 @@ impl Popup {
             camera_in_use,
             theme: window.theme(),
         };
-        let content = PopupContent::new(shown, size, size_scale(layout.size))?;
-        unsafe {
-            let ns_view = window.ns_view() as id;
-            ns_view.addSubview_(content.view);
-            let _: () = msg_send![content.view, release];
-            let ns_window = window.ns_window() as id;
-            setup_window(ns_window);
-        };
+        let content = PopupContent::new(mtm, shown, size, size_scale(layout.size))?;
+        let ns_window = ns_window(&window, mtm);
+        ns_window
+            .contentView()
+            .context("The popup window has no content view")?
+            .addSubview(&content.view);
+        setup_window(ns_window);
 
         let popup = Self {
             window,
@@ -260,6 +264,7 @@ impl Popup {
             mic_muted,
             camera_in_use,
             shown,
+            mtm,
         };
         Ok(popup)
     }
@@ -343,15 +348,15 @@ impl Popup {
     /// Swaps the content for one drawn for `size`, showing what the old one showed. On an error
     /// the old content stays.
     fn replace_content(&mut self, size: PopupSize) -> Result<()> {
-        let content = PopupContent::new(self.shown, window_size(size), size_scale(size))
+        let content = PopupContent::new(self.mtm, self.shown, window_size(size), size_scale(size))
             .context("Failed to draw the popup at its new size")?;
-        unsafe {
-            let ns_view = self.window.ns_view() as id;
-            // The content view owns the old stack view; removing it frees it and its subviews.
-            let _: () = msg_send![self.content.view, removeFromSuperview];
-            ns_view.addSubview_(content.view);
-            let _: () = msg_send![content.view, release];
-        }
+        let content_view = ns_window(&self.window, self.mtm)
+            .contentView()
+            .context("The popup window has no content view")?;
+        // The content view holds the old stack view; once it's removed, dropping the old
+        // content frees it and its subviews.
+        self.content.view.removeFromSuperview();
+        content_view.addSubview(&content.view);
         self.content = content;
         Ok(())
     }
@@ -377,7 +382,7 @@ impl Popup {
 
             self.window.set_inner_size(window_size(self.layout.size));
             self.window
-                .set_outer_position(position_on(&monitor, self.layout));
+                .set_outer_position(position_on(&monitor, self.layout, self.mtm));
             self.current_monitor = Some(monitor);
 
             // A visible popup stays visible on the new monitor, a status flash included.
@@ -444,10 +449,7 @@ impl Popup {
     /// Shows the popup in front of every window, whether or not it is enabled.
     fn order_front(&self) {
         self.window.set_visible(true);
-        unsafe {
-            let ns_window = self.window.ns_window() as id;
-            let _: () = msg_send![ns_window, orderFrontRegardless];
-        }
+        ns_window(&self.window, self.mtm).orderFrontRegardless();
     }
 }
 
@@ -622,7 +624,7 @@ mod tests {
     }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-        use cocoa::foundation::{NSPoint, NSSize};
+        use objc2_foundation::{NSPoint, NSSize};
         NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
     }
 
