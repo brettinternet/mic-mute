@@ -5,9 +5,11 @@ use crate::settings::ExcludedDevice;
 use crate::shortcuts::Shortcut;
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::hotkey::Modifiers as HotKeyModifiers;
-use log::trace;
+use log::{error, trace};
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use objc2::MainThreadMarker;
+use objc2_foundation::NSSize;
 use std::fmt;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -258,12 +260,38 @@ fn tooltip_text(base: &str, notice: Option<&str>, camera_in_use: bool) -> String
     }
 }
 
-/// A tray icon of `variant`, built from its cached render.
-fn get_icon(variant: IconVariant) -> Result<Icon> {
+/// A tray icon of `variant`, built from its cached render, and its size in the menu bar, in
+/// points.
+fn get_icon(variant: IconVariant) -> Result<(Icon, NSSize)> {
     let rendered = variant.rendered()?;
     let icon = Icon::from_rgba(rendered.rgba.clone(), rendered.width, rendered.height)
         .context("Failed to open icon")?;
-    Ok(icon)
+    let size = NSSize::new(
+        icons::tray_points(rendered.width),
+        icons::tray_points(rendered.height),
+    );
+    Ok((icon, size))
+}
+
+/// Sets the menu bar icon's image to `size`, in points, after tray-icon has set it: tray-icon
+/// sizes an image to its pixel size in points, up to 22 pt, which would show the 36 px icons at
+/// 22 pt. Only the size changes; the image keeps the template flag tray-icon gave it.
+fn fit_icon_to_menu_bar(systray: &TrayIcon, size: NSSize) -> Result<()> {
+    let mtm = MainThreadMarker::new().context("not on the main thread")?;
+    let status_item = systray
+        .ns_status_item()
+        .context("the tray icon has no status item")?;
+    let button = status_item
+        .button(mtm)
+        .context("the status item has no button")?;
+    let image = button.image().context("the tray icon has no image")?;
+    image.setSize(size);
+    // The button isn't told that its image changed size, and it ignores the image it already
+    // shows, so it drops the image and takes it back: it then lays out and draws at the new
+    // size. Nothing draws in between.
+    button.setImage(None);
+    button.setImage(Some(&image));
+    Ok(())
 }
 
 /// Each shortcut modifier in global-hotkey's keyboard-types (0.7) and in muda's (0.8), which
@@ -332,7 +360,7 @@ impl Tray {
     ) -> Result<Self> {
         trace!("Creating tray icon");
         let shown = TrayView::new(muted, camera_in_use);
-        let icon = get_icon(shown.image.variant)?;
+        let (icon, icon_size) = get_icon(shown.image.variant)?;
         let tray_menu = Menu::new();
         // The shortcut label is set later with `update_accelerators`: muda fails to
         // build the whole menu when an item has a key it can't show (e.g. CapsLock).
@@ -370,6 +398,10 @@ impl Tray {
             builder.with_icon(icon)
         };
         let systray = builder.build().context("Failed to create tray icon")?;
+        // At tray-icon's size the icon still works, so a failure is only logged.
+        if let Err(err) = fit_icon_to_menu_bar(&systray, icon_size) {
+            error!("Failed to size the tray icon: {:#}", err);
+        }
 
         trace!("Tray item created");
         let tray = Self {
@@ -400,16 +432,19 @@ impl Tray {
 
     /// Sets the icon and its template flag in one call: tray-icon's `set_icon` draws a plain icon,
     /// `set_icon_templated` a template one. A failed icon stays unrecorded, so the next `update`
-    /// retries it.
+    /// retries it; an icon left at tray-icon's size is logged, since it shows the right state.
     fn update_icon(&mut self, image: TrayImage) -> Result<()> {
         if image == self.shown.image {
             return Ok(());
         }
-        let icon = get_icon(image.variant)?;
+        let (icon, size) = get_icon(image.variant)?;
         if image.is_template {
             self.systray.set_icon_templated(Some(icon))?;
         } else {
             self.systray.set_icon(Some(icon))?;
+        }
+        if let Err(err) = fit_icon_to_menu_bar(&self.systray, size) {
+            error!("Failed to size the tray icon: {:#}", err);
         }
         self.shown.image = image;
         trace!("Updated tray icon: {:?}", image);
@@ -629,6 +664,21 @@ mod tests {
             assert_eq!(idle.image.is_template, in_use.image.is_template);
             assert_eq!(idle.menu_text, in_use.menu_text);
             assert_eq!((idle.camera_in_use, in_use.camera_in_use), (false, true));
+        }
+    }
+
+    #[test]
+    fn every_tray_icon_shows_at_18_pt() {
+        for muted in [false, true] {
+            for camera_in_use in [false, true] {
+                let variant = TrayView::new(muted, camera_in_use).image.variant;
+                let (_, size) = get_icon(variant).expect("tray icon builds");
+                assert_eq!(
+                    (size.width, size.height),
+                    (18.0, 18.0),
+                    "muted {muted}, camera in use {camera_in_use}"
+                );
+            }
         }
     }
 
