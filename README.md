@@ -97,7 +97,7 @@ gh attestation verify mic-mute-<version>-universal-apple-darwin.dmg --repo <owne
 
 ## Build
 
-Install dependencies with `mise`. Or you may [install Rust](https://www.rust-lang.org/tools/install). Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
+Install dependencies with `mise`. Or you may [install Rust](https://www.rust-lang.org/tools/install): rustup installs the version pinned in [`rust-toolchain.toml`](./rust-toolchain.toml), with both macOS targets, the first time you build. Then, [install go-task](https://taskfile.dev/installation/) or run the commands from the Taskfile separately yourself.
 
 ### Install
 

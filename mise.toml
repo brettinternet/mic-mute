@@ -1,5 +1,10 @@
+[settings]
+# Rust comes from rust-toolchain.toml, the one place its version is pinned: mise
+# reads the channel, components, and targets there. A version under [tools]
+# would set RUSTUP_TOOLCHAIN and override that file.
+idiomatic_version_file_enable_tools = ["rust"]
+
 [tools]
 lefthook = "latest"
-rust = "latest"
 task = "latest"
 watchexec = "latest"

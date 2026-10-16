@@ -49,11 +49,9 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
+      # rust-toolchain.toml pins the version, its components, and both targets.
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy \
-            --target aarch64-apple-darwin,x86_64-apple-darwin --no-self-update
-          rustup default stable
+        run: rustup toolchain install --no-self-update
 
       - name: Resolve the version
         id: version
