@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopWindowTarget};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tray_icon::TrayIconEvent;
 
 /// How often the loop polls the microphones while CoreAudio listeners report device changes:
 /// the poll is a safety net for a change no listener reports.
@@ -692,6 +693,20 @@ pub fn start(
                 if let Err(e) = utils::open_sound_input_settings() {
                     log::error!("Failed to open Sound settings: {:#}", e);
                 }
+            }
+        }
+
+        // Every queued tray icon event: tray-icon queues each click and each move of the pointer
+        // over the icon, and nothing else takes them. With right_click_toggles_mute, a
+        // right-click's release toggles mute as the Mute item does; tray-icon opens the menu for
+        // the other clicks itself.
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            // Its own statement, so the UI lock is released before `request_mic`.
+            let command = ui.read().tray_click_command(&event);
+            if let Some(command) = command {
+                trace!("Tray icon right-clicked: {:?}", command);
+                let hide_at = request_mic(ui, &controller, &mut last_state, command);
+                keep_popup_until(&mut hide_popup_at, hide_at);
             }
         }
 

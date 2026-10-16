@@ -79,6 +79,8 @@ fn reset_settings(current: &Settings) -> Settings {
     Settings {
         mic_shortcut: defaults.mic_shortcut,
         show_in_dock: defaults.show_in_dock,
+        // A right-click opens the menu again.
+        right_click_toggles_mute: defaults.right_click_toggles_mute,
         show_popup: defaults.show_popup,
         excluded_devices: defaults.excluded_devices,
         // Inputs besides the tray menu.
@@ -353,6 +355,7 @@ mod tests {
                 "mic_shortcut": {{ "modifiers": ["ctrl"], "key": "K" }},
                 "show_in_dock": true,
                 "launch_at_login": {launch_at_login},
+                "right_click_toggles_mute": true,
                 "show_popup": false,
                 "excluded_devices": [{{ "uid": "Teams UID", "name": "Teams Audio" }}],
                 "mode": "push_to_talk",
@@ -380,6 +383,13 @@ mod tests {
         assert_eq!(reset.show_in_dock, defaults.show_in_dock);
         assert_eq!(reset.show_popup, defaults.show_popup);
         assert_eq!(reset.excluded_devices, defaults.excluded_devices);
+    }
+
+    #[test]
+    fn reset_lets_a_right_click_open_the_menu_again() {
+        let current = customized_settings(true);
+        assert!(current.right_click_toggles_mute);
+        assert!(!reset_settings(&current).right_click_toggles_mute);
     }
 
     #[test]
@@ -430,6 +440,7 @@ mod tests {
         let reset_fields = [
             "mic_shortcut",
             "show_in_dock",
+            "right_click_toggles_mute",
             "show_popup",
             "excluded_devices",
             "mode",

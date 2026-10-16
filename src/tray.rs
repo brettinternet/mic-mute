@@ -1,6 +1,7 @@
 use crate::config::AppVars;
 use crate::icons::{self, IconVariant, TrayImage};
 use crate::mic::{DeviceState, DeviceStatus};
+use crate::mic_command::MicCommand;
 use crate::settings::ExcludedDevice;
 use crate::shortcuts::Shortcut;
 use anyhow::{anyhow, Context, Result};
@@ -8,10 +9,12 @@ use global_hotkey::hotkey::Modifiers as HotKeyModifiers;
 use log::{error, trace};
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use objc2::rc::Retained;
 use objc2::MainThreadMarker;
+use objc2_app_kit::NSStatusBarButton;
 use objc2_foundation::NSSize;
 use std::fmt;
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
@@ -275,17 +278,22 @@ fn get_icon(variant: IconVariant) -> Result<(Icon, NSSize)> {
     Ok((icon, size))
 }
 
-/// Sets the menu bar icon's image to `size`, in points, after tray-icon has set it: tray-icon
-/// sizes an image to its pixel size in points, up to 22 pt, which would show the 36 px icons at
-/// 22 pt. Only the size changes; the image keeps the template flag tray-icon gave it.
-fn fit_icon_to_menu_bar(systray: &TrayIcon, size: NSSize) -> Result<()> {
+/// The menu bar button that shows `systray`'s icon.
+fn status_button(systray: &TrayIcon) -> Result<Retained<NSStatusBarButton>> {
     let mtm = MainThreadMarker::new().context("not on the main thread")?;
     let status_item = systray
         .ns_status_item()
         .context("the tray icon has no status item")?;
-    let button = status_item
+    status_item
         .button(mtm)
-        .context("the status item has no button")?;
+        .context("the status item has no button")
+}
+
+/// Sets the menu bar icon's image to `size`, in points, after tray-icon has set it: tray-icon
+/// sizes an image to its pixel size in points, up to 22 pt, which would show the 36 px icons at
+/// 22 pt. Only the size changes; the image keeps the template flag tray-icon gave it.
+fn fit_icon_to_menu_bar(systray: &TrayIcon, size: NSSize) -> Result<()> {
+    let button = status_button(systray)?;
     let image = button.image().context("the tray icon has no image")?;
     image.setSize(size);
     // The button isn't told that its image changed size, and it ignores the image it already
@@ -294,6 +302,23 @@ fn fit_icon_to_menu_bar(systray: &TrayIcon, size: NSSize) -> Result<()> {
     button.setImage(None);
     button.setImage(Some(&image));
     Ok(())
+}
+
+/// The command a tray icon event asks for, besides the menu tray-icon opens itself: while
+/// `right_click_toggles_mute` is on, a right-click's release toggles mute, as the Mute item does,
+/// so each right-click toggles once. Nothing else asks for one: a left-click opens the menu, a
+/// press or the pointer moving over the icon does nothing, and while the setting is off, a
+/// right-click opens the menu too.
+fn command_for_click(event: &TrayIconEvent, right_click_toggles_mute: bool) -> Option<MicCommand> {
+    let is_right_release = matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Up,
+            ..
+        }
+    );
+    (right_click_toggles_mute && is_right_release).then_some(MicCommand::Toggle)
 }
 
 /// Each shortcut modifier in global-hotkey's keyboard-types (0.7) and in muda's (0.8), which
@@ -351,6 +376,9 @@ pub struct Tray {
     /// What the icon, the Mute item, and the tooltip show now; `update` leaves matching parts
     /// alone.
     shown: TrayView,
+    /// Whether tray-icon leaves a right-click to `click_command` instead of opening the menu:
+    /// the `right_click_toggles_mute` value this tray last applied.
+    right_click_toggles_mute: bool,
 }
 
 impl Tray {
@@ -401,7 +429,9 @@ impl Tray {
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu.clone()))
             .with_tooltip(tooltip_text(&tooltip, None, shown.camera_in_use))
-            .with_menu_on_left_click(true);
+            .with_menu_on_left_click(true)
+            // Until `set_right_click_toggles_mute` leaves right-clicks to the event loop.
+            .with_menu_on_right_click(true);
         let builder = if shown.image.is_template {
             builder.with_icon_templated(icon)
         } else {
@@ -428,8 +458,40 @@ impl Tray {
             tooltip,
             settings_notice: None,
             shown,
+            right_click_toggles_mute: false,
         };
         Ok(tray)
+    }
+
+    /// Leaves a right-click on the icon to `click_command`, which toggles mute, or, while
+    /// `enabled` is off, lets it open the menu, as a left-click always does. tray-icon reads the
+    /// flag at each click, so the next one follows it; setting it again changes nothing.
+    pub fn set_right_click_toggles_mute(&mut self, enabled: bool) {
+        self.systray.set_show_menu_on_right_click(!enabled);
+        if enabled != self.right_click_toggles_mute {
+            self.right_click_toggles_mute = enabled;
+            trace!(
+                "A right-click on the tray icon now {}",
+                if enabled {
+                    "toggles mute"
+                } else {
+                    "opens the menu"
+                }
+            );
+        }
+    }
+
+    /// The command a tray icon event asks for (`command_for_click`), by the setting this tray
+    /// applied, so a right-click that opened the menu never toggles too. When a right press opens
+    /// no menu, tray-icon 0.26 highlights the icon but clears the highlight only on a left
+    /// release, so a right-click that toggles clears it here.
+    pub fn click_command(&self, event: &TrayIconEvent) -> Option<MicCommand> {
+        let command = command_for_click(event, self.right_click_toggles_mute)?;
+        // A highlighted icon still shows the state, so a failure is only logged.
+        if let Err(err) = status_button(&self.systray).map(|button| button.highlight(false)) {
+            error!("Failed to clear the tray icon's highlight: {:#}", err);
+        }
+        Some(command)
     }
 
     /// Shows `muted` and `camera_in_use` in the icon, the Mute item, and the tooltip, touching
@@ -617,6 +679,8 @@ mod tests {
     use super::*;
     use crate::settings::ShortcutConfig;
     use crate::shortcuts::parse_shortcut;
+    use tray_icon::dpi::PhysicalPosition;
+    use tray_icon::{Rect, TrayIconId};
 
     fn shortcut(modifiers: &[&str], key: &str) -> Shortcut {
         let config = ShortcutConfig {
@@ -875,5 +939,74 @@ mod tests {
         assert!(!has_same_devices(&muted, &unplugged));
         assert!(!has_same_devices(&muted, &reordered));
         assert!(has_same_devices(&[], &[]));
+    }
+
+    // right_click_toggles_mute
+
+    fn click(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: TrayIconId::new("tray"),
+            position: PhysicalPosition::new(10., 5.),
+            rect: Rect::default(),
+            button,
+            button_state,
+        }
+    }
+
+    #[test]
+    fn a_right_click_toggles_mute_once_on_its_release_while_the_setting_is_on() {
+        let press = click(MouseButton::Right, MouseButtonState::Down);
+        let release = click(MouseButton::Right, MouseButtonState::Up);
+
+        assert_eq!(command_for_click(&press, true), None);
+        assert_eq!(command_for_click(&release, true), Some(MicCommand::Toggle));
+    }
+
+    #[test]
+    fn no_click_toggles_mute_while_the_setting_is_off() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            for state in [MouseButtonState::Down, MouseButtonState::Up] {
+                let event = click(button, state);
+                assert_eq!(command_for_click(&event, false), None, "{event:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn left_and_middle_clicks_and_pointer_moves_never_toggle_mute() {
+        let id = || TrayIconId::new("tray");
+        let position = PhysicalPosition::new(10., 5.);
+        let rect = Rect::default();
+        let events = [
+            click(MouseButton::Left, MouseButtonState::Down),
+            click(MouseButton::Left, MouseButtonState::Up),
+            click(MouseButton::Middle, MouseButtonState::Down),
+            click(MouseButton::Middle, MouseButtonState::Up),
+            // Windows only, but it isn't a click's release either.
+            TrayIconEvent::DoubleClick {
+                id: id(),
+                position,
+                rect,
+                button: MouseButton::Right,
+            },
+            TrayIconEvent::Enter {
+                id: id(),
+                position,
+                rect,
+            },
+            TrayIconEvent::Move {
+                id: id(),
+                position,
+                rect,
+            },
+            TrayIconEvent::Leave {
+                id: id(),
+                position,
+                rect,
+            },
+        ];
+        for event in &events {
+            assert_eq!(command_for_click(event, true), None, "{event:?}");
+        }
     }
 }

@@ -18,6 +18,7 @@ The tray menu's **Settings…** item opens a [Settings window](#settings-window)
   },
   "show_in_dock": false,
   "launch_at_login": false,
+  "right_click_toggles_mute": false,
   "show_popup": true,
   "excluded_devices": [],
   "mode": "toggle",
@@ -83,6 +84,15 @@ A copy that isn't inside an app bundle, such as a development build started with
 
 See the README's [Launch at Login](../README.md#launch-at-login) section for how macOS treats the login item of a locally built app.
 
+### `right_click_toggles_mute`
+
+Controls what a right-click on the menu bar icon does.
+
+- `false` (default): open the menu, as a left-click does.
+- `true`: mute or unmute. A left-click still opens the menu.
+
+The toggle runs when you release the right button, once per click, and does what the menu's Mute item does: the same sound and notification ([`play_sound`](#play_sound), [`show_notification`](#show_notification)), the popup's "Mic on" after an unmute, the choice that [`launch_state`](#launch_state) `"last"` remembers, and, in [push-to-talk](#mode) mode, an unmute that lasts until the shortcut's next release. A change to the setting applies from the next click.
+
 ### `show_popup`
 
 Controls the small on-screen mute-status popup.
@@ -130,7 +140,7 @@ Controls whether Mic Mute plays a sound when the microphones mute or unmute.
 - `false` (default)
 - `true`: the system sound Bottle when they mute, Tink when they unmute.
 
-The sound plays through the current output device, and only when a request changes the mute state: the shortcut (in push-to-talk mode, each press and release), the tray's Mute item, a URL action, or an automatic mute such as `mute_on_lock`. A request that changes nothing, such as a mute while muted or a mute that fails, plays nothing, so a sound always means the state changed. The re-mutes Mic Mute makes when another app unmutes a microphone, or one is plugged in, play nothing either.
+The sound plays through the current output device, and only when a request changes the mute state: the shortcut (in push-to-talk mode, each press and release), the tray's Mute item or a right-click on its icon ([`right_click_toggles_mute`](#right_click_toggles_mute)), a URL action, or an automatic mute such as `mute_on_lock`. A request that changes nothing, such as a mute while muted or a mute that fails, plays nothing, so a sound always means the state changed. The re-mutes Mic Mute makes when another app unmutes a microphone, or one is plugged in, play nothing either.
 
 ### `show_notification`
 
@@ -217,7 +227,7 @@ About → Reset Settings empties the list.
 
 ## Settings window
 
-The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
+The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`, `right_click_toggles_mute`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
 
 - Each change applies and is saved at once, like a tray toggle. The "Mic on" field takes whole milliseconds when you press Return or Tab or click elsewhere; anything else puts the setting's value back, and the stepper moves it by 100 ms.
 - The window shows changes made elsewhere as they apply: tray toggles, About → Reset Settings, and edits to `settings.json`, which Mic Mute reloads within two seconds.

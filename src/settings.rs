@@ -34,6 +34,10 @@ pub struct Settings {
     pub show_in_dock: bool,
     #[serde(default)]
     pub launch_at_login: bool,
+    /// Whether a right-click on the tray icon toggles mute, as the Mute item does, instead of
+    /// opening the menu; a left-click always opens it. Off by default: both open the menu.
+    #[serde(default)]
+    pub right_click_toggles_mute: bool,
     #[serde(default = "default_show_popup")]
     pub show_popup: bool,
 
@@ -97,6 +101,7 @@ impl Default for Settings {
             mic_shortcut: ShortcutConfig::default(),
             show_in_dock: false,
             launch_at_login: false,
+            right_click_toggles_mute: false,
             show_popup: true,
             excluded_devices: Vec::new(),
             // Inputs besides the tray menu.
@@ -932,6 +937,7 @@ mod tests {
             },
             show_in_dock: false,
             launch_at_login: false,
+            right_click_toggles_mute: true,
             show_popup: false,
             excluded_devices: vec![ExcludedDevice {
                 uid: "MSLoopbackDriverDevice_UID".to_string(),
@@ -958,6 +964,7 @@ mod tests {
         let loaded: Settings =
             serde_json::from_str(&fs::read_to_string(&tmp_path).unwrap()).unwrap();
         assert_eq!(loaded.mic_shortcut.key, "M");
+        assert!(loaded.right_click_toggles_mute);
         assert!(!loaded.show_popup);
         assert_eq!(loaded.excluded_devices, s.excluded_devices);
         assert_eq!(loaded.mode, ShortcutMode::PushToTalk);
@@ -1034,6 +1041,7 @@ mod tests {
             "mic_shortcut",
             "show_in_dock",
             "launch_at_login",
+            "right_click_toggles_mute",
             "show_popup",
             "excluded_devices",
             "mode",
@@ -1097,6 +1105,7 @@ mod tests {
                 "popup_mic_on_ms",
                 "popup_position",
                 "popup_size",
+                "right_click_toggles_mute",
                 "show_in_dock",
                 "show_notification",
                 "show_popup"
@@ -1762,6 +1771,32 @@ mod tests {
 
         assert!(matches!(err, LoadError::Parse { .. }));
         assert_eq!(err.position().map(|(line, _)| line), Some(2));
+    }
+
+    // right_click_toggles_mute
+
+    #[test]
+    fn a_right_click_opens_the_menu_by_default_and_when_the_field_is_missing() {
+        assert!(!Settings::default().right_click_toggles_mute);
+        let loaded: Settings =
+            serde_json::from_str(r#"{ "mic_shortcut": { "key": "F13" }, "show_popup": false }"#)
+                .unwrap();
+        assert!(!loaded.right_click_toggles_mute);
+        assert!(loaded.extra.is_empty());
+    }
+
+    #[test]
+    fn right_click_toggles_mute_round_trips() {
+        for enabled in [true, false] {
+            let settings = Settings {
+                right_click_toggles_mute: enabled,
+                ..Settings::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["right_click_toggles_mute"], serde_json::json!(enabled));
+            let loaded: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(loaded.right_click_toggles_mute, enabled);
+        }
     }
 
     // Inputs besides the tray menu: URLs, the shortcut's mode, and automatic mute.
