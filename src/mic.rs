@@ -759,26 +759,49 @@ fn device_key<B: AudioBackend>(backend: &B, audio_device_id: AudioDeviceID) -> D
     }
 }
 
-fn input_device_ids<B: AudioBackend>(backend: &B) -> Result<Vec<AudioDeviceID>> {
+/// What the app calls a device whose name can't be read.
+fn unnamed_device(audio_device_id: AudioDeviceID) -> String {
+    format!("Audio device {}", audio_device_id)
+}
+
+/// The devices a poll mutes and reads.
+#[derive(Default)]
+struct InputDevices {
+    /// The devices with input streams, and those whose streams can't be read: they may be
+    /// microphones, so the app mutes and reads them too.
+    ids: Vec<AudioDeviceID>,
+    /// Why the streams of those devices can't be read; a mute reports them as failed.
+    unchecked: HashMap<AudioDeviceID, anyhow::Error>,
+}
+
+/// Lists the input devices. Only a device list that can't be read fails: a device whose
+/// streams can't be read doesn't hide the others.
+fn input_devices<B: AudioBackend>(backend: &B) -> Result<InputDevices> {
     let audio_device_ids = backend.device_ids()?;
     trace!(
         "All {} audio device IDs {:?}",
         audio_device_ids.len(),
         audio_device_ids
     );
-    let mut input_device_ids = vec![];
+    let mut devices = InputDevices::default();
     for id in audio_device_ids {
-        if backend.has_input_channels(id)? {
-            input_device_ids.push(id);
+        match backend.has_input_channels(id) {
+            Ok(true) => devices.ids.push(id),
+            Ok(false) => {}
+            Err(err) => {
+                trace!("Treating audio device {} as an input device: {}", id, err);
+                devices.ids.push(id);
+                devices.unchecked.insert(id, err);
+            }
         }
     }
 
     trace!(
         "Filtered list to {} input device IDs {:?}",
-        input_device_ids.len(),
-        input_device_ids
+        devices.ids.len(),
+        devices.ids
     );
-    Ok(input_device_ids)
+    Ok(devices)
 }
 
 /// The device's state as `control` reads it: its native mute, or whether its input volume is
@@ -1141,7 +1164,7 @@ pub struct MicController<B = CoreAudioBackend> {
 impl<B: AudioBackend> Debug for MicController<B> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
         f.debug_struct("MicController")
-            .field("names", &self.names().unwrap_or_default())
+            .field("names", &self.names())
             .field("muted", &self.muted)
             .field("desired_muted", &self.desired_muted)
             .finish()
@@ -1151,7 +1174,7 @@ impl<B: AudioBackend> Debug for MicController<B> {
 impl MicController<CoreAudioBackend> {
     /// A controller for the real devices, with its records in the settings folder. It leaves
     /// alone the devices whose UIDs `excluded` lists.
-    pub fn new(excluded: BTreeSet<String>) -> Result<Self> {
+    pub fn new(excluded: BTreeSet<String>) -> Self {
         Self::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(state_file(JOURNAL_FILE_NAME)),
@@ -1162,12 +1185,15 @@ impl MicController<CoreAudioBackend> {
 }
 
 impl<B: AudioBackend> MicController<B> {
+    /// Never fails, so the app starts with a working tray and shortcut: a device it can't read
+    /// counts as unmuted, and a device list it can't read leaves it without devices. Every poll
+    /// lists and reads them again.
     fn with_backend(
         backend: B,
         journal: RestoreJournal,
         levels: InputLevels,
         excluded: BTreeSet<String>,
-    ) -> Result<Self> {
+    ) -> Self {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
@@ -1187,22 +1213,23 @@ impl<B: AudioBackend> MicController<B> {
             backend,
         };
         trace!("Creating audio controller");
-        let names = controller.names()?;
+        let names = controller.names();
         trace!("Found {} devices: {}", names.len(), names.join(", "));
         // Undo what an unclean exit left behind before the hardware state becomes user intent.
         controller.restore_after_unclean_exit();
         let ids = match controller.get_input_device_ids() {
             Ok(ids) => ids,
             Err(err) => {
-                trace!("Could not list input devices to record levels: {}", err);
+                // Every poll lists them again, and mutes or watches them once it can.
+                error!("Failed to list the input devices at launch: {}", err);
                 Vec::new()
             }
         };
         controller.record_audible_levels(&ids);
-        controller.muted = controller.is_muted_all()?;
+        controller.muted = controller.is_muted_all();
         controller.desired_muted = controller.muted;
         controller.refresh_device_states(&ids, Instant::now());
-        Ok(controller)
+        controller
     }
 
     fn restore_after_unclean_exit(&mut self) {
@@ -1245,18 +1272,28 @@ impl<B: AudioBackend> MicController<B> {
         }
     }
 
-    fn names(&self) -> Result<Vec<String>> {
-        let mut names = vec![];
-        let ids = self.backend.device_ids()?;
-        for id in ids {
-            let name = self.backend.device_name(id)?;
-            names.push(format!("{}: {}", id, name));
-        }
-        Ok(names)
+    /// "id: name" for every device, for the log; a name that can't be read gets a stand-in.
+    fn names(&self) -> Vec<String> {
+        let ids = match self.backend.device_ids() {
+            Ok(ids) => ids,
+            Err(err) => {
+                trace!("Could not list audio devices: {}", err);
+                return Vec::new();
+            }
+        };
+        ids.into_iter()
+            .map(|id| {
+                let name = self
+                    .backend
+                    .device_name(id)
+                    .unwrap_or_else(|_| unnamed_device(id));
+                format!("{}: {}", id, name)
+            })
+            .collect()
     }
 
     fn get_input_device_ids(&self) -> Result<Vec<AudioDeviceID>> {
-        input_device_ids(&self.backend)
+        Ok(input_devices(&self.backend)?.ids)
     }
 
     /// What writes showed about the device. Reads its UID only when anything is known.
@@ -1291,14 +1328,31 @@ impl<B: AudioBackend> MicController<B> {
         Ok(Reading::State(control, state))
     }
 
-    fn is_muted_all(&self) -> Result<bool> {
+    /// Whether at least one device the app controls reads muted, and every such device does. A
+    /// device or a device list it can't read makes it false: the app never shows muted when it
+    /// can't tell.
+    fn is_muted_all(&self) -> bool {
+        let ids = match self.get_input_device_ids() {
+            Ok(ids) => ids,
+            Err(err) => {
+                trace!("Could not list input devices to read them: {}", err);
+                return false;
+            }
+        };
         let mut readings = Vec::new();
-        for id in self.get_input_device_ids()? {
-            let reading = self.read_device(id, &device_key(&self.backend, id))?;
-            trace!("Input device {} reads {:?}", id, reading);
-            readings.push(reading);
+        for id in ids {
+            match self.read_device(id, &device_key(&self.backend, id)) {
+                Ok(reading) => {
+                    trace!("Input device {} reads {:?}", id, reading);
+                    readings.push(reading);
+                }
+                Err(err) => {
+                    trace!("Could not read audio device {}: {}", id, err);
+                    return false;
+                }
+            }
         }
-        Ok(are_controlled_devices_muted(readings))
+        are_controlled_devices_muted(readings)
     }
 
     /// Mutes or unmutes one device the user hasn't excluded. Returns `None` when the device is
@@ -1632,7 +1686,7 @@ impl<B: AudioBackend> MicController<B> {
         if let Some(listeners) = &self.listeners {
             listeners.signal.set_enforcing_mute(state);
         }
-        let ids = self.get_input_device_ids()?;
+        let InputDevices { ids, mut unchecked } = input_devices(&self.backend)?;
         self.note_input_devices(&ids);
         // Before any write, so a change from here on wakes the loop.
         self.sync_listeners(&ids, now);
@@ -1642,7 +1696,17 @@ impl<B: AudioBackend> MicController<B> {
         let mut polled = Vec::with_capacity(ids.len());
         self.failed_devices.clear();
         for id in &ids {
-            let name = self.backend.device_name(*id)?;
+            let (name, name_failure) = match self.backend.device_name(*id) {
+                Ok(name) => (name, None),
+                Err(err) => (
+                    unnamed_device(*id),
+                    Some(anyhow!(
+                        "name of audio device {} is unreadable: {}",
+                        id,
+                        err
+                    )),
+                ),
+            };
             let key = device_key(&self.backend, *id);
             if self.is_excluded(&key) {
                 trace!(
@@ -1654,23 +1718,31 @@ impl<B: AudioBackend> MicController<B> {
                 polled.push((*id, name, key));
                 continue;
             }
+            // A device whose input streams or name can't be read may still be a live
+            // microphone: the app changes it like the others, and the pass reports it as failed.
+            let mut device_failures: Vec<anyhow::Error> = unchecked
+                .remove(id)
+                .into_iter()
+                .chain(name_failure)
+                .collect();
             trace!("Setting mute={} for {}", state, name);
             match self.mute(*id, &name, &key, state, now) {
                 Ok(Some(_)) => trace!("Successfully {} audio device {}: {}", end_state, id, name),
                 Ok(None) => trace!("Skipped audio device {}: {}", id, name),
-                Err(err) => {
-                    // The combined error below carries this failure, and the event loop logs
-                    // it through `update_failures`; per poll, this line is detail.
-                    trace!(
-                        "Failed to {} audio device {}: {}: {}",
-                        action,
-                        id,
-                        name,
-                        err
-                    );
-                    failures.push(format!("{} ({})", name, err));
-                    self.failed_devices.insert(key.clone());
-                }
+                Err(err) => device_failures.push(err),
+            }
+            if let Some(err) = combined_error(device_failures) {
+                // The combined error below carries this failure, and the event loop logs it
+                // through `update_failures`; per poll, this line is detail.
+                trace!(
+                    "Failed to {} audio device {}: {}: {}",
+                    action,
+                    id,
+                    name,
+                    err
+                );
+                failures.push(format!("{} ({})", name, err));
+                self.failed_devices.insert(key.clone());
             }
             polled.push((*id, name, key));
         }
@@ -1771,7 +1843,7 @@ impl<B: AudioBackend> MicController<B> {
         self.released_excluded
             .retain(|key| is_excluded_by(excluded, key));
         self.release_newly_excluded(&newly_excluded);
-        self.muted = self.is_muted_all().unwrap_or(false);
+        self.muted = self.is_muted_all();
         self.snapshot.is_stale = true;
         true
     }
@@ -1816,7 +1888,7 @@ impl<B: AudioBackend> MicController<B> {
         for id in ids {
             let name = self.backend.device_name(*id).unwrap_or_else(|err| {
                 trace!("Could not read the name of audio device {}: {}", id, err);
-                format!("Audio device {}", id)
+                unnamed_device(*id)
             });
             let key = device_key(&self.backend, *id);
             let reading = self.read_device(*id, &key);
@@ -1884,7 +1956,7 @@ impl<B: AudioBackend> MicController<B> {
             );
         }
 
-        self.muted = self.is_muted_all().unwrap_or(false);
+        self.muted = self.is_muted_all();
         self.desired_muted = self.muted;
 
         if failures.is_empty() {
@@ -2160,6 +2232,8 @@ mod tests {
         /// Whether `mute` can be set; a readable native mute may still be read-only.
         mute_settable: bool,
         volume: Option<f32>,
+        /// Reading its name fails.
+        fail_name: bool,
         fail_uid: bool,
         fail_input_channels: bool,
         /// Reading the native mute fails, as for a device that stops responding.
@@ -2181,6 +2255,7 @@ mod tests {
                 mute,
                 mute_settable: mute.is_some(),
                 volume,
+                fail_name: false,
                 fail_uid: false,
                 fail_input_channels: false,
                 fail_get_mute: false,
@@ -2255,6 +2330,8 @@ mod tests {
     struct FakeBackend {
         devices: HashMap<AudioDeviceID, Device>,
         ids: Vec<AudioDeviceID>,
+        /// Makes `device_ids` fail, as when the device list can't be read.
+        fail_device_ids: bool,
         /// When set, each device write records whether this journal store named the device.
         journal_probe: Option<MemoryStore>,
         journaled_at_write: Vec<(AudioDeviceID, bool)>,
@@ -2356,11 +2433,18 @@ mod tests {
 
     impl AudioBackend for FakeBackend {
         fn device_ids(&self) -> Result<Vec<AudioDeviceID>> {
+            if self.fail_device_ids {
+                return Err(anyhow!("fake device list failure"));
+            }
             Ok(self.ids.clone())
         }
 
         fn device_name(&self, audio_device_id: AudioDeviceID) -> Result<String> {
-            Ok(self.device(audio_device_id)?.name.clone())
+            let device = self.device(audio_device_id)?;
+            if device.fail_name {
+                return Err(anyhow!("fake name failure"));
+            }
+            Ok(device.name.clone())
         }
 
         fn device_uid(&self, audio_device_id: AudioDeviceID) -> Result<String> {
@@ -2519,7 +2603,6 @@ mod tests {
                 InputLevels::load(self.levels.boxed()),
                 uids(excluded),
             )
-            .unwrap()
         }
 
         fn journal_json(&self) -> serde_json::Value {
@@ -2535,14 +2618,13 @@ mod tests {
     fn test_mic_controller_new() {
         // Reads the real devices; in-memory records keep the real files out of it.
         let stores = Stores::default();
-        let result = MicController::with_backend(
+        MicController::with_backend(
             CoreAudioBackend,
             RestoreJournal::load(stores.journal.boxed()),
             InputLevels::load(stores.levels.boxed()),
             BTreeSet::new(),
         );
 
-        assert!(result.is_ok());
         assert_eq!(stores.journal.saves(), 0);
         assert_eq!(stores.levels.saves(), 0);
     }
@@ -3677,6 +3759,140 @@ mod tests {
         assert!(failures.is_empty());
         assert_eq!(backend.device(1).unwrap().mute, Some(false));
         assert_eq!(backend.device(2).unwrap().volume, Some(0.65));
+        assert_eq!(stores.journal.contents(), None);
+    }
+
+    // Devices and device lists that can't be read
+
+    #[test]
+    fn devices_whose_name_streams_or_mute_cant_be_read_dont_stop_the_launch() {
+        let mut unnamed = Device::native("Unnamed", true);
+        unnamed.fail_name = true;
+        let mut unchecked = Device::fallback("USB Mic", 0.0);
+        unchecked.fail_input_channels = true;
+        let mut unreadable = Device::native("Headset", true);
+        unreadable.fail_get_mute = true;
+        let backend = FakeBackend::with_devices(vec![
+            (1, unnamed),
+            (2, unchecked),
+            (3, unreadable),
+            (4, Device::native("Built-in", true)),
+        ]);
+
+        let controller = controller(backend);
+
+        use DeviceStatus::*;
+        assert_eq!(
+            statuses(&controller),
+            [
+                ("Audio device 1", Muted),
+                ("USB Mic", MutedByVolume),
+                ("Headset", Failed),
+                ("Built-in", Muted),
+            ]
+        );
+        assert!(
+            !controller.muted,
+            "a device it can't read never shows as muted"
+        );
+        assert!(!controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn a_device_whose_input_streams_cant_be_read_is_muted_with_the_others_and_reported() {
+        let mut controller = controller(native_and_volume_devices());
+        controller
+            .backend
+            .device_mut(2)
+            .unwrap()
+            .fail_input_channels = true;
+
+        let err = controller.mute_all(true).unwrap_err();
+
+        assert!(err.to_string().contains("USB Mic"), "{err}");
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        // It may be a microphone, so it is muted too.
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        assert!(controller.muted);
+        assert_eq!(
+            status_of(&controller, "USB Mic"),
+            Some(DeviceStatus::Failed)
+        );
+
+        // The next poll reads it again.
+        controller
+            .backend
+            .device_mut(2)
+            .unwrap()
+            .fail_input_channels = false;
+        controller.toggle(Some(true)).unwrap();
+        assert_eq!(
+            status_of(&controller, "USB Mic"),
+            Some(DeviceStatus::MutedByVolume)
+        );
+    }
+
+    #[test]
+    fn a_device_whose_name_cant_be_read_is_muted_with_the_others_and_reported() {
+        let mut controller = controller(native_and_volume_devices());
+        controller.backend.device_mut(1).unwrap().fail_name = true;
+
+        let err = controller.mute_all(true).unwrap_err();
+
+        assert!(err.to_string().contains("Audio device 1"), "{err}");
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        assert!(controller.muted);
+        assert_eq!(
+            status_of(&controller, "Audio device 1"),
+            Some(DeviceStatus::Failed)
+        );
+
+        controller.backend.device_mut(1).unwrap().fail_name = false;
+        controller.toggle(Some(true)).unwrap();
+        assert_eq!(
+            status_of(&controller, "Built-in"),
+            Some(DeviceStatus::Muted)
+        );
+    }
+
+    #[test]
+    fn a_device_list_that_cant_be_read_at_launch_leaves_no_devices_until_a_poll_reads_it() {
+        let mut backend = native_and_volume_devices();
+        backend.fail_device_ids = true;
+
+        let mut controller = controller(backend);
+
+        assert!(!controller.muted);
+        assert!(controller.device_states().is_empty());
+
+        // The user mutes; the poll keeps trying until it can list the devices.
+        assert!(controller.mute_all(true).is_err());
+        assert!(controller.should_enforce_mute());
+        controller.backend.fail_device_ids = false;
+        controller.toggle(Some(true)).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+    }
+
+    #[test]
+    fn a_journal_left_by_an_unclean_exit_waits_for_a_poll_that_can_list_the_devices() {
+        let stores = Stores::default();
+        let mut crashed = stores.launch(native_and_volume_devices());
+        crashed.mute_all(true).unwrap();
+        let mut backend = crashed.backend;
+        backend.fail_device_ids = true;
+
+        let mut relaunched = stores.launch(backend);
+
+        assert_eq!(relaunched.journal.len(), 2);
+        relaunched.backend.fail_device_ids = false;
+        relaunched.watch_unmuted();
+
+        assert_eq!(relaunched.backend.device(1).unwrap().mute, Some(false));
+        assert_eq!(relaunched.backend.device(2).unwrap().volume, Some(0.65));
         assert_eq!(stores.journal.contents(), None);
     }
 

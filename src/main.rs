@@ -92,7 +92,8 @@ fn main() {
         }
     }
 
-    let controller = MicController::new(settings.excluded_uids()).unwrap();
+    // Never fails: devices it can't read yet count as failed, and every poll tries them again.
+    let controller = MicController::new(settings.excluded_uids());
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
 
