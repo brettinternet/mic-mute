@@ -17,6 +17,8 @@ then launches it.
 
 Options:
   --user         install to ~/Applications instead of /Applications
+  --universal    build one app for Apple silicon and Intel Macs (two builds,
+                 combined with lipo); the default builds for this Mac only
   --skip-checks  skip the cargo fmt, clippy, and test gates
   --no-launch    don't start the app after installing
   --bundle-only  stop after building, signing, and verifying the bundle
@@ -33,13 +35,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/common.sh"
 source "$SCRIPT_DIR/cargo-tools.env"
 
-readonly TARGET="aarch64-apple-darwin"
+readonly ARM64_TARGET="aarch64-apple-darwin"
+readonly X86_64_TARGET="x86_64-apple-darwin"
+# cargo bundle names the output directory of a bundle built for several targets.
+readonly UNIVERSAL_DIR="universal"
 readonly MIN_MACOS_MAJOR=11
 readonly LAUNCH_TIMEOUT_SECONDS=15
 # Name of the replaced bundle inside the staging directory, until it's deleted.
 readonly PREVIOUS_NAME="previous.app"
 
 USER_SCOPE=0
+UNIVERSAL=0
+# The Rust targets to build: this Mac's, or both with --universal.
+TARGETS=()
 SKIP_CHECKS=0
 NO_LAUNCH=0
 BUNDLE_ONLY=0
@@ -52,6 +60,7 @@ parse_args() {
   while (($# > 0)); do
     case "$1" in
       --user) USER_SCOPE=1 ;;
+      --universal) UNIVERSAL=1 ;;
       --skip-checks) SKIP_CHECKS=1 ;;
       --no-launch) NO_LAUNCH=1 ;;
       --bundle-only) BUNDLE_ONLY=1 ;;
@@ -69,15 +78,44 @@ parse_args() {
   done
 }
 
+# The Rust target of this Mac's CPU. sysctl reports Apple silicon also to a shell
+# that runs under Rosetta, so the app isn't built for translation by mistake.
+native_target() {
+  if [[ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" == 1 ]]; then
+    printf '%s\n' "$ARM64_TARGET"
+  else
+    printf '%s\n' "$X86_64_TARGET"
+  fi
+}
+
+# The architecture name lipo reports for a Rust target.
+lipo_arch() {
+  case "$1" in
+    "$ARM64_TARGET") printf 'arm64\n' ;;
+    "$X86_64_TARGET") printf 'x86_64\n' ;;
+    *) die "no Mach-O architecture is known for $1" ;;
+  esac
+}
+
 check_platform() {
-  local version
+  local version native
   require_macos_user
   version="$(sw_vers -productVersion)"
   ((${version%%.*} >= MIN_MACOS_MAJOR)) ||
     die "macOS $MIN_MACOS_MAJOR or later is required (found $version)"
-  [[ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" == 1 ]] ||
-    die "an Apple silicon Mac is required: the app is built for $TARGET"
-  info "macOS $version on Apple silicon"
+  native="$(native_target)"
+  if [[ "$native" == "$ARM64_TARGET" ]]; then
+    info "macOS $version on Apple silicon"
+  else
+    info "macOS $version on an Intel Mac"
+  fi
+  if ((UNIVERSAL)); then
+    TARGETS=("$ARM64_TARGET" "$X86_64_TARGET")
+    info "Building a universal app for Apple silicon and Intel Macs"
+  else
+    TARGETS=("$native")
+    info "Building for this Mac ($native); --universal adds the other architecture"
+  fi
 }
 
 check_developer_tools() {
@@ -86,29 +124,33 @@ check_developer_tools() {
   [[ -n "$developer_dir" && -d "$developer_dir" ]] ||
     die "the Xcode Command Line Tools are missing; install them with: xcode-select --install"
   info "Developer tools: $developer_dir"
-  for tool in codesign ditto plutil pgrep pkill open; do
+  for tool in codesign ditto lipo plutil pgrep pkill open; do
     command -v "$tool" >/dev/null || die "$tool not found"
   done
   [[ -x "$PLIST_BUDDY" ]] || die "$PLIST_BUDDY not found"
 }
 
 check_rust() {
-  local installed host
+  local installed host target
   command -v cargo >/dev/null ||
     die "cargo not found; install Rust with rustup (https://rustup.rs) or run: mise install"
   info "$(cargo --version)"
   if command -v rustup >/dev/null; then
     installed="$(rustup target list --installed)"
-    if grep -qxF "$TARGET" <<<"$installed"; then
-      info "Rust target $TARGET is installed"
-    else
-      run rustup target add "$TARGET"
-    fi
+    for target in "${TARGETS[@]}"; do
+      if grep -qxF "$target" <<<"$installed"; then
+        info "Rust target $target is installed"
+      else
+        run rustup target add "$target"
+      fi
+    done
   else
     host="$(rustc -vV | sed -n 's/^host: //p')"
-    [[ "$host" == "$TARGET" ]] ||
-      die "rustc builds for ${host:-an unknown host}, and rustup isn't available to add $TARGET"
-    info "Rust host target is $TARGET"
+    for target in "${TARGETS[@]}"; do
+      [[ "$host" == "$target" ]] ||
+        die "rustc builds for ${host:-an unknown host}, and rustup isn't available to add $target"
+    done
+    info "Rust host target is $host"
   fi
   if ((!SKIP_CHECKS)); then
     cargo fmt --version >/dev/null 2>&1 ||
@@ -194,17 +236,50 @@ verify_info_plist() {
     "macOS $(plist_value "$plist" LSMinimumSystemVersion) or later"
 }
 
+# Checks that the bundled executable holds exactly one slice per built target.
+verify_architectures() {
+  local executable="$BUNDLE/Contents/MacOS/$EXECUTABLE" archs target
+  local -a slices
+  archs="$(lipo -archs "$executable")" || die "lipo couldn't read $executable"
+  read -r -a slices <<<"$archs"
+  ((${#slices[@]} == ${#TARGETS[@]})) ||
+    die "$executable has the architectures '$archs', expected one per target: ${TARGETS[*]}"
+  for target in "${TARGETS[@]}"; do
+    [[ " $archs " == *" $(lipo_arch "$target") "* ]] ||
+      die "$executable lacks $(lipo_arch "$target") (lipo -archs: $archs)"
+  done
+  info "Architectures: $archs"
+}
+
 build_bundle() {
-  local target_dir
+  local target_dir target out_dir binary
+  local -a slices=() bundle_targets=()
   target_dir="$(cargo_target_dir)"
-  BUNDLE="$target_dir/$TARGET/release/bundle/osx/$BUNDLE_NAME"
   step "Building $BUNDLE_NAME"
-  run cargo build --locked --release --target "$TARGET"
+  for target in "${TARGETS[@]}"; do
+    run cargo build --locked --release --target "$target"
+    slices+=("$target_dir/$target/release/$EXECUTABLE")
+    bundle_targets+=(--target "$target")
+  done
+  if ((UNIVERSAL)); then
+    # cargo bundle writes a bundle for several targets under target/universal and can lipo
+    # by itself, but only after building without --locked; combine the builds above instead.
+    out_dir="$target_dir/$UNIVERSAL_DIR/release"
+    binary="$out_dir/$EXECUTABLE"
+    if [[ ! -d "$out_dir" ]]; then
+      run mkdir -p "$out_dir"
+    fi
+    run lipo -create -output "$binary" "${slices[@]}"
+  else
+    out_dir="$target_dir/${TARGETS[0]}/release"
+    binary="${slices[0]}"
+  fi
+  BUNDLE="$out_dir/bundle/osx/$BUNDLE_NAME"
   # --binary-path bundles the --locked build above instead of rebuilding without --locked.
-  run cargo bundle --release --target "$TARGET" --format osx \
-    --binary-path "$target_dir/$TARGET/release/$EXECUTABLE"
+  run cargo bundle --release "${bundle_targets[@]}" --format osx --binary-path "$binary"
   if ((!DRY_RUN)); then
     verify_info_plist
+    verify_architectures
   fi
 
   step "Signing (ad hoc)"

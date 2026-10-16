@@ -88,11 +88,11 @@ I have not elected to sign the app by joining the Apple Developer Program. The r
 
 [View releases](https://github.com/brettinternet/mic-mute/releases)
 
-Pushing a version tag that matches `Cargo.toml` (for example `0.6.0`) runs the [Release workflow](./.github/workflows/release.yaml) on a macOS runner: the `task install` checks, an ad-hoc signed build, and a GitHub release with a DMG, `SHA256SUMS`, and a build provenance attestation. Running the workflow by hand with an existing tag republishes that release; without a tag, it only uploads the files as a workflow artifact. These builds aren't notarized, so macOS blocks the first launch until you choose **Open Anyway** in System Settings → Privacy & Security. To verify a download:
+Pushing a version tag that matches `Cargo.toml` (for example `0.6.0`) runs the [Release workflow](./.github/workflows/release.yaml) on a macOS runner: the `task install` checks, an ad-hoc signed universal build that runs on Apple silicon and Intel Macs, and a GitHub release with a DMG, `SHA256SUMS`, and a build provenance attestation. Running the workflow by hand with an existing tag republishes that release; without a tag, it only uploads the files as a workflow artifact. These builds aren't notarized, so macOS blocks the first launch until you choose **Open Anyway** in System Settings → Privacy & Security. To verify a download:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-gh attestation verify mic-mute-<version>-aarch64-apple-darwin.dmg --repo <owner>/mic-mute
+gh attestation verify mic-mute-<version>-universal-apple-darwin.dmg --repo <owner>/mic-mute
 ```
 
 ## Build
@@ -107,13 +107,14 @@ Build the app, install it to `/Applications`, and launch it:
 task install
 ```
 
-[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later on Apple silicon, the Xcode Command Line Tools, and the `aarch64-apple-darwin` Rust target, and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login LaunchAgent at it (on macOS 13 and later, the app replaces that with a login item when it starts), and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
+[`scripts/install.sh`](./scripts/install.sh) checks for macOS 11 or later, the Xcode Command Line Tools, and the Rust target of your Mac (`aarch64-apple-darwin` on Apple silicon, `x86_64-apple-darwin` on Intel), and installs the pinned cargo-bundle. It runs `cargo fmt --check`, clippy, and the tests, bundles and ad-hoc signs `Mic Mute.app`, and stops a running Mic Mute with SIGTERM, which restores the microphones. Then it replaces the installed copy atomically, points an existing Launch at Login LaunchAgent at it (on macOS 13 and later, the app replaces that with a login item when it starts), and launches it. Run it again to update. A locally built app isn't quarantined, so Gatekeeper doesn't block it.
 
 Pass flags after `--`, for example `task install -- --user`:
 
 | Flag | Effect |
 | --- | --- |
 | `--user` | Install to `~/Applications` instead of `/Applications` |
+| `--universal` | Build one app for Apple silicon and Intel Macs: a build per architecture, combined with `lipo`. Without it, the app is built for your Mac only, which is faster |
 | `--skip-checks` | Skip the fmt, clippy, and test gates |
 | `--no-launch` | Don't start the app after installing |
 | `--bundle-only` | Stop after building, signing, and verifying the bundle |
@@ -136,7 +137,7 @@ Build and bundle the app without installing it:
 task build
 ```
 
-Once the build is complete, a Finder window opens to the bundle in `./target/aarch64-apple-darwin/release/bundle/osx` (`NO_OPEN=1 task build` skips it).
+It builds for your Mac and signs the bundle ad hoc. Once the build is complete, a Finder window opens to the bundle in `./target/aarch64-apple-darwin/release/bundle/osx` (`x86_64-apple-darwin` on an Intel Mac; `NO_OPEN=1 task build` skips it). `UNIVERSAL=1 task build` builds for Apple silicon and Intel and puts the bundle in `./target/universal/release/bundle/osx`.
 
 ## Develop
 
@@ -178,7 +179,7 @@ cat sign.key >> sign.crt
 rm sign.key
 ```
 
-Build a release.
+Build a release: a universal DMG for Apple silicon and Intel Macs.
 
 ```sh
 task release
