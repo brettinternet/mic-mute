@@ -15,7 +15,8 @@ use crate::utils::write_atomically;
 use anyhow::{anyhow, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2::ClassType;
+use objc2::{ClassType, MainThreadMarker};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::NSError;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use std::ffi::OsStr;
@@ -140,17 +141,23 @@ fn publish(state: Option<LoginItemState>) {
     NEEDS_APPROVAL.store(needs_approval, Ordering::Relaxed);
 }
 
-/// Toggle the app's dock icon visibility at runtime.
+/// Toggle the app's dock icon visibility at runtime. Main thread only, like every AppKit call;
+/// elsewhere it logs instead.
 ///
 /// `true`  → NSApplicationActivationPolicyRegular (shows in Dock + Cmd-Tab)
 /// `false` → NSApplicationActivationPolicyAccessory (no Dock icon, default)
 pub fn set_dock_visible(visible: bool) {
-    // NSApplicationActivationPolicyRegular = 0
-    // NSApplicationActivationPolicyAccessory = 1
-    let policy: i64 = if visible { 0 } else { 1 };
-    unsafe {
-        let app: cocoa::base::id = objc::msg_send![objc::class!(NSApplication), sharedApplication];
-        let _: () = objc::msg_send![app, setActivationPolicy: policy];
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::error!("Failed to show or hide the Dock icon: not on the main thread");
+        return;
+    };
+    let policy = if visible {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if !NSApplication::sharedApplication(mtm).setActivationPolicy(policy) {
+        log::warn!("macOS refused the activation policy {:?}", policy);
     }
 }
 

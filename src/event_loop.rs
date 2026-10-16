@@ -329,7 +329,7 @@ pub fn start(
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
         let active =
-            objc::rc::autoreleasepool(|| camera_bg.read().is_running_anywhere().unwrap_or(false));
+            objc2::rc::autoreleasepool(|_| camera_bg.read().is_running_anywhere().unwrap_or(false));
         proxy_camera
             .send_event(Message::CameraStateChanged(active))
             .ok();

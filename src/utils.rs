@@ -1,7 +1,8 @@
-use anyhow::bail;
-use cocoa::base::{id, nil, BOOL, NO};
-use cocoa::foundation::NSString;
+use anyhow::{bail, Context};
 use libc::c_void;
+use objc2::rc::{autoreleasepool, Retained};
+use objc2_app_kit::NSWorkspace;
+use objc2_foundation::{NSString, NSURL};
 use parking_lot::RwLock;
 use std::fs;
 use std::io::{self, Write};
@@ -33,27 +34,16 @@ pub fn open_sound_input_settings() -> anyhow::Result<()> {
 
 /// Asks NSWorkspace to open `url`; returns whether an app took it.
 fn open_url(url: &str) -> anyhow::Result<bool> {
-    objc::rc::autoreleasepool(|| unsafe {
+    autoreleasepool(|_| {
         let ns_url = ns_url(url)?;
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let is_opened: BOOL = msg_send![workspace, openURL: ns_url];
-        Ok(is_opened != NO)
+        Ok(NSWorkspace::sharedWorkspace().openURL(&ns_url))
     })
 }
 
-/// `url` as an autoreleased `NSURL`.
-///
-/// # Safety
-///
-/// Call it inside an autorelease pool, which owns the result.
-unsafe fn ns_url(url: &str) -> anyhow::Result<id> {
-    let string = NSString::alloc(nil).init_str(url);
-    let ns_url: id = msg_send![class!(NSURL), URLWithString: string];
-    let _: () = msg_send![string, release];
-    if ns_url.is_null() {
-        bail!("{} isn't a valid URL", url);
-    }
-    Ok(ns_url)
+/// `url` as an `NSURL`.
+fn ns_url(url: &str) -> anyhow::Result<Retained<NSURL>> {
+    NSURL::URLWithString(&NSString::from_str(url))
+        .with_context(|| format!("{} isn't a valid URL", url))
 }
 
 type CGFloat = f64;
@@ -148,7 +138,7 @@ mod tests {
     fn sound_settings_urls_are_valid_urls() {
         // Only builds the NSURLs; nothing is opened.
         for url in SOUND_INPUT_SETTINGS_URLS {
-            let is_valid = objc::rc::autoreleasepool(|| unsafe { ns_url(url).is_ok() });
+            let is_valid = autoreleasepool(|_| ns_url(url).is_ok());
             assert!(is_valid, "{url}");
         }
     }
