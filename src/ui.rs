@@ -4,6 +4,7 @@ use crate::feedback::{Feedback, MicUpdate};
 use crate::mic::DeviceState;
 use crate::popup::{Popup, PopupLayout};
 use crate::settings::{ExcludedDevice, Settings};
+use crate::settings_window::SettingsChange;
 use crate::shortcuts::Shortcuts;
 use crate::tray::Tray;
 use anyhow::{Context, Result};
@@ -85,6 +86,7 @@ impl UI {
             button_launch_at_login: tray.launch_at_login_id().clone(),
             button_show_in_dock: tray.show_in_dock_id().clone(),
             button_show_popup: tray.show_popup_id().clone(),
+            button_settings_window: tray.settings_window_id().clone(),
             button_about: tray.about_id().clone(),
             button_quit: tray.quit_id().clone(),
             button_open_sound_settings: tray.open_sound_settings_id().clone(),
@@ -183,6 +185,44 @@ impl UI {
         Ok(())
     }
 
+    /// Applies one setting the Settings window changed; `settings` already holds it. Only the
+    /// part of the app that uses the setting is touched: unlike `apply_settings`, a change to
+    /// another setting doesn't push `launch_at_login` to macOS again.
+    pub fn apply_window_change(
+        &mut self,
+        change: &SettingsChange,
+        settings: &Settings,
+    ) -> Result<()> {
+        match change {
+            SettingsChange::Shortcut(config) => {
+                // An invalid or unregistrable shortcut keeps the registered one, and the
+                // shortcut's status says why; the tray shows whichever is registered.
+                let reloaded = self.shortcuts.reload(config);
+                self.sync_shortcut();
+                reloaded?;
+            }
+            SettingsChange::LaunchAtLogin(enabled) => self.set_launch_at_login(*enabled),
+            SettingsChange::ShowInDock(visible) => {
+                self.tray.show_in_dock.set_checked(*visible);
+                crate::launch_at_login::set_dock_visible(*visible);
+            }
+            SettingsChange::ShowPopup(enabled) => self.set_popup_enabled(*enabled)?,
+            SettingsChange::PopupPosition(_)
+            | SettingsChange::PopupSize(_)
+            | SettingsChange::PopupMicOnMs(_)
+            | SettingsChange::PlaySound(_)
+            | SettingsChange::ShowNotification(_) => self.apply_feedback(settings),
+            // Read where they're used: the event loop reads these from `settings`.
+            SettingsChange::Mode(_)
+            | SettingsChange::LaunchState(_)
+            | SettingsChange::MuteOnLock(_)
+            | SettingsChange::MuteOnSleep(_)
+            | SettingsChange::MuteOnDisplaySleep(_)
+            | SettingsChange::AllowUrlUnmute(_) => {}
+        }
+        Ok(())
+    }
+
     /// Applies the sound, the notification, and the popup's position, size, and "Mic on" flash,
     /// logging the values the file sets that aren't used as written.
     fn apply_feedback(&mut self, settings: &Settings) {
@@ -245,6 +285,19 @@ impl UI {
         if let Err(e) = self.tray.update_accelerators(registered) {
             log::warn!("Failed to update the tray menu's mute shortcut: {:#}", e);
         }
+    }
+
+    /// Unregisters the mute hotkey while the Settings window records a new shortcut, so the
+    /// recorder hears its keys; `resume_shortcut` registers it again.
+    pub fn suspend_shortcut(&mut self) -> Result<()> {
+        self.shortcuts.suspend()
+    }
+
+    /// Registers the hotkey `suspend_shortcut` unregistered again.
+    pub fn resume_shortcut(&mut self) -> Result<()> {
+        let resumed = self.shortcuts.resume();
+        self.sync_shortcut();
+        resumed
     }
 
     /// The registered mute hotkey's id; 0 when no hotkey is registered.

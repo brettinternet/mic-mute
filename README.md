@@ -8,7 +8,7 @@ A system-wide mute for macOS microphones with a global shortcut and visual confi
 
 ![popup window screenshot indicating the microphone is off](./screenshot.png)
 
-Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray dropdown, or switch the shortcut to [push-to-talk](./docs/settings.md#mode): hold it to talk. See the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
+Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray dropdown, or switch the shortcut to [push-to-talk](./docs/settings.md#mode): hold it to talk. Change the settings in the tray's [Settings window](#settings-window); see the [settings documentation](./docs/settings.md) for the settings location, defaults, and available options.
 
 ## Features
 
@@ -29,8 +29,22 @@ Mute with <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>M</kbd> or from the system tray d
   - [x] List each microphone and its state in the tray's Microphones menu; uncheck one there to [exclude it](./docs/settings.md#excluded_devices)
 - [x] Report whether a camera is in use: a dot on the tray icon (its tooltip says "Camera in use") and a label in the popup (disabling cameras appears to be impossible or too difficult for the scope of this project)
 - [x] Add configurable settings (hotkey, startup, popup visibility)
+- [x] Change every setting in a [Settings window](#settings-window) instead of editing JSON
 - [x] Open app at login: a login item on macOS 13 and later, a LaunchAgent on macOS 11 and 12 (see [Launch at Login](#launch-at-login))
 - [x] Control from other apps and scripts through `com.brettinternet.mic-mute://` URLs
+
+## Settings window
+
+Choose **Settings…** in the tray menu (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) to change the settings without editing `settings.json`:
+
+- **General:** Launch at Login and Show in Dock.
+- **Shortcut:** the mute shortcut in use, and why the configured one isn't, if it isn't; **Change…** records a new one when you press it; toggle or push-to-talk mode.
+- **Popup:** whether it shows while muted, its position and size, and how long it shows "Mic on" after an unmute.
+- **Feedback:** a sound and a notification when the microphones mute or unmute.
+- **Automatic mute:** what a launch does, and muting on screen lock, sleep, and display sleep.
+- **External control:** whether URLs may unmute the microphones.
+
+Each change applies and is saved at once, like the tray's toggles, and the window shows changes made elsewhere: in the tray, with About → Reset Settings, or in `settings.json` itself. Muting, the shortcut, and settings reloads keep working while it's open. Choose the microphones Mic Mute mutes in the tray's Microphones menu. If `settings.json` is invalid, the top of the window shows the error with the file's path, line, and column, and a button that opens the file; changes made in the window then apply but aren't saved until the file is fixed. See [Settings window](./docs/settings.md#settings-window) for details.
 
 ## Control from other apps
 

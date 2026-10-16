@@ -8,7 +8,7 @@ Mic Mute stores its settings at:
 
 The settings file shares its folder with three files Mic Mute manages itself, none of them a setting: `restore.json`, which exists only while microphones it muted still need restoring (the next launch restores them after a crash); `input-levels.json`, which remembers the last audible input level of each microphone it mutes by volume; and `mute-state.json`, which remembers whether you last muted or unmuted, for [`launch_state`](#launch_state).
 
-The file is JSON. The complete default configuration is:
+The tray menu's **Settings…** item opens a [Settings window](#settings-window) that changes every option below except `excluded_devices`, which the tray's Microphones menu edits. The file is JSON. The complete default configuration is:
 
 ```json
 {
@@ -53,7 +53,7 @@ If the shortcut is invalid or macOS can't register it, Mic Mute logs an error an
 - At startup, it uses the default, `Cmd` + `Shift` + `M`. If that can't be registered either, Mic Mute runs without a shortcut; mute from the tray menu.
 - When the settings file is reloaded, the shortcut already in use stays active.
 
-The tray menu and the About window show the shortcut in use, and the About window explains why the configured one isn't in use.
+The tray menu, the About window, and the Settings window show the shortcut in use, and both windows explain why the configured one isn't in use. To change the shortcut without editing the file, [record it](#recording-a-shortcut) in the Settings window.
 
 ### `show_in_dock`
 
@@ -215,18 +215,39 @@ The tray menu's **Microphones** submenu edits this list. It shows every connecte
 
 About → Reset Settings empties the list.
 
+## Settings window
+
+The tray menu's **Settings…** item (<kbd>Cmd</kbd> <kbd>,</kbd> while the menu is open) opens a window with a control for every option above except `excluded_devices`, grouped as General (`launch_at_login`, `show_in_dock`), Shortcut (`mic_shortcut`, which you [record](#recording-a-shortcut), and `mode`), Popup (`show_popup`, `popup_position`, `popup_size`, `popup_mic_on_ms`), Feedback (`play_sound`, `show_notification`), Automatic mute (`launch_state`, `mute_on_lock`, `mute_on_sleep`, `mute_on_display_sleep`), and External control (`allow_url_unmute`, with a warning). Choosing Settings… again brings the open window to the front.
+
+- Each change applies and is saved at once, like a tray toggle. The "Mic on" field takes whole milliseconds when you press Return or Tab or click elsewhere; anything else puts the setting's value back, and the stepper moves it by 100 ms.
+- The window shows changes made elsewhere as they apply: tray toggles, About → Reset Settings, and edits to `settings.json`, which Mic Mute reloads within two seconds.
+- Under the shortcut, the window explains why the configured shortcut isn't the one in use, as the About window does, and under the popup settings it lists the [popup values Mic Mute doesn't accept](#popup-values-mic-mute-doesnt-accept) that the file sets. Choosing a value in the window replaces such a value.
+- The window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Only a recording pauses the shortcut.
+- <kbd>Cmd</kbd> <kbd>W</kbd> closes the window, and <kbd>Cmd</kbd> with <kbd>X</kbd>, <kbd>C</kbd>, <kbd>V</kbd>, or <kbd>A</kbd> cuts, copies, pastes, or selects text in it.
+- While `settings.json` is invalid, the top of the window shows the error, with the file's path and the line and column, and an **Open settings.json** button. The controls stay usable: a change applies at once but isn't saved, as with the tray menu (see [Invalid settings](#invalid-settings)).
+
+### Recording a shortcut
+
+Click **Change…** next to the shortcut, then press the new one: hold its modifiers and press its key. The first key that makes a usable shortcut becomes `mic_shortcut`, which is saved and takes effect at once.
+
+- While the window records, the shortcut in use is paused, so pressing it reaches the recorder instead of muting. In `push_to_talk` mode, a hold in progress ends with a mute. The shortcut works again when the recording ends.
+- The recorder takes what `mic_shortcut` takes: a key without modifiers only if it's `F13` or higher. It also refuses `Shift` or `Option`, alone or together, on a key that types or edits text (a letter, a digit, punctuation, the space bar, the keypad, Tab, Return, Delete, and the arrow, Home, End, and page keys): as a shortcut, that combination would stop working in every app's text, so `Shift` + `M` would no longer type a capital M. Add `Ctrl` or `Cmd`. Caps Lock, Fn, and keys macOS hotkeys can't use, such as the JIS Eisu and Kana keys, can't be part of a shortcut.
+- A key it refuses shows why under the shortcut, and the recorder keeps waiting.
+- <kbd>Esc</kbd> without modifiers, **Cancel**, another control, closing the window, switching to another app, and 30 seconds without a key press end the recording without a change. <kbd>Cmd</kbd> <kbd>W</kbd> closes the window even while it records.
+- If macOS can't register the recorded shortcut, for example because another app has it, the shortcut in use stays, and the window says why. `settings.json` keeps the recorded one, as if you had typed it into the file.
+
 ## About window
 
 The tray menu's About item shows the mute shortcut in use, the settings file's location, and the version.
 
 The About window doesn't pause Mic Mute: muting, the shortcut, and settings reloads keep working while it's open. Choosing About again brings the open window to the front, updated if the shortcut in use has changed. Each button closes the window.
 
-- **Open Settings** opens `settings.json` in the default text editor, the app macOS opens plain-text files with: TextEdit, unless you've picked another for `.txt` files (Get Info → Open with → Change All). If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
+- **Open settings.json** opens `settings.json` in the default text editor, the app macOS opens plain-text files with: TextEdit, unless you've picked another for `.txt` files (Get Info → Open with → Change All). If the file doesn't exist yet, as on a fresh install, Mic Mute first writes it with the settings in use, which are then the defaults. An existing file opens as it is, even an invalid one.
 - **Reset Settings** restores every setting to its default, except `launch_at_login`, which mirrors the macOS login item and keeps its value. It also empties `excluded_devices`, so Mic Mute mutes every microphone again, and turns `play_sound` and `show_notification` off; macOS keeps its own answer about Mic Mute's notifications. The defaults apply at once and are saved like any other settings change.
 
 ## Editing settings
 
-Mic Mute checks the file every two seconds and reloads it when its modification time changes. Valid changes apply without a restart. The tray menu writes its setting changes to this file; Mic Mute's own saves don't trigger a reload.
+Mic Mute checks the file every two seconds and reloads it when its modification time changes. Valid changes apply without a restart. The tray menu and the Settings window write their setting changes to this file; Mic Mute's own saves don't trigger a reload.
 
 Fields omitted from the settings file use the documented defaults, including `show_popup: true` and `excluded_devices: []`, and a missing file means every default. Loading settings does not rewrite the file. The file is created or updated when settings are explicitly saved, such as through a tray-menu setting change.
 
@@ -238,8 +259,8 @@ If `settings.json` can't be read or isn't valid settings JSON (a syntax error, a
 
 - It keeps running on the settings it already has: the defaults if the file was invalid at startup, otherwise the last valid settings. Nothing from the broken file is applied.
 - It logs a warning with the file's path and the line and column of the error, once per change to the file.
-- The first tray menu item and the tray tooltip say what's wrong, for example `settings.json is invalid (line 3, column 5) — using defaults` or `settings.json is invalid (line 3, column 5) — keeping previous settings`.
-- It never writes to the broken file. Changes from the tray menu or from About → Reset Settings apply right away but aren't saved, and the log notes each one.
+- The first tray menu item and the tray tooltip say what's wrong, for example `settings.json is invalid (line 3, column 5) — using defaults` or `settings.json is invalid (line 3, column 5) — keeping previous settings`. The Settings window shows the full error, with the file's path, at its top.
+- It never writes to the broken file. Changes from the tray menu, the Settings window, or About → Reset Settings apply right away but aren't saved, and the log notes each one.
 
 Fix the file, or delete it to reset every setting to its default. The next check, within two seconds, applies the file and removes the notice, replacing any unsaved changes made in the meantime.
 

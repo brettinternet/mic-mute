@@ -43,20 +43,27 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # NSWorkspace's center and the distributed center deliver the session events; NSApplication
 # shows or hides the Dock icon; NSURL opens Sound settings.
 objc2 = "0.6"
-# The popup, the About window, the mute sounds, the session events (NSWorkspace's center),
-# the Dock toggle (NSApplication), and the tray icon's size (NSStatusItem's button).
-# NSView::layer needs objc2-quartz-core, NSColor::CGColor objc2-core-graphics.
+# The popup, the About window, the Settings window (its shortcut recorder watches keys with an
+# NSEvent monitor, a block), the mute sounds, the session events (NSWorkspace's center), the
+# Dock toggle (NSApplication), and the tray icon's size (NSStatusItem's button). NSView::layer
+# needs objc2-quartz-core, NSColor::CGColor objc2-core-graphics.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
   "NSAlert",
   "NSApplication",
   "NSButton",
+  "NSCell",
   "NSColor",
   "NSControl",
+  "NSEvent",
   "NSFont",
+  "NSGraphics",
+  "NSGridView",
   "NSImage",
   "NSImageView",
+  "NSLayoutAnchor",
   "NSLayoutConstraint",
+  "NSPopUpButton",
   "NSResponder",
   "NSRunningApplication",
   "NSScreen",
@@ -64,11 +71,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSStackView",
   "NSStatusBarButton",
   "NSStatusItem",
+  "NSStepper",
   "NSText",
   "NSTextField",
+  "NSUserInterfaceLayout",
   "NSView",
   "NSWindow",
   "NSWorkspace",
+  "bitflags",
+  "block2",
   "objc2-core-foundation",
   "objc2-core-graphics",
   "objc2-quartz-core",
@@ -88,6 +99,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "NSError",
   "NSGeometry",
   "NSNotification",
+  "NSRange",
   "NSString",
   "NSURL",
   "objc2-core-foundation",
@@ -106,7 +118,7 @@ objc2-service-management = { version = "0.3", default-features = false, features
   "objc2-foundation",
 ] }
 # Notifications on a mute change (`show_notification`); the permission request and the post
-# report back through blocks.
+# report back through blocks. The Settings window's key monitor is a block too.
 block2 = "0.6"
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
   "std",

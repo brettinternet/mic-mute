@@ -54,8 +54,9 @@ impl fmt::Display for Shortcut {
     }
 }
 
-/// `KeyM` → `M` and `Digit1` → `1`; other keys keep their name, such as `F13` or `Space`.
-fn key_label(code: Code) -> String {
+/// `KeyM` → `M` and `Digit1` → `1`; other keys keep their name, such as `F13` or `Space`. It is
+/// also the name `parse_shortcut` reads, which the Settings window's recorder writes.
+pub fn key_label(code: Code) -> String {
     let name = code.to_string();
     let short = ["Key", "Digit"]
         .iter()
@@ -209,6 +210,8 @@ fn is_default_failure(problem: &ShortcutProblem, default: Shortcut) -> bool {
 pub struct Shortcuts {
     manager: GlobalHotKeyManager,
     status: ShortcutStatus,
+    /// The registered shortcut while `suspend` has unregistered it.
+    suspended: Option<Shortcut>,
 }
 
 impl Shortcuts {
@@ -224,6 +227,7 @@ impl Shortcuts {
         let mut shortcuts = Self {
             manager,
             status: ShortcutStatus::default(),
+            suspended: None,
         };
         if let Err(e) = shortcuts.reload(config) {
             error!("Failed to apply mic_shortcut setting: {:#}", e);
@@ -265,7 +269,9 @@ impl Shortcuts {
             self.publish();
             return Err(e).with_context(|| format!("Failed to register the {new} mute shortcut"));
         }
-        if let Some(old) = self.status.registered {
+        // A suspended shortcut is unregistered already; the new one ends the suspension.
+        let is_old_registered = self.suspended.take().is_none();
+        if let Some(old) = self.status.registered.filter(|_| is_old_registered) {
             if let Err(e) = self.manager.unregister(old.hotkey()) {
                 warn!(
                     "Failed to unregister the previous {} mute shortcut: {}",
@@ -279,6 +285,52 @@ impl Shortcuts {
             problem: None,
         };
         self.publish();
+        Ok(())
+    }
+
+    /// Unregisters the registered shortcut until `resume`, so its keys reach the app's own
+    /// windows: the Settings window's recorder hears them. It still counts as the shortcut in
+    /// use. Does nothing when no shortcut is registered or it is suspended already.
+    ///
+    /// # Errors
+    ///
+    /// When the shortcut can't be unregistered; it stays registered then.
+    pub fn suspend(&mut self) -> Result<()> {
+        let Some(shortcut) = self.status.registered.filter(|_| self.suspended.is_none()) else {
+            return Ok(());
+        };
+        self.manager
+            .unregister(shortcut.hotkey())
+            .with_context(|| format!("Failed to pause the {shortcut} mute shortcut"))?;
+        info!("Paused the {} mute shortcut to record a new one", shortcut);
+        self.suspended = Some(shortcut);
+        Ok(())
+    }
+
+    /// Registers the shortcut `suspend` unregistered again; does nothing when none is
+    /// suspended.
+    ///
+    /// # Errors
+    ///
+    /// When it can't be registered again: then no shortcut is registered, and the status says
+    /// why.
+    pub fn resume(&mut self) -> Result<()> {
+        let Some(shortcut) = self.suspended.take() else {
+            return Ok(());
+        };
+        if let Err(e) = self.manager.register(shortcut.hotkey()) {
+            self.status = ShortcutStatus {
+                registered: None,
+                problem: Some(ShortcutProblem::NotRegistered {
+                    shortcut,
+                    reason: e.to_string(),
+                }),
+            };
+            self.publish();
+            return Err(e)
+                .with_context(|| format!("Failed to register the {shortcut} mute shortcut again"));
+        }
+        info!("Registered the {} mute shortcut again", shortcut);
         Ok(())
     }
 

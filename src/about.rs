@@ -55,7 +55,7 @@ fn wait_for_open(mut open: Child, path: PathBuf) -> Result<JoinHandle<()>> {
 /// Opens settings.json in the default text editor. A fresh install has no file yet and `open`
 /// fails on a missing path, so the file is first written with `settings`, the settings in use.
 /// An existing file opens as it is, even an invalid one.
-fn open_settings_file(settings: &Settings) -> Result<()> {
+pub fn open_settings_file(settings: &Settings) -> Result<()> {
     let path = settings_path().context("Failed to locate the settings directory")?;
     if matches!(path.try_exists(), Ok(false)) {
         settings
@@ -136,7 +136,7 @@ impl AboutButton {
     pub fn title(self) -> &'static str {
         match self {
             Self::Ok => "OK",
-            Self::OpenSettings => "Open Settings",
+            Self::OpenSettings => "Open settings.json",
             Self::ResetSettings => "Reset Settings",
         }
     }
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn buttons_keep_their_titles_with_ok_as_the_default() {
         let titles = AboutButton::ALL.map(AboutButton::title);
-        assert_eq!(titles, ["OK", "Open Settings", "Reset Settings"]);
+        assert_eq!(titles, ["OK", "Open settings.json", "Reset Settings"]);
     }
 
     #[test]
