@@ -22,6 +22,8 @@ const DEVICES_MENU_TEXT: &str = "Microphones";
 /// Its disabled only row while no device is connected or excluded.
 const NO_DEVICES_TEXT: &str = "No input devices";
 const OPEN_SOUND_SETTINGS_TEXT: &str = "Open Sound Settings…";
+/// Opens the Settings window.
+const SETTINGS_WINDOW_TEXT: &str = "Settings…";
 /// The state of an excluded device that isn't connected.
 const NOT_CONNECTED_TEXT: &str = "Excluded, not connected";
 
@@ -334,6 +336,8 @@ pub struct Tray {
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
     pub show_popup: CheckMenuItem,
+    /// Opens the Settings window. Its ⌘, works while the menu is open.
+    pub settings_window: MenuItem,
     pub about: MenuItem,
     pub quit: MenuItem,
     /// The Microphones submenu, below the Mute item.
@@ -368,6 +372,11 @@ impl Tray {
         let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
         let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
         let show_popup = CheckMenuItem::new("Show Popup", true, popup_visible, None);
+        let settings_window = MenuItem::new(
+            SETTINGS_WINDOW_TEXT,
+            true,
+            Some(Accelerator::new(Modifiers::META, Code::Comma)),
+        );
         let about = MenuItem::new("About", true, None);
         let quit = MenuItem::new("Exit", true, None);
         // Lists no device until the first poll's `update_devices`.
@@ -381,6 +390,7 @@ impl Tray {
                 &launch_at_login,
                 &show_in_dock,
                 &show_popup,
+                &settings_window,
                 &about,
                 &PredefinedMenuItem::separator(),
                 &quit,
@@ -410,6 +420,7 @@ impl Tray {
             launch_at_login,
             show_in_dock,
             show_popup,
+            settings_window,
             about,
             quit,
             devices,
@@ -532,6 +543,10 @@ impl Tray {
 
     pub fn show_popup_id(&self) -> &MenuId {
         self.show_popup.id()
+    }
+
+    pub fn settings_window_id(&self) -> &MenuId {
+        self.settings_window.id()
     }
 
     pub fn about_id(&self) -> &MenuId {

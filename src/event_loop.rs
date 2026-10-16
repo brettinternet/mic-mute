@@ -10,6 +10,7 @@ use crate::mute_triggers::{self, LastMuteState, MUTE_STATE_FILE_NAME};
 use crate::push_to_talk::PushToTalk;
 use crate::session_events::SessionEvents;
 use crate::settings::Settings;
+use crate::settings_window::{FileProblem, SettingsChange, SettingsWindow, WindowEvent};
 use crate::store;
 use crate::ui::UI;
 use crate::url_scheme::{UrlAction, UrlActions};
@@ -91,6 +92,7 @@ pub struct EventIds {
     pub button_launch_at_login: MenuId,
     pub button_show_in_dock: MenuId,
     pub button_show_popup: MenuId,
+    pub button_settings_window: MenuId,
     pub button_about: MenuId,
     pub button_quit: MenuId,
     pub button_open_sound_settings: MenuId,
@@ -261,6 +263,75 @@ fn show_devices(
     }
 }
 
+/// Saves and applies a change made in the Settings window, the way the tray toggles do: under
+/// `settings.write()`, then `ui.write()` once the settings guard is dropped. A change to the
+/// shortcut's mode or hotkey can end a push-to-talk hold, which mutes.
+fn apply_window_change(
+    change: &SettingsChange,
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    settings: &RwLock<Settings>,
+    push_to_talk: &mut PushToTalk,
+    last_state: &mut LastMuteState,
+) {
+    let (old_mode, new_settings) = {
+        let mut s = settings.write();
+        let old_mode = s.mode;
+        if !change.apply_to(&mut s) {
+            return;
+        }
+        trace!("Settings window: {:?}", change);
+        if let Err(e) = s.save() {
+            log::error!("Failed to save settings: {:#}", e);
+        }
+        (old_mode, s.clone())
+    };
+    let is_hotkey_replaced = {
+        let mut ui = ui.write();
+        let hotkey_before = ui.mic_shortcut_id();
+        if let Err(e) = ui.apply_window_change(change, &new_settings) {
+            log::error!("Failed to apply the Settings window's change: {:#}", e);
+        }
+        ui.mic_shortcut_id() != hotkey_before
+    };
+    let mute = push_to_talk.on_settings_change(old_mode, new_settings.mode, is_hotkey_replaced);
+    if let Some(command) = mute {
+        log::info!("Muting: the Settings window changed the shortcut's mode or hotkey");
+        request_mic(ui, controller, last_state, command);
+    }
+}
+
+/// Runs what the user did in the Settings window, then shows the settings in use there, so it
+/// also reflects the tray, About → Reset Settings, and a reloaded file. Showing touches only the
+/// controls that change, so this runs on every pass.
+fn run_settings_window(
+    window: &mut SettingsWindow,
+    ui: &RwLock<UI>,
+    controller: &RwLock<MicController>,
+    settings: &RwLock<Settings>,
+    push_to_talk: &mut PushToTalk,
+    last_state: &mut LastMuteState,
+    problem: Option<&FileProblem>,
+) {
+    for event in window.take_events() {
+        match event {
+            WindowEvent::Changed(change) => {
+                apply_window_change(&change, ui, controller, settings, push_to_talk, last_state)
+            }
+            WindowEvent::OpenSettingsFile => {
+                let current = settings.read().clone();
+                if let Err(e) = about::open_settings_file(&current) {
+                    log::error!("Failed to open settings.json: {:#}", e);
+                }
+            }
+        }
+    }
+    if window.is_open() {
+        let current = settings.read().clone();
+        window.refresh(&current, problem);
+    }
+}
+
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
     if let Err(err) = controller.write().restore_on_exit() {
         log::error!("Failed to restore microphone state on exit: {}", err);
@@ -278,6 +349,7 @@ pub fn start(
     // `None` until the loop runs; see `is_loop_start`.
     let mut ui_and_ids: Option<(RwLock<UI>, EventIds)> = None;
     let mut about_window = AboutWindow::default();
+    let mut settings_window = SettingsWindow::default();
     // Actions of opened URLs, run once the UI exists.
     let mut url_actions = UrlActions::default();
     // The shortcut's hold in push_to_talk mode.
@@ -312,9 +384,14 @@ pub fn start(
     // main() runs on the defaults when settings.json is invalid at startup; the first loop
     // pass says so in the tray. A file that breaks later keeps the previous settings.
     use crate::settings::Fallback;
-    let mut startup_settings_notice = Settings::load()
-        .err()
+    let startup_error = Settings::load().err();
+    let mut startup_settings_notice = startup_error
+        .as_ref()
         .map(|err| err.notice(Fallback::Defaults));
+    // What the Settings window says while settings.json is unusable.
+    let mut file_problem = startup_error
+        .as_ref()
+        .map(|err| FileProblem::new(err, Fallback::Defaults));
     let mut settings_fallback = if startup_settings_notice.is_some() {
         Fallback::Defaults
     } else {
@@ -415,6 +492,7 @@ pub fn start(
             button_launch_at_login,
             button_show_in_dock,
             button_show_popup,
+            button_settings_window,
             button_about,
             button_quit,
             button_open_sound_settings,
@@ -485,6 +563,12 @@ pub fn start(
                 drop(s);
                 if let Err(e) = ui.write().set_popup_enabled(visible) {
                     log::error!("Failed to apply popup setting: {}", e);
+                }
+            } else if event.id == button_settings_window {
+                trace!("Settings tray menu item selected");
+                let current = settings.read().clone();
+                if let Err(e) = settings_window.show(&current, file_problem.as_ref()) {
+                    log::error!("Failed to show the Settings window: {:#}", e);
                 }
             } else if event.id == button_about {
                 trace!("About tray menu item selected");
@@ -615,6 +699,7 @@ pub fn start(
                     // matches the file, and the app only ever writes a valid file.
                     trace!("settings.json changed by the app's own save");
                     settings_fallback = Fallback::Previous;
+                    file_problem = None;
                     None
                 } else {
                     trace!("settings.json changed on disk — reloading");
@@ -623,6 +708,7 @@ pub fn start(
                             let old_mode = settings.read().mode;
                             *settings.write() = new_settings.clone();
                             settings_fallback = Fallback::Previous;
+                            file_problem = None;
                             let hotkey_before = shortcut_mic.load(Ordering::Relaxed);
                             {
                                 let mut ui_w = ui.write();
@@ -652,6 +738,7 @@ pub fn start(
                             // Apply nothing from a broken file. Only a new mtime triggers a
                             // reload, so this warns once per change to the file.
                             log::warn!("{}; keeping the current settings", err);
+                            file_problem = Some(FileProblem::new(&err, settings_fallback));
                             Some(err.notice(settings_fallback))
                         }
                     }
@@ -661,6 +748,17 @@ pub fn start(
                 }
             }
         }
+
+        // After every other source of settings changes, so the window shows them all.
+        run_settings_window(
+            &mut settings_window,
+            ui,
+            &controller,
+            &settings,
+            &mut push_to_talk,
+            &mut last_state,
+            file_problem.as_ref(),
+        );
 
         // Poll the microphones every poll interval, and soon after a reported device change.
         let is_listening = controller.read().is_listening();

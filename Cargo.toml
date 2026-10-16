@@ -43,20 +43,26 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # NSWorkspace's center and the distributed center deliver the session events; NSApplication
 # shows or hides the Dock icon; NSURL opens Sound settings.
 objc2 = "0.6"
-# The popup, the About window, the mute sounds, the session events (NSWorkspace's center),
-# the Dock toggle (NSApplication), and the tray icon's size (NSStatusItem's button).
-# NSView::layer needs objc2-quartz-core, NSColor::CGColor objc2-core-graphics.
+# The popup, the About window, the Settings window, the mute sounds, the session events
+# (NSWorkspace's center), the Dock toggle (NSApplication), and the tray icon's size
+# (NSStatusItem's button). NSView::layer needs objc2-quartz-core, NSColor::CGColor
+# objc2-core-graphics.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
   "NSAlert",
   "NSApplication",
   "NSButton",
+  "NSCell",
   "NSColor",
   "NSControl",
   "NSFont",
+  "NSGraphics",
+  "NSGridView",
   "NSImage",
   "NSImageView",
+  "NSLayoutAnchor",
   "NSLayoutConstraint",
+  "NSPopUpButton",
   "NSResponder",
   "NSRunningApplication",
   "NSScreen",
@@ -64,11 +70,14 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSStackView",
   "NSStatusBarButton",
   "NSStatusItem",
+  "NSStepper",
   "NSText",
   "NSTextField",
+  "NSUserInterfaceLayout",
   "NSView",
   "NSWindow",
   "NSWorkspace",
+  "bitflags",
   "objc2-core-foundation",
   "objc2-core-graphics",
   "objc2-quartz-core",
@@ -88,6 +97,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "NSError",
   "NSGeometry",
   "NSNotification",
+  "NSRange",
   "NSString",
   "NSURL",
   "objc2-core-foundation",

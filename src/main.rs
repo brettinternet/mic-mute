@@ -17,6 +17,7 @@ mod popup_content;
 mod push_to_talk;
 mod session_events;
 mod settings;
+mod settings_window;
 mod shortcuts;
 mod store;
 mod tray;
