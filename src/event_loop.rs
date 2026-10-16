@@ -351,7 +351,13 @@ fn run_settings_window(
 }
 
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
-    if let Err(err) = controller.write().restore_on_exit() {
+    restore_locked_microphone_on_exit(&mut controller.write());
+}
+
+/// [`restore_microphone_on_exit`] for a caller that already holds the controller's write guard,
+/// such as the signal watcher, which keeps it until the process exits.
+pub fn restore_locked_microphone_on_exit(controller: &mut MicController) {
+    if let Err(err) = controller.restore_on_exit() {
         log::error!("Failed to restore microphone state on exit: {}", err);
     }
 }

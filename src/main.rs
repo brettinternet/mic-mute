@@ -26,12 +26,13 @@ mod url_scheme;
 mod utils;
 
 use crate::camera::CameraController;
-use crate::event_loop::{restore_microphone_on_exit, start};
+use crate::event_loop::{restore_locked_microphone_on_exit, start};
 use crate::mic::{LaunchIntent, MicController};
 use crate::mute_triggers::{LastMuteState, MUTE_STATE_FILE_NAME};
 use crate::settings::Settings;
 use crate::utils::arc_lock;
 use log::{info, trace};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -43,6 +44,16 @@ const SHUTDOWN_SIGNALS: [libc::c_int; 4] =
 
 extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Runs `restore`, then `exit`, under one write guard of `lock`; `exit` ends the process, so the
+/// guard is never given back. The signal watcher exits this way: a mute the main thread was about
+/// to run (the shortcut, the tray, a session event, the launch) can't take the controller between
+/// the restore and the exit. The main thread then waits on the lock until the process ends.
+fn restore_then_exit<T>(lock: &RwLock<T>, restore: impl FnOnce(&mut T), exit: impl FnOnce(&T)) {
+    let mut guard = lock.write();
+    restore(&mut guard);
+    exit(&guard);
 }
 
 /// Logs the panic to the unified log and restores the microphones from restore.json when a
@@ -124,8 +135,11 @@ fn main() {
         std::thread::sleep(Duration::from_millis(100));
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             info!("Signal received — restoring microphone state before exit");
-            restore_microphone_on_exit(&shutdown_controller);
-            std::process::exit(0);
+            restore_then_exit(
+                &shutdown_controller,
+                restore_locked_microphone_on_exit,
+                |_| std::process::exit(0),
+            );
         }
     });
 
@@ -145,4 +159,28 @@ fn main() {
         last_state,
         launch_mute,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_signal_exit_runs_under_the_write_guard_its_restore_took() {
+        let lock = RwLock::new(Vec::new());
+        let mut has_exited = false;
+
+        restore_then_exit(
+            &lock,
+            |steps| steps.push("restore"),
+            |steps| {
+                assert_eq!(*steps, ["restore"]);
+                assert!(lock.is_locked_exclusive(), "nothing can mute in between");
+                has_exited = true;
+            },
+        );
+
+        assert!(has_exited);
+        assert!(!lock.is_locked(), "only a test's exit returns");
+    }
 }
