@@ -82,6 +82,18 @@ macOS (Background Task Management) records a login item against the app's code s
 - Mic Mute sees a login item you remove in Login Items at its next launch; until then the tray item stays checked. Saving other settings never adds it back.
 - `sudo sfltool dumpbtm` prints the records macOS keeps (search for `com.brettinternet.mic-mute`); without `sudo` it waits for an administrator to authorize it.
 
+## Logs
+
+Mic Mute writes its log to the macOS unified log under the subsystem `com.brettinternet.mic-mute`. A copy started from a terminal (`task start`, `cargo run`) also prints every line to the terminal.
+
+- **Console.app:** select your Mac, click Start, and search for `subsystem:com.brettinternet.mic-mute`. For more than warnings and errors, turn on Action → Include Info Messages and Include Debug Messages.
+- **Live, in a terminal:** `log stream --predicate 'subsystem == "com.brettinternet.mic-mute"' --level debug`
+- **Earlier lines:** `log show --predicate 'subsystem == "com.brettinternet.mic-mute"' --last 1h --info`
+
+macOS stores warnings and errors on disk, but it may drop info lines within minutes, so stream the log while you reproduce a problem. To keep info lines on disk too, run `sudo log config --subsystem com.brettinternet.mic-mute --mode persist:info` (undo it with `--reset` instead of `--mode …`).
+
+Mic Mute logs `info` and above unless the `RUST_LOG` environment variable says otherwise, for example `RUST_LOG=debug` or `RUST_LOG=mic_mute::mic=trace`. An app opened from the Dock or Finder doesn't see your shell's environment: quit Mic Mute, then open it with `open --env RUST_LOG=debug -a "Mic Mute"`. Debug and trace lines reach the log only while something asks for them, such as `log stream --level debug`.
+
 ## Releases
 
 I have not elected to sign the app by joining the Apple Developer Program. The releases have been self-signed by me and can be installed by bypassing the typical app security on macOS. You're also welcome to build and bundle the app yourself with the simple instructions described below.
