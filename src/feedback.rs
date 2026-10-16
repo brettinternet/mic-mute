@@ -2,9 +2,10 @@
 //! a macOS notification (`show_notification`). Only a request that changes the microphones'
 //! state gives either (`change_to_report`); the poll's re-mutes never do.
 use crate::notification::Notifier;
-use anyhow::{bail, Result};
-use cocoa::base::{id, nil, BOOL, NO};
-use cocoa::foundation::NSString;
+use anyhow::{anyhow, bail, Result};
+use objc2::rc::Retained;
+use objc2_app_kit::NSSound;
+use objc2_foundation::NSString;
 
 /// What made the event loop update the microphones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,31 +96,21 @@ impl Feedback {
     }
 }
 
-/// `+[NSSound soundNamed:]`: AppKit loads the sound on first use and keeps it under its name,
-/// so the caller doesn't own it.
-fn named_sound(sound: Sound) -> Result<id> {
-    unsafe {
-        let name = NSString::alloc(nil).init_str(sound.name());
-        let ns_sound: id = msg_send![class!(NSSound), soundNamed: name];
-        let _: () = msg_send![name, release];
-        if ns_sound.is_null() {
-            bail!("macOS has no sound named {}", sound.name());
-        }
-        Ok(ns_sound)
-    }
+/// `+[NSSound soundNamed:]`: AppKit loads the sound on first use and keeps it under its name;
+/// the `Retained` is the caller's own reference to it.
+fn named_sound(sound: Sound) -> Result<Retained<NSSound>> {
+    NSSound::soundNamed(&NSString::from_str(sound.name()))
+        .ok_or_else(|| anyhow!("macOS has no sound named {}", sound.name()))
 }
 
 /// Plays `sound` through the default output device; nothing here touches an input device.
 /// NSSound plays in the background, so this returns at once.
 fn play(sound: Sound) -> Result<()> {
     let ns_sound = named_sound(sound)?;
-    unsafe {
-        // An NSSound plays once at a time: restart it when a quick second change replays it.
-        let _: BOOL = msg_send![ns_sound, stop];
-        let started: BOOL = msg_send![ns_sound, play];
-        if started == NO {
-            bail!("NSSound didn't start playing");
-        }
+    // An NSSound plays once at a time: restart it when a quick second change replays it.
+    ns_sound.stop();
+    if !ns_sound.play() {
+        bail!("NSSound didn't start playing");
     }
     Ok(())
 }
