@@ -65,28 +65,24 @@ tasks:
       - cargo test --locked
 
   build:
-    desc: Build and bundle Mic Mute.app, then show it in Finder (NO_OPEN=1 skips Finder)
+    desc: Build, bundle, and ad-hoc sign Mic Mute.app for this Mac, then show it in Finder (UNIVERSAL=1 builds for Apple silicon and Intel; NO_OPEN=1 skips Finder)
     cmds:
-      - task: build-dependencies
-      - task: build-target
-        vars:
-          TARGET: aarch64-apple-darwin
-
-  build-dependencies:
-    internal: true
-    desc: Install the pinned cargo-bundle
-    cmds:
-      - cargo install --locked cargo-bundle@{{.CARGO_BUNDLE_VERSION}}
-    status:
-      - ./scripts/check-tool-version.sh cargo-bundle {{.CARGO_BUNDLE_VERSION}}
-
-  build-target:
-    internal: true
-    cmds:
-      - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }} --format osx
-      - cmd: open "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
+      # The script installs the pinned cargo-bundle when it's missing.
+      - ./scripts/install.sh --bundle-only --skip-checks{{if .UNIVERSAL}} --universal{{end}}
+      - cmd: open "${CARGO_TARGET_DIR:-target}/{{ .BUNDLE_TARGET }}/release/bundle/osx"
         if: '[ -z "{{.NO_OPEN}}" ]'
+    vars:
+      # Where scripts/install.sh puts the bundle: cargo bundle's "universal" directory, or
+      # this Mac's target (Apple silicon whenever sysctl reports it, as in the script).
+      BUNDLE_TARGET:
+        sh: |
+          if [ -n "{{.UNIVERSAL}}" ]; then
+            echo universal
+          elif [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+            echo aarch64-apple-darwin
+          else
+            echo x86_64-apple-darwin
+          fi
 
   install:
     desc: Check, build, sign, install, and launch Mic Mute.app (flags after --; see README)
@@ -99,13 +95,11 @@ tasks:
       - ./scripts/uninstall.sh {{.CLI_ARGS}}
 
   release:
-    desc: Clean, then build a DMG signed with your self-signed sign.crt (see README)
+    desc: Clean, then build a universal DMG (Apple silicon and Intel) signed with your self-signed sign.crt (see README)
     cmds:
       - task: release-dependencies
       - cargo clean
       - task: release-target
-        vars:
-          TARGET: aarch64-apple-darwin
     env:
       RUST_LOG: warn
 
@@ -122,8 +116,9 @@ tasks:
   release-target:
     internal: true
     cmds:
-      - cargo build --locked --release --target {{ .TARGET }}
-      - cargo bundle --release --target {{ .TARGET }} --format osx
+      # Builds both targets with --locked, combines them with lipo, checks the architectures,
+      # bundles, and signs ad hoc; rcodesign then replaces that signature.
+      - ./scripts/install.sh --bundle-only --skip-checks --universal
       - rcodesign sign --pem-source {{ .PEM_FILE }} "{{ .BUNDLE_DIR }}/Mic Mute.app"
       - hdiutil create -volname {{ .TITLE }} -srcfolder "{{ .BUNDLE_DIR }}" -ov -format UDZO {{ .TITLE }}.dmg
       # - rcodesign sign --pem-source {{ .PEM_FILE }} {{ .TITLE }}.dmg
@@ -131,13 +126,14 @@ tasks:
       RUST_LOG: warn
     vars:
       PEM_FILE: sign.crt
+      # cargo bundle's directory for a bundle built for several targets.
       BUNDLE_DIR:
-        sh: echo "${CARGO_TARGET_DIR:-target}/{{ .TARGET }}/release/bundle/osx"
+        sh: echo "${CARGO_TARGET_DIR:-target}/universal/release/bundle/osx"
       NAME:
         sh: toml get Cargo.toml package.name --raw
       VERSION:
         sh: toml get Cargo.toml package.version --raw
-      TITLE: "{{ .NAME }}-{{ .VERSION }}-{{ .TARGET }}"
+      TITLE: "{{ .NAME }}-{{ .VERSION }}-universal-apple-darwin"
 
   clean:
     desc: Delete the build artifacts (cargo clean)

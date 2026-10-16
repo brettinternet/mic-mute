@@ -1,8 +1,9 @@
 name: Release
 
-# A version tag (e.g. 0.6.0) builds Mic Mute.app with scripts/install.sh
-# --bundle-only, ad-hoc signs it, packages a DMG with SHA256SUMS, attests its
-# build provenance, and publishes a GitHub release. A manual run with an
+# A version tag (e.g. 0.6.0) builds a universal Mic Mute.app (Apple silicon and
+# Intel) with scripts/install.sh --bundle-only --universal, ad-hoc signs it,
+# packages a DMG with SHA256SUMS, attests its build provenance, and publishes a
+# GitHub release. A manual run with an
 # existing tag rebuilds and republishes it; without one it only builds and
 # uploads the files as a workflow artifact.
 
@@ -48,11 +49,9 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
+      # rust-toolchain.toml pins the version, its components, and both targets.
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy \
-            --target aarch64-apple-darwin --no-self-update
-          rustup default stable
+        run: rustup toolchain install --no-self-update
 
       - name: Resolve the version
         id: version
@@ -71,17 +70,18 @@ jobs:
             label="$version-dev.$(git rev-parse --short HEAD)"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "artifact=mic-mute-$label-aarch64-apple-darwin" >> "$GITHUB_OUTPUT"
+          echo "artifact=mic-mute-$label-universal-apple-darwin" >> "$GITHUB_OUTPUT"
 
-      # Preflight, fmt/clippy/test gates, pinned cargo-bundle, ad-hoc codesign.
+      # Preflight, fmt/clippy/test gates, a --locked build per architecture combined with
+      # lipo and checked with lipo -archs, pinned cargo-bundle, ad-hoc codesign.
       - name: Check, build, and sign
-        run: scripts/install.sh --bundle-only
+        run: scripts/install.sh --bundle-only --universal
 
       - name: Package the DMG
         env:
           ARTIFACT: ${{ steps.version.outputs.artifact }}
         run: |
-          app="target/aarch64-apple-darwin/release/bundle/osx/Mic Mute.app"
+          app="target/universal/release/bundle/osx/Mic Mute.app"
           staging="$RUNNER_TEMP/dmg"
           mount="$RUNNER_TEMP/mount"
           mkdir -p dist "$staging" "$mount"
@@ -92,6 +92,12 @@ jobs:
           hdiutil verify "dist/$ARTIFACT.dmg"
           hdiutil attach -nobrowse -readonly -mountpoint "$mount" "dist/$ARTIFACT.dmg"
           codesign --verify --deep --strict --verbose=2 "$mount/Mic Mute.app"
+          archs="$(lipo -archs "$mount/Mic Mute.app/Contents/MacOS/mic-mute")"
+          echo "Architectures: $archs"
+          if [[ " $archs " != *" arm64 "* || " $archs " != *" x86_64 "* ]]; then
+            echo "::error::The app in the DMG isn't universal (lipo -archs: $archs)"
+            exit 1
+          fi
           hdiutil detach "$mount"
           (cd dist && shasum -a 256 "$ARTIFACT.dmg" > SHA256SUMS)
           cat dist/SHA256SUMS

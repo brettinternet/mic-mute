@@ -1,0 +1,10 @@
+# The toolchain for every build, local and CI: rustup installs it with these
+# components and targets on first use (`rustup toolchain install` reads this
+# file), and mise reads it too (mise.toml). Cargo.toml's rust-version is the
+# oldest Rust the crate supports; this is the one it's built and tested with.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+# Releases are universal: Apple silicon and Intel.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+profile = "minimal"

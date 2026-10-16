@@ -3,10 +3,10 @@
 # not configured.
 
 [graph]
-# The app ships for Apple silicon only. Without this, crates that are reachable
-# only on other platforms (e.g. proc-macro-error through GTK on Linux) would
-# fail the check.
-targets = ["aarch64-apple-darwin"]
+# The app ships as a universal binary for Apple silicon and Intel Macs. Without
+# this, crates that are reachable only on other platforms (e.g. proc-macro-error
+# through GTK on Linux) would fail the check.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [advisories]
 # Vulnerability advisories always fail the check. Unmaintained and unsound

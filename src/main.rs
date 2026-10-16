@@ -7,6 +7,7 @@ mod event_loop;
 mod feedback;
 mod icons;
 mod launch_at_login;
+mod logging;
 mod mic;
 mod mic_command;
 mod mute_triggers;
@@ -22,14 +23,12 @@ mod tray;
 mod ui;
 mod url_scheme;
 mod utils;
-// TODO: Use better Apple logging support? https://lib.rs/crates/oslog
 
 use crate::camera::CameraController;
 use crate::event_loop::{restore_microphone_on_exit, start};
 use crate::mic::MicController;
 use crate::settings::Settings;
 use crate::utils::arc_lock;
-use env_logger::{Builder, Env};
 use log::{info, trace};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -44,11 +43,13 @@ extern "C" fn handle_signal(_: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-/// Restores the microphones from restore.json when a panic is about to end the app, then
-/// runs the previous hook, which prints the panic.
+/// Logs the panic to the unified log and restores the microphones from restore.json when a
+/// panic is about to end the app, then runs the previous hook, which prints the panic to stderr.
 fn install_panic_hook() {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // The installed app's stderr goes nowhere: without this, Console never shows a panic.
+        logging::log_panic(info);
         // Only a main-thread panic ends the app: tao stops the event loop and re-raises it,
         // and AppKit callbacks abort. A panic on a background thread (the camera poller, the
         // signal watcher) leaves the loop running and still enforcing mute, so restoring
@@ -61,13 +62,8 @@ fn install_panic_hook() {
 }
 
 fn main() {
-    // RUST_LOG overrides this. Release builds skip the poll's per-tick trace output.
-    let default_filter = if cfg!(debug_assertions) {
-        "trace"
-    } else {
-        "info"
-    };
-    Builder::from_env(Env::default().default_filter_or(default_filter)).init();
+    // stderr and the unified log; RUST_LOG overrides the default filter for both.
+    logging::init().expect("main installs the logger first, once");
     info!("Starting app");
     // Before anything can mute a device, so any later panic still restores them.
     install_panic_hook();
