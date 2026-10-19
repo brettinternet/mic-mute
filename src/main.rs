@@ -78,7 +78,7 @@ fn main() {
         }
     });
 
-    let camera = CameraController::new().unwrap();
+    let camera = CameraController::new();
     let camera_muted = camera.muted;
     let camera = arc_lock(camera);
     trace!("Camera controller initialized, muted={}", camera_muted);
