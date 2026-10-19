@@ -51,11 +51,11 @@ pub struct CameraController {
 }
 
 impl CameraController {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Self {
         let mut controller = Self { muted: false };
         // muted=false means "camera is active"; muted=true means "camera is idle/off"
         controller.muted = !controller.is_running_anywhere().unwrap_or(false);
-        Ok(controller)
+        controller
     }
 
     /// Enumerate all CMIO device IDs directly from the CMIO system object.
@@ -201,17 +201,5 @@ impl CameraController {
             }
         }
         Ok(false)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_camera_controller_new() {
-        // CameraController::new() should succeed even with no cameras
-        let result = CameraController::new();
-        assert!(result.is_ok());
     }
 }
