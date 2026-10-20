@@ -1,15 +1,51 @@
 use crate::config::AppVars;
 use crate::icons::{rasterize_svg, tray_icon_color};
-use crate::settings::ShortcutConfig;
+use crate::mic::InputDevice;
+use crate::settings::{Settings, ShortcutConfig};
 use anyhow::{Context, Result};
 use log::trace;
-use muda::{accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use muda::{
+    accelerator::Accelerator, CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use std::fmt;
 use tao::window::Theme;
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const MUTE_TEXT: &str = "Mute";
 const UNMUTE_TEXT: &str = "Unmute";
+const NO_MICS_TEXT: &str = "No Input Devices";
+
+/// One row of the Excluded Mics submenu.
+#[derive(Clone, PartialEq)]
+struct ExcludedMicEntry {
+    device: InputDevice,
+    connected: bool,
+}
+
+/// Connected devices first, then excluded devices that aren't connected so
+/// they can still be unticked.
+fn excluded_mic_entries(devices: &[InputDevice], settings: &Settings) -> Vec<ExcludedMicEntry> {
+    let mut entries: Vec<ExcludedMicEntry> = devices
+        .iter()
+        .map(|device| ExcludedMicEntry {
+            device: device.clone(),
+            connected: true,
+        })
+        .collect();
+    for uid in &settings.excluded_devices {
+        if entries.iter().any(|e| e.device.uid == *uid) {
+            continue;
+        }
+        entries.push(ExcludedMicEntry {
+            device: InputDevice {
+                uid: uid.clone(),
+                name: uid.clone(),
+            },
+            connected: false,
+        });
+    }
+    entries
+}
 
 pub fn get_mute_menu_text(muted: bool) -> &'static str {
     if muted {
@@ -67,31 +103,31 @@ pub struct Tray {
     pub launch_at_login: CheckMenuItem,
     pub show_in_dock: CheckMenuItem,
     pub show_popup: CheckMenuItem,
+    excluded_mics: Submenu,
+    excluded_mic_entries: Vec<ExcludedMicEntry>,
+    excluded_mic_items: Vec<(CheckMenuItem, InputDevice)>,
     pub about: MenuItem,
     pub quit: MenuItem,
 }
 
 impl Tray {
-    pub fn new(
-        muted: bool,
-        theme: Theme,
-        app_vars: AppVars,
-        login_enabled: bool,
-        dock_visible: bool,
-        popup_visible: bool,
-        mic_shortcut: &ShortcutConfig,
-    ) -> Result<Self> {
+    pub fn new(muted: bool, theme: Theme, app_vars: AppVars, settings: &Settings) -> Result<Self> {
         trace!("Creating tray icon");
         let icon = get_icon(muted, theme)?;
         let tray_menu = Menu::new();
         let toggle_mute = MenuItem::new(
             get_mute_menu_text(muted),
             true,
-            Some(accelerator_from_config(mic_shortcut)),
+            Some(accelerator_from_config(&settings.mic_shortcut)),
         );
-        let launch_at_login = CheckMenuItem::new("Launch at Login", true, login_enabled, None);
-        let show_in_dock = CheckMenuItem::new("Show in Dock", true, dock_visible, None);
-        let show_popup = CheckMenuItem::new("Show Popup", true, popup_visible, None);
+        let launch_at_login =
+            CheckMenuItem::new("Launch at Login", true, settings.launch_at_login, None);
+        let show_in_dock = CheckMenuItem::new("Show in Dock", true, settings.show_in_dock, None);
+        let show_popup = CheckMenuItem::new("Show Popup", true, settings.show_popup, None);
+        let excluded_mics = Submenu::new("Excluded Mics", true);
+        excluded_mics
+            .append(&MenuItem::new(NO_MICS_TEXT, false, None))
+            .context("Failed to append excluded mics placeholder")?;
         let about = MenuItem::new("About", true, None);
         let quit = MenuItem::new("Exit", true, None);
 
@@ -102,6 +138,7 @@ impl Tray {
                 &launch_at_login,
                 &show_in_dock,
                 &show_popup,
+                &excluded_mics,
                 &about,
                 &PredefinedMenuItem::separator(),
                 &quit,
@@ -123,6 +160,9 @@ impl Tray {
             launch_at_login,
             show_in_dock,
             show_popup,
+            excluded_mics,
+            excluded_mic_entries: Vec::new(),
+            excluded_mic_items: Vec::new(),
             about,
             quit,
         };
@@ -147,6 +187,57 @@ impl Tray {
         self.toggle_mute.set_text(get_mute_menu_text(muted));
         trace!("Updated tray menu");
         Ok(())
+    }
+
+    /// Rebuild the Excluded Mics submenu when devices change and sync its checkboxes.
+    pub fn update_excluded_mics(
+        &mut self,
+        devices: &[InputDevice],
+        settings: &Settings,
+    ) -> Result<()> {
+        let entries = excluded_mic_entries(devices, settings);
+        if entries != self.excluded_mic_entries {
+            while self.excluded_mics.remove_at(0).is_some() {}
+            self.excluded_mic_items.clear();
+            if entries.is_empty() {
+                self.excluded_mics
+                    .append(&MenuItem::new(NO_MICS_TEXT, false, None))
+                    .context("Failed to append excluded mics placeholder")?;
+            }
+            for entry in &entries {
+                let text = if !entry.connected {
+                    format!("{} (Not Connected)", entry.device.uid)
+                } else if entries
+                    .iter()
+                    .filter(|e| e.device.name == entry.device.name)
+                    .count()
+                    > 1
+                {
+                    format!("{} ({})", entry.device.name, entry.device.uid)
+                } else {
+                    entry.device.name.clone()
+                };
+                let item = CheckMenuItem::new(text, true, false, None);
+                self.excluded_mics
+                    .append(&item)
+                    .context("Failed to append excluded mic item")?;
+                self.excluded_mic_items.push((item, entry.device.clone()));
+            }
+            self.excluded_mic_entries = entries;
+            trace!("Rebuilt excluded mics menu");
+        }
+        for (item, device) in &self.excluded_mic_items {
+            item.set_checked(settings.is_device_excluded(&device.uid));
+        }
+        Ok(())
+    }
+
+    /// The device for an Excluded Mics menu item, if `id` is one.
+    pub fn excluded_mic_for(&self, id: &MenuId) -> Option<InputDevice> {
+        self.excluded_mic_items
+            .iter()
+            .find(|(item, _)| item.id() == id)
+            .map(|(_, device)| device.clone())
     }
 
     /// Update the displayed keyboard shortcuts after settings change.
@@ -194,5 +285,44 @@ mod tests {
     #[test]
     fn test_get_mute_menu_text_unmuted() {
         assert_eq!(get_mute_menu_text(false), "Mute");
+    }
+
+    #[test]
+    fn test_excluded_mic_entries_keeps_disconnected_exclusions() {
+        let settings = Settings {
+            excluded_devices: vec!["uid-2".to_string(), "uid-3".to_string()],
+            ..Settings::default()
+        };
+        let devices = vec![
+            InputDevice {
+                uid: "uid-1".into(),
+                name: "USB Microphone".into(),
+            },
+            InputDevice {
+                uid: "uid-2".into(),
+                name: "USB Microphone".into(),
+            },
+        ];
+
+        let entries = excluded_mic_entries(&devices, &settings);
+
+        let rows: Vec<_> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.device.uid.as_str(),
+                    e.connected,
+                    settings.is_device_excluded(&e.device.uid),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("uid-1", true, false),
+                ("uid-2", true, true),
+                ("uid-3", false, true),
+            ]
+        );
     }
 }

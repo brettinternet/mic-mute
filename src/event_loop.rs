@@ -68,6 +68,41 @@ fn update_mic(
     }
 }
 
+fn refresh_excluded_mics(
+    ui: &Arc<RwLock<UI>>,
+    controller: &Arc<RwLock<MicController>>,
+    settings: &Arc<RwLock<Settings>>,
+) {
+    let devices = match controller.read().input_devices() {
+        Ok(devices) => devices,
+        Err(err) => {
+            log::error!("Failed to list input devices: {}", err);
+            return;
+        }
+    };
+    let settings = settings.read();
+    if let Err(err) = ui.write().update_excluded_mics(&devices, &settings) {
+        log::error!("Failed to update excluded mics menu: {}", err);
+    }
+}
+
+fn apply_excluded_devices(
+    ui: &Arc<RwLock<UI>>,
+    controller: &Arc<RwLock<MicController>>,
+    excluded_devices: &[String],
+) {
+    let mut controller = controller.write();
+    controller.set_excluded_devices(excluded_devices);
+    // Settings can change the aggregate status even when mute enforcement is off.
+    let device_name = controller.active_device_name();
+    if let Err(err) = ui
+        .write()
+        .update_mic(controller.muted, device_name.as_deref())
+    {
+        log::error!("Failed to refresh microphone status: {}", err);
+    }
+}
+
 pub fn restore_microphone_on_exit(controller: &Arc<RwLock<MicController>>) {
     if let Err(err) = controller.write().restore_on_exit() {
         log::error!("Failed to restore microphone state on exit: {}", err);
@@ -116,6 +151,8 @@ pub fn start(
             .ok();
     });
 
+    refresh_excluded_mics(&ui, &controller, &settings);
+
     trace!("Starting event loop");
     let proxy = event_loop.create_proxy();
     // Set activation policy based on persisted show_in_dock before the loop starts.
@@ -148,6 +185,7 @@ pub fn start(
 
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             trace!("Tray menu event: {:?}", event);
+            let excluded_mic = ui.read().excluded_mic_for(&event.id);
             if event.id == button_quit {
                 trace!("Exit tray menu item selected");
                 exit_requested = true;
@@ -188,12 +226,28 @@ pub fn start(
                 if let Err(e) = ui.write().set_popup_enabled(visible) {
                     log::error!("Failed to apply popup setting: {}", e);
                 }
+            } else if let Some(device) = excluded_mic {
+                let already_excluded = settings.read().is_device_excluded(&device.uid);
+                if already_excluded || UI::confirm_exclude_device(&device) {
+                    let mut updated = settings.read().clone();
+                    updated.toggle_excluded_device(&device.uid);
+                    match updated.save() {
+                        Ok(()) => {
+                            *settings.write() = updated.clone();
+                            apply_excluded_devices(&ui, &controller, &updated.excluded_devices);
+                        }
+                        Err(err) => log::error!("Failed to save device exclusion: {}", err),
+                    }
+                }
+                // Undo the native checkbox toggle on cancellation or save failure.
+                refresh_excluded_mics(&ui, &controller, &settings);
             } else if event.id == button_about {
                 trace!("About tray menu item selected");
                 let mut s = settings.write();
                 match show_about(&mut s) {
                     Ok(true) => {
                         // Reset to Default clicked — apply all settings immediately
+                        apply_excluded_devices(&ui, &controller, &s.excluded_devices);
                         let mut ui = ui.write();
                         if let Err(e) = ui.apply_settings(&s) {
                             log::error!("Failed to apply settings: {}", e);
@@ -229,6 +283,7 @@ pub fn start(
                 let mut s = settings.write();
                 *s = new_settings.clone();
                 drop(s);
+                apply_excluded_devices(&ui, &controller, &new_settings.excluded_devices);
                 let mut ui_w = ui.write();
                 if let Err(e) = ui_w.apply_settings(&new_settings) {
                     log::error!("Failed to apply reloaded settings: {}", e);
@@ -237,6 +292,8 @@ pub fn start(
                     trace!("Settings reloaded from settings.json");
                 }
             }
+            // Pick up plugged/unplugged devices on the same cadence.
+            refresh_excluded_mics(&ui, &controller, &settings);
         }
 
         // Poll mic state and cursor-monitor position on a 200 ms interval.

@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Context, Result};
+use core_foundation::base::TCFType;
+use core_foundation::string::{CFString, CFStringRef};
 use coreaudio::audio_unit::macos_helpers::{get_audio_device_ids, get_device_name};
 use log::{error, trace};
 use objc2_core_audio::{
-    kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
+    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput,
     kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyVolumeScalar,
     kAudioHardwareNoError, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwareUnknownPropertyError, kAudioObjectPropertyElementMain,
@@ -90,9 +92,16 @@ impl Drop for AudioBufferListAllocation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputDevice {
+    pub uid: String,
+    pub name: String,
+}
+
 pub trait AudioBackend {
     fn device_ids(&self) -> Result<Vec<AudioDeviceID>>;
     fn device_name(&self, audio_device_id: AudioDeviceID) -> Result<String>;
+    fn device_uid(&self, audio_device_id: AudioDeviceID) -> Result<String>;
     fn has_input_channels(&self, audio_device_id: AudioDeviceID) -> Result<bool>;
     fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>>;
     fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>>;
@@ -209,6 +218,39 @@ impl AudioBackend for CoreAudioBackend {
 
     fn device_name(&self, audio_device_id: AudioDeviceID) -> Result<String> {
         get_device_name(audio_device_id).map_err(anyhow::Error::msg)
+    }
+
+    fn device_uid(&self, audio_device_id: AudioDeviceID) -> Result<String> {
+        let property_address = AudioObjectPropertyAddress {
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let mut uid: CFStringRef = null();
+        let mut data_size = mem::size_of::<CFStringRef>() as u32;
+        let status = unsafe {
+            AudioObjectGetPropertyData(
+                audio_device_id,
+                NonNull::from(&property_address),
+                0,
+                null(),
+                NonNull::from(&mut data_size),
+                NonNull::from(&mut uid).cast(),
+            )
+        };
+        status_result(status, "read device UID", audio_device_id)?;
+        if uid.is_null() {
+            return Err(anyhow!("audio device {} returned no UID", audio_device_id));
+        }
+        // CoreAudio transfers ownership of the returned CFString to the caller.
+        let uid = unsafe { CFString::wrap_under_create_rule(uid) }.to_string();
+        if uid.is_empty() {
+            return Err(anyhow!(
+                "audio device {} returned an empty UID",
+                audio_device_id
+            ));
+        }
+        Ok(uid)
     }
 
     fn has_input_channels(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
@@ -377,6 +419,8 @@ pub struct MicController<B = CoreAudioBackend> {
     saved_volumes: HashMap<AudioDeviceID, f32>,
     volume_fallback_devices: HashSet<AudioDeviceID>,
     native_muted_devices: HashSet<AudioDeviceID>,
+    /// Exact CoreAudio UIDs of input devices the user has explicitly excluded.
+    excluded_devices: Vec<String>,
     backend: B,
 }
 
@@ -388,6 +432,7 @@ impl<B: Default> Default for MicController<B> {
             saved_volumes: HashMap::new(),
             volume_fallback_devices: HashSet::new(),
             native_muted_devices: HashSet::new(),
+            excluded_devices: Vec::new(),
             backend: B::default(),
         }
     }
@@ -404,19 +449,25 @@ impl<B: AudioBackend> Debug for MicController<B> {
 }
 
 impl MicController<CoreAudioBackend> {
-    pub fn new() -> Result<Self> {
-        Self::with_backend(CoreAudioBackend)
+    pub fn new(excluded_devices: &[String]) -> Result<Self> {
+        Self::with_backend_excluding(CoreAudioBackend, excluded_devices)
     }
 }
 
 impl<B: AudioBackend> MicController<B> {
+    #[cfg(test)]
     fn with_backend(backend: B) -> Result<Self> {
+        Self::with_backend_excluding(backend, &[])
+    }
+
+    fn with_backend_excluding(backend: B, excluded_devices: &[String]) -> Result<Self> {
         let mut controller = Self {
             muted: false,
             desired_muted: false,
             saved_volumes: HashMap::new(),
             volume_fallback_devices: HashSet::new(),
             native_muted_devices: HashSet::new(),
+            excluded_devices: excluded_devices.to_vec(),
             backend,
         };
         trace!("Creating audio controller");
@@ -446,9 +497,14 @@ impl<B: AudioBackend> MicController<B> {
         );
         let mut input_device_ids = vec![];
         for id in audio_device_ids {
-            if self.backend.has_input_channels(id)? {
-                input_device_ids.push(id);
+            if !self.backend.has_input_channels(id)? {
+                continue;
             }
+            if self.is_excluded(id) {
+                trace!("Input device {} is excluded in settings; skipping", id);
+                continue;
+            }
+            input_device_ids.push(id);
         }
 
         trace!(
@@ -457,6 +513,69 @@ impl<B: AudioBackend> MicController<B> {
             input_device_ids
         );
         Ok(input_device_ids)
+    }
+
+    /// A device whose UID cannot be read stays managed, so failures never leave it live.
+    fn is_excluded(&self, audio_device_id: AudioDeviceID) -> bool {
+        if self.excluded_devices.is_empty() {
+            return false;
+        }
+        match self.backend.device_uid(audio_device_id) {
+            Ok(uid) => self.excluded_devices.contains(&uid),
+            Err(err) => {
+                error!(
+                    "Failed to read UID of audio device {}: {}",
+                    audio_device_id, err
+                );
+                false
+            }
+        }
+    }
+
+    /// All connected input devices, including excluded ones.
+    pub fn input_devices(&self) -> Result<Vec<InputDevice>> {
+        let mut devices = vec![];
+        for id in self.backend.device_ids()? {
+            if !self.backend.has_input_channels(id).unwrap_or(false) {
+                continue;
+            }
+            match (self.backend.device_uid(id), self.backend.device_name(id)) {
+                (Ok(uid), Ok(name)) => devices.push(InputDevice { uid, name }),
+                (Err(err), _) | (_, Err(err)) => {
+                    error!("Failed to describe input device {}: {}", id, err)
+                }
+            }
+        }
+        Ok(devices)
+    }
+
+    /// Replace the list of excluded input device UIDs and refresh the mute state.
+    /// Devices this app muted are unmuted when they become excluded, so they
+    /// aren't left muted with nothing managing them.
+    pub fn set_excluded_devices(&mut self, excluded_devices: &[String]) {
+        if excluded_devices != self.excluded_devices {
+            self.excluded_devices = excluded_devices.to_vec();
+            self.release_excluded_devices();
+            self.muted = self.is_muted_all().unwrap_or(false);
+        }
+    }
+
+    fn release_excluded_devices(&mut self) {
+        let managed: HashSet<AudioDeviceID> = self
+            .native_muted_devices
+            .iter()
+            .chain(self.saved_volumes.keys())
+            .copied()
+            .collect();
+        for id in managed {
+            if !self.is_excluded(id) {
+                continue;
+            }
+            trace!("Unmuting device {} now that it is excluded", id);
+            if let Err(err) = self.mute(id, false) {
+                error!("Failed to unmute excluded audio device {}: {}", id, err);
+            }
+        }
     }
 
     fn is_muted(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
@@ -546,6 +665,11 @@ impl<B: AudioBackend> MicController<B> {
             }
         } else {
             self.volume_fallback_devices.remove(&audio_device_id);
+            // A successful write may take effect even if readback is delayed or fails.
+            // Retain ownership so exclusion/exit can restore this initially live input.
+            if state && was_muted == Some(false) {
+                self.native_muted_devices.insert(audio_device_id);
+            }
             if !self.wait_for_device_state(audio_device_id, state)? {
                 return Err(anyhow!(
                     "audio device {} did not reach requested mute state {} after native mute set",
@@ -553,9 +677,7 @@ impl<B: AudioBackend> MicController<B> {
                     state
                 ));
             }
-            if state && was_muted == Some(false) {
-                self.native_muted_devices.insert(audio_device_id);
-            } else if !state {
+            if !state {
                 self.native_muted_devices.remove(&audio_device_id);
             }
         }
@@ -603,7 +725,8 @@ impl<B: AudioBackend> MicController<B> {
         } else {
             let restore_vol = self
                 .saved_volumes
-                .remove(&audio_device_id)
+                .get(&audio_device_id)
+                .copied()
                 .filter(|volume| !is_volume_muted(*volume))
                 .unwrap_or(1.0_f32);
             trace!(
@@ -627,6 +750,7 @@ impl<B: AudioBackend> MicController<B> {
                     audio_device_id
                 ));
             }
+            self.saved_volumes.remove(&audio_device_id);
             self.volume_fallback_devices.remove(&audio_device_id);
         }
         Ok(true)
@@ -745,6 +869,7 @@ mod tests {
 
     #[derive(Clone)]
     struct Device {
+        uid: String,
         name: String,
         input: bool,
         mute: Option<bool>,
@@ -752,14 +877,17 @@ mod tests {
         fail_set_mute: bool,
         fail_set_volume: bool,
         ignore_set_mute: bool,
+        stale_mute_readback: bool,
     }
 
     impl Device {
         fn native(name: &str, muted: bool) -> Self {
             Self {
+                uid: String::new(),
                 name: name.to_string(),
                 input: true,
                 mute: Some(muted),
+                stale_mute_readback: false,
                 volume: Some(1.0),
                 fail_set_mute: false,
                 fail_set_volume: false,
@@ -769,9 +897,11 @@ mod tests {
 
         fn fallback(name: &str, volume: f32) -> Self {
             Self {
+                uid: String::new(),
                 name: name.to_string(),
                 input: true,
                 mute: None,
+                stale_mute_readback: false,
                 volume: Some(volume),
                 fail_set_mute: false,
                 fail_set_volume: false,
@@ -781,9 +911,11 @@ mod tests {
 
         fn no_control(name: &str) -> Self {
             Self {
+                uid: String::new(),
                 name: name.to_string(),
                 input: true,
                 mute: None,
+                stale_mute_readback: false,
                 volume: None,
                 fail_set_mute: false,
                 fail_set_volume: false,
@@ -803,7 +935,13 @@ mod tests {
         fn with_devices(devices: Vec<(AudioDeviceID, Device)>) -> Self {
             let default_input = devices.first().map(|(id, _)| *id);
             let ids = devices.iter().map(|(id, _)| *id).collect();
-            let devices = devices.into_iter().collect();
+            let devices = devices
+                .into_iter()
+                .map(|(id, mut device)| {
+                    device.uid = format!("uid-{id}");
+                    (id, device)
+                })
+                .collect();
             Self {
                 devices,
                 ids,
@@ -833,12 +971,21 @@ mod tests {
             Ok(self.device(audio_device_id)?.name.clone())
         }
 
+        fn device_uid(&self, audio_device_id: AudioDeviceID) -> Result<String> {
+            Ok(self.device(audio_device_id)?.uid.clone())
+        }
+
         fn has_input_channels(&self, audio_device_id: AudioDeviceID) -> Result<bool> {
             Ok(self.device(audio_device_id)?.input)
         }
 
         fn get_mute(&self, audio_device_id: AudioDeviceID) -> Result<Option<bool>> {
-            Ok(self.device(audio_device_id)?.mute)
+            let device = self.device(audio_device_id)?;
+            Ok(if device.stale_mute_readback {
+                Some(false)
+            } else {
+                device.mute
+            })
         }
 
         fn set_mute(&mut self, audio_device_id: AudioDeviceID, state: bool) -> Result<Option<()>> {
@@ -883,9 +1030,9 @@ mod tests {
 
     #[test]
     fn test_mic_controller_new() {
-        // Should succeed (even if no input devices)
-        let result = MicController::new();
-        assert!(result.is_ok());
+        // Read-only smoke check of real CoreAudio enumeration, including UIDs.
+        let controller = MicController::new(&[]).unwrap();
+        controller.input_devices().unwrap();
     }
 
     #[test]
@@ -987,6 +1134,120 @@ mod tests {
         assert!(result.is_err());
         assert!(!controller.muted);
         assert!(controller.should_enforce_mute());
+    }
+
+    #[test]
+    fn unresponsive_device_requires_explicit_exclusion() {
+        let mut ignoring = Device::native("Microsoft Teams Audio", false);
+        ignoring.ignore_set_mute = true;
+        let backend =
+            FakeBackend::with_devices(vec![(1, Device::native("Built-in", false)), (2, ignoring)]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+
+        let result = controller.mute_all(true);
+
+        assert!(result.is_err());
+        assert!(!controller.muted);
+
+        controller.set_excluded_devices(&["uid-2".to_string()]);
+        controller.mute_all(true).unwrap();
+        assert!(controller.muted);
+
+        controller.set_excluded_devices(&[]);
+        assert!(!controller.muted);
+        assert!(controller.mute_all(true).is_err());
+        assert!(!controller.muted);
+    }
+
+    #[test]
+    fn exclusion_tracks_uid_not_name_or_runtime_id() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("USB Microphone", false)),
+            (2, Device::native("USB Microphone", false)),
+        ]);
+        let excluded = vec!["uid-2".to_string()];
+        let mut controller = MicController::with_backend_excluding(backend, &excluded).unwrap();
+
+        controller.mute_all(true).unwrap();
+
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().mute, Some(false));
+
+        // Reconnect the excluded device under a new runtime ID and display name.
+        let mut reconnected = controller.backend.devices.remove(&2).unwrap();
+        reconnected.name = "Renamed Microphone".to_string();
+        controller.backend.devices.insert(3, reconnected);
+        controller.backend.ids = vec![1, 3];
+        controller.mute_all(true).unwrap();
+        assert!(controller.muted);
+        assert_eq!(controller.backend.device(3).unwrap().mute, Some(false));
+
+        controller.set_excluded_devices(&[]);
+        assert!(!controller.muted);
+        controller.mute_all(true).unwrap();
+        assert_eq!(controller.backend.device(3).unwrap().mute, Some(true));
+    }
+
+    #[test]
+    fn excluding_a_native_device_restores_mute_after_delayed_readback() {
+        let mut device = Device::native("USB Microphone", false);
+        device.stale_mute_readback = true;
+        let backend = FakeBackend::with_devices(vec![(1, device)]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+
+        // The native write takes effect, but readback still reports the old state.
+        assert!(controller.mute_all(true).is_err());
+        assert!(!controller.muted);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+
+        // Later polls see the actual state; they must not lose app ownership.
+        controller
+            .backend
+            .device_mut(1)
+            .unwrap()
+            .stale_mute_readback = false;
+        controller.mute_all(true).unwrap();
+        controller.set_excluded_devices(&["uid-1".into()]);
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(false));
+        assert!(!controller.muted);
+    }
+
+    #[test]
+    fn excluding_a_volume_device_retains_restore_state_after_failure() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Built-in", false)),
+            (2, Device::fallback("USB Microphone", 0.35)),
+        ]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+        controller.backend.device_mut(2).unwrap().fail_set_volume = true;
+
+        controller.set_excluded_devices(&["uid-2".to_string()]);
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+
+        // A transient restore failure must not strand the excluded input at zero
+        // or forget its original level when exit retries the restoration.
+        controller.backend.device_mut(2).unwrap().fail_set_volume = false;
+        controller.restore_on_exit().unwrap();
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.35));
+    }
+
+    #[test]
+    fn excluding_devices_preserves_preexisting_mute_and_restores_owned_volume() {
+        let backend = FakeBackend::with_devices(vec![
+            (1, Device::native("Already muted", true)),
+            (2, Device::fallback("Already silent", 0.0)),
+            (3, Device::fallback("USB Microphone", 0.35)),
+        ]);
+        let mut controller = MicController::with_backend(backend).unwrap();
+        controller.mute_all(true).unwrap();
+
+        controller.set_excluded_devices(&["uid-1".into(), "uid-2".into(), "uid-3".into()]);
+        assert!(!controller.muted); // No managed input remains.
+        assert_eq!(controller.backend.device(1).unwrap().mute, Some(true));
+        assert_eq!(controller.backend.device(2).unwrap().volume, Some(0.0));
+        assert_eq!(controller.backend.device(3).unwrap().volume, Some(0.35));
     }
 
     #[test]

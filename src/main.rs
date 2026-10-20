@@ -51,7 +51,7 @@ fn main() {
 
     let app_vars = AppVars::new();
 
-    let controller = MicController::new().unwrap();
+    let controller = MicController::new(&settings.excluded_devices).unwrap();
     let mic_muted = controller.muted;
     let controller = arc_lock(controller);
     trace!("Mic controller initialized {:?}", controller);
